@@ -176,7 +176,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(scaleName.uppercased())
                             .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        Text("STAGE 0\(activeObservationStop + 1) OF 05")
+                        Text("STAGE 0\(activeObservationStop + 1) OF 06")
                             .font(.system(size: 8, weight: .medium, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -250,16 +250,22 @@ struct ContentView: View {
     private var inspectorMetrics: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionLabel("LIVE MEASURES")
-            if store.observationZoom >= 64 {
+            if store.observationZoom >= 160 {
                 observerMetric("Spinor norm Σρ", value: quantumNormLabel, tint: .cyan, values: store.history.map(\.quantumNorm))
                 observerMetric("Mean stored E", value: decimal(store.snapshot.metrics.energyDensity), tint: .yellow, values: store.history.map(\.metrics.energyDensity))
                 observerMetric("∇B × membrane", value: decimal(store.snapshot.metrics.boundaryCoherence), tint: .mint, values: store.history.map(\.metrics.boundaryCoherence))
                 observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .pink, values: store.history.map { Double($0.organismCount) })
-            } else if store.observationZoom >= 24 {
+            } else if store.observationZoom >= 64 {
                 observerMetric("Mean stored E", value: decimal(store.snapshot.metrics.energyDensity), tint: .yellow, values: store.history.map(\.metrics.energyDensity))
                 observerMetric("∇B × membrane", value: decimal(store.snapshot.metrics.boundaryCoherence), tint: .mint, values: store.history.map(\.metrics.boundaryCoherence))
                 observerMetric("Mean |ΔB|", value: decimal(store.snapshot.metrics.temporalActivity), tint: .orange, values: store.history.map(\.metrics.temporalActivity))
-                observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .pink, values: store.history.map { Double($0.organismCount) })
+                observerMetric("Spinor norm Σρ", value: quantumNormLabel, tint: .cyan, values: store.history.map(\.quantumNorm))
+            } else if store.observationZoom >= 18 {
+                let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
+                observerMetric("Population cells", value: "\(store.snapshot.cellCount) in \(tissueCount) organisms", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Mean cellular ATP", value: decimal(store.snapshot.meanCellATP), tint: .yellow, values: store.history.map(\.meanCellATP))
+                observerMetric("Membrane integrity", value: decimal(store.snapshot.meanCellIntegrity), tint: .mint, values: store.history.map(\.meanCellIntegrity))
+                observerMetric("Dividing / stressed", value: "\(store.snapshot.dividingCellCount) / \(decimal(store.snapshot.meanCellStress))", tint: .pink, values: store.history.map { Double($0.dividingCellCount) })
             } else if store.observationZoom >= 6 {
                 observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Lineage bins", value: "\(lineageEstimate)/32", tint: .pink, values: store.history.map { Double($0.organismLineageCount) })
@@ -287,7 +293,7 @@ struct ContentView: View {
             .frame(width: 132, alignment: .leading)
 
             observationScaleRail
-                .frame(maxWidth: 470)
+                .frame(maxWidth: 520)
 
             Spacer(minLength: 0)
 
@@ -321,6 +327,9 @@ struct ContentView: View {
         HStack(spacing: 0) {
             ForEach(Array(observationStops.enumerated()), id: \.element.id) { index, stop in
                 Button {
+                    if (index == 3 || index == 4), store.followedAgentID == nil {
+                        store.followRandomOrganism()
+                    }
                     store.zoom(to: stop.magnification, aspect: 1)
                 } label: {
                     VStack(spacing: 5) {
@@ -331,7 +340,7 @@ struct ContentView: View {
                             .font(.system(size: 9, weight: .semibold, design: .rounded))
                     }
                     .foregroundStyle(index == activeObservationStop ? scaleAccent : Color.secondary)
-                    .frame(width: 72, height: 54)
+                    .frame(width: 64, height: 54)
                     .background(
                         index == activeObservationStop ? scaleAccent.opacity(0.11) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 6)
@@ -457,9 +466,10 @@ struct ContentView: View {
     private var worldHeadline: String {
         let zoom = store.observationZoom
         if zoom >= 512 { return "Two-component coined quantum walk" }
-        if zoom >= 64 { return "Probability density and phase potential" }
-        if zoom >= 24 { return "Reaction-diffusion and membrane formation" }
-        if zoom >= 6 { return "Persistent agents with inherited traits" }
+        if zoom >= 160 { return "Probability density, phase, and probability current" }
+        if zoom >= 64 { return "Molecular reaction and spinor coupling" }
+        if zoom >= 18 { return "Cell mechanics, metabolism, signaling, and division" }
+        if zoom >= 6 { return "Multicellular organisms with inherited traits" }
         return "Spatial eco-evolutionary dynamics"
     }
 
@@ -469,16 +479,19 @@ struct ContentView: View {
         if zoom >= 512 {
             return "ψ = (ψ₀, ψ₁) is stored as four real components on a 1024² periodic lattice. Each update applies a local coin rotation and alternates conditional shifts along x and y. Measured Σρ = \(quantumNormValue)."
         }
-        if zoom >= 64 {
+        if zoom >= 160 {
             return "ρ = |ψ₀|² + |ψ₁|². Component overlap contributes to the catalyst source term; local resource, biomass, membrane, toxin, and inherited trait fields modify the coin angle and phase potential."
         }
-        if zoom >= 24 {
+        if zoom >= 64 {
             return "The 193² lattice stores resource A, biomass B, energy E, membrane M, resource B, detritus, toxin, and catalyst. Founder nucleation requires B ≥ 0.055, E ≥ 0.006, M ≥ 0.003, and catalyst ≥ 0.030 at a local score maximum."
+        }
+        if zoom >= 18 {
+            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Each cell stores local position and velocity, ATP, biomass, cell-cycle phase, membrane integrity, adhesion, contractility, two uptake phenotypes, two morphogens, stress, and apoptosis activation. Contact mechanics, metabolite exchange, contact inhibition, division, and death are evaluated on the GPU."
         }
         if zoom >= 6 {
             return life == 0
                 ? "No agent slot is occupied. Nucleation remains gated by the measured chemistry thresholds, not by elapsed time."
-                : "Each occupied slot stores position, velocity, 12 inherited trait values, energy, biomass, age, and generation. Steering combines resource gradients, hazard avoidance, separation, prey pursuit, and threat avoidance."
+                : "Each organism owns up to 24 persistent cells. Organism energy and survival receive cellular viability and stress feedback; steering combines resource gradients, hazard avoidance, separation, prey pursuit, and threat avoidance."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
         return "\(life)/384 agent slots are occupied; \(lineageEstimate)/32 agent-lineage bins are represented; occupied-cell fraction is \(occupied). Mean free-resource density is \(resourceLabel), and \(store.snapshot.hunterCount) agents exceed the predation-trait threshold."
@@ -488,8 +501,9 @@ struct ContentView: View {
         switch activeObservationStop {
         case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
-        case 2: "A threshold-qualified local maximum claims agent slot 0 using atomic compare-and-exchange; local trait fields initialize its 12 inherited values."
-        case 3: "Reproduction requires E ≥ 1.06 and age ≥ 720 steps. Offspring inherit mutated trait vectors; local energy balance determines survival and reproduction."
+        case 2: "Reaction fields determine cellular resource uptake and stress; spinor overlap modifies catalyst and energy production in the same persistent environment."
+        case 3: "Cell ATP and membrane integrity alter organism maintenance and damage. Contact inhibition regulates cell-cycle progression; division and apoptosis alter morphology."
+        case 4: "Reproduction requires E ≥ 1.06 and age ≥ 720 steps. Offspring inherit mutated trait vectors and initialize a seven-cell founder tissue."
         default: "Resources, detritus, toxin, rock permeability, predation, and crowding generate spatially varying differential fitness without a global agent fitness function."
         }
     }
@@ -498,8 +512,9 @@ struct ContentView: View {
         switch activeObservationStop {
         case 0: .cyan
         case 1: .pink
-        case 2: .mint
-        case 3: .orange
+        case 2: .purple
+        case 3: .mint
+        case 4: .orange
         default: .green
         }
     }
@@ -565,8 +580,9 @@ struct ContentView: View {
     private var scaleName: String {
         let zoom = store.observationZoom
         if zoom < 6 { return "Ecological field" }
-        if zoom < 24 { return "Agent state" }
-        if zoom < 64 { return "Reaction field" }
+        if zoom < 18 { return "Organism morphology" }
+        if zoom < 64 { return "Cellular tissue" }
+        if zoom < 160 { return "Molecular reaction field" }
         if zoom < 512 { return "Wave observables" }
         return "Spinor field"
     }
@@ -574,9 +590,10 @@ struct ContentView: View {
     private var observationStops: [ObservationStop] {
         [
             ObservationStop(label: "Spinor", symbol: "atom", magnification: 900),
-            ObservationStop(label: "Wave", symbol: "waveform.path", magnification: 160),
-            ObservationStop(label: "Reaction", symbol: "scope", magnification: 36),
-            ObservationStop(label: "Agent", symbol: "microbe.fill", magnification: 10),
+            ObservationStop(label: "Wave", symbol: "waveform.path", magnification: 240),
+            ObservationStop(label: "Molecule", symbol: "scope", magnification: 96),
+            ObservationStop(label: "Cell", symbol: "circle.hexagonpath.fill", magnification: 36),
+            ObservationStop(label: "Organism", symbol: "microbe.fill", magnification: 10),
             ObservationStop(label: "Ecology", symbol: "circle.hexagongrid.fill", magnification: 1)
         ]
     }
@@ -584,10 +601,11 @@ struct ContentView: View {
     private var activeObservationStop: Int {
         let zoom = store.observationZoom
         if zoom >= 512 { return 0 }
-        if zoom >= 64 { return 1 }
-        if zoom >= 24 { return 2 }
-        if zoom >= 6 { return 3 }
-        return 4
+        if zoom >= 160 { return 1 }
+        if zoom >= 64 { return 2 }
+        if zoom >= 18 { return 3 }
+        if zoom >= 6 { return 4 }
+        return 5
     }
 
     private var statusColor: Color {
@@ -603,11 +621,14 @@ struct ContentView: View {
         if store.observationZoom >= 512 {
             return [("Spin +", .cyan), ("Spin -", .orange), ("Current", .white), ("Nodes", .purple)]
         }
-        if store.observationZoom >= 64 {
+        if store.observationZoom >= 160 {
             return [("Probability", .cyan), ("Phase", .pink), ("Current", .white), ("Potential", .mint)]
         }
-        if store.observationZoom >= 24 {
+        if store.observationZoom >= 64 {
             return [("Membrane", .mint), ("Energy", .yellow), ("Genome", .pink), ("Potential", .cyan)]
+        }
+        if store.observationZoom >= 18 {
+            return [("Membrane", .mint), ("ATP", .yellow), ("Nucleus", .pink), ("Junction", .cyan), ("Stress", .red), ("Apoptosis", .purple)]
         }
         if store.displayMode == .ecology, store.observationZoom < 6 {
             return [("Life", .cyan), ("Nutrient", .green), ("Mineral", .yellow), ("Rock", .gray), ("Toxin", .red), ("Hunt", .orange)]
@@ -629,7 +650,9 @@ struct ContentView: View {
 
     private var legendTitle: String {
         store.observationZoom >= 512 ? "Spinor components" :
-            store.observationZoom >= 64 ? "Quantum field" : store.displayMode.label
+            store.observationZoom >= 160 ? "Quantum observables" :
+            store.observationZoom >= 64 ? "Molecular fields" :
+            store.observationZoom >= 18 ? "Cell state" : store.displayMode.label
     }
 
     private func percent(_ value: Double) -> String {

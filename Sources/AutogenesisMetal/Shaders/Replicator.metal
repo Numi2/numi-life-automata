@@ -36,10 +36,13 @@ constant uint metricCount = 32;
 constant float metricScale = 4096.0;
 constant uint quantumGridSize = 1024u;
 constant uint maxAgentCount = 384u;
+constant uint cellsPerAgent = 24u;
+constant uint maxCellCount = maxAgentCount * cellsPerAgent;
 
 struct AgentState {
     float2 position;
     float2 velocity;
+    float4 behavior;
     float4 geneA;
     float4 geneB;
     float4 geneC;
@@ -47,6 +50,32 @@ struct AgentState {
     float biomass;
     float age;
     uint generation;
+};
+
+struct CellState {
+    float2 position;
+    float2 velocity;
+    // ATP, biomass, cell-cycle phase, membrane integrity.
+    float4 physiology;
+    // Adhesion, contractility, resource-A uptake, resource-B uptake.
+    float4 phenotype;
+    // Morphogen A, morphogen B, stress, apoptosis activation.
+    float4 signals;
+    // Nearest-contact direction, metabolite exchange, contact conflict.
+    float4 interaction;
+};
+
+struct CellAggregate {
+    // Active cell count, mean ATP, mean membrane integrity, mean stress.
+    float4 physiology;
+    // Centroid, root-mean-square radius, dividing-cell fraction.
+    float4 morphology;
+};
+
+struct AgentObservationRecord {
+    float2 position;
+    uint generation;
+    uint flags;
 };
 
 inline uint hash32(uint value) {
@@ -731,9 +760,22 @@ kernel void applyBrush(
     state.write(cell, gid, 0);
 }
 
-inline void addMetric(device atomic_uint* metrics, uint world, uint metric, float value) {
+inline void addMetric(
+    threadgroup atomic_uint* metrics,
+    uint metric,
+    float value,
+    uint laneIndex
+) {
     uint fixedValue = uint(clamp(value, 0.0, 1.0) * metricScale);
-    atomic_fetch_add_explicit(&metrics[world * metricCount + metric], fixedValue, memory_order_relaxed);
+    uint simdValue = simd_sum(fixedValue);
+    if (laneIndex == 0u) {
+        atomic_fetch_add_explicit(&metrics[metric], simdValue, memory_order_relaxed);
+    }
+}
+
+inline void addBinnedMetric(threadgroup atomic_uint* metrics, uint metric, float value) {
+    uint fixedValue = uint(clamp(value, 0.0, 1.0) * metricScale);
+    atomic_fetch_add_explicit(&metrics[metric], fixedValue, memory_order_relaxed);
 }
 
 kernel void measureWorld(
@@ -745,8 +787,17 @@ kernel void measureWorld(
     texture2d_array<float, access::read> genomeC [[texture(5)]],
     device atomic_uint* metrics [[buffer(0)]],
     constant SimulationUniforms& uniforms [[buffer(1)]],
-    uint3 gid [[thread_position_in_grid]]
+    uint3 gid [[thread_position_in_grid]],
+    uint threadIndex [[thread_index_in_threadgroup]],
+    uint laneIndex [[thread_index_in_simdgroup]],
+    uint3 threadsPerThreadgroup [[threads_per_threadgroup]]
 ) {
+    threadgroup atomic_uint groupMetrics[metricCount];
+    uint groupThreadCount = threadsPerThreadgroup.x * threadsPerThreadgroup.y * threadsPerThreadgroup.z;
+    for (uint metric = threadIndex; metric < metricCount; metric += groupThreadCount) {
+        atomic_store_explicit(&groupMetrics[metric], 0u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
     int2 p = int2(gid.xy);
     uint layer = gid.z;
@@ -793,35 +844,115 @@ kernel void measureWorld(
     float trophicActivity = active * saturate(niche.w * 0.7 + niche.z * localChemistry.y * 0.8 + localChemistry.z * 0.2);
     uint lineageBin = min(uint(fract(genomeB.read(gid.xy, layer).w) * 16.0), 15u);
 
-    addMetric(metrics, layer, 0, min(current.y, 1.0));
-    addMetric(metrics, layer, 1, min(current.x * 0.5, 1.0));
-    addMetric(metrics, layer, 2, min(current.z, 1.0));
-    addMetric(metrics, layer, 3, active);
-    addMetric(metrics, layer, 4, activity);
-    addMetric(metrics, layer, 5, coherence);
-    addMetric(metrics, layer, 6, multiscale * active);
-    addMetric(metrics, layer, 7, recovered);
-    addMetric(metrics, layer, 8, recoveryTarget);
-    addMetric(metrics, layer, 9, geneDifference);
-    addMetric(metrics, layer, 10, uv.x * min(current.y, 1.0));
-    addMetric(metrics, layer, 11, uv.y * min(current.y, 1.0));
-    addMetric(metrics, layer, 12, nicheDifference);
-    addMetric(metrics, layer, 13, specialization);
-    addMetric(metrics, layer, 14, trophicActivity);
-    addMetric(metrics, layer, 15, active * saturate(current.x));
-    addMetric(metrics, layer, 16 + lineageBin, active);
+    addMetric(groupMetrics, 0, min(current.y, 1.0), laneIndex);
+    addMetric(groupMetrics, 1, min(current.x * 0.5, 1.0), laneIndex);
+    addMetric(groupMetrics, 2, min(current.z, 1.0), laneIndex);
+    addMetric(groupMetrics, 3, active, laneIndex);
+    addMetric(groupMetrics, 4, activity, laneIndex);
+    addMetric(groupMetrics, 5, coherence, laneIndex);
+    addMetric(groupMetrics, 6, multiscale * active, laneIndex);
+    addMetric(groupMetrics, 7, recovered, laneIndex);
+    addMetric(groupMetrics, 8, recoveryTarget, laneIndex);
+    addMetric(groupMetrics, 9, geneDifference, laneIndex);
+    addMetric(groupMetrics, 10, uv.x * min(current.y, 1.0), laneIndex);
+    addMetric(groupMetrics, 11, uv.y * min(current.y, 1.0), laneIndex);
+    addMetric(groupMetrics, 12, nicheDifference, laneIndex);
+    addMetric(groupMetrics, 13, specialization, laneIndex);
+    addMetric(groupMetrics, 14, trophicActivity, laneIndex);
+    addMetric(groupMetrics, 15, active * saturate(current.x), laneIndex);
+    addBinnedMetric(groupMetrics, 16 + lineageBin, active);
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint metric = threadIndex; metric < metricCount; metric += groupThreadCount) {
+        atomic_fetch_add_explicit(
+            &metrics[layer * metricCount + metric],
+            atomic_load_explicit(&groupMetrics[metric], memory_order_relaxed),
+            memory_order_relaxed
+        );
+    }
+}
+
+inline CellState emptyCell() {
+    CellState cell;
+    cell.position = float2(0.0);
+    cell.velocity = float2(0.0);
+    cell.physiology = float4(0.0);
+    cell.phenotype = float4(0.0);
+    cell.signals = float4(0.0);
+    cell.interaction = float4(0.0);
+    return cell;
+}
+
+inline CellState founderCell(AgentState agent, uint localIndex, uint seed) {
+    CellState cell;
+    float angle = localIndex == 0u ? 0.0 :
+        (float(localIndex - 1u) / 6.0) * 2.0 * M_PI_F + signedRandom(seed + 11u) * 0.08;
+    float radius = localIndex == 0u ? 0.0 : 0.31 + signedRandom(seed + localIndex * 17u) * 0.018;
+    cell.position = float2(cos(angle), sin(angle)) * radius;
+    cell.velocity = float2(0.0);
+    cell.physiology = float4(
+        clamp(0.58 + agent.energy * 0.20 + signedRandom(seed + localIndex * 23u) * 0.025, 0.42, 0.92),
+        clamp(0.70 + agent.biomass * 0.18, 0.68, 0.90),
+        random01(seed + localIndex * 29u) * 0.18,
+        clamp(0.76 + agent.geneA.w * 0.20, 0.70, 0.98)
+    );
+    float centrality = 1.0 - saturate(radius / 0.62);
+    cell.phenotype = float4(
+        clamp(0.30 + agent.geneA.y * 0.58, 0.0, 1.0),
+        clamp(0.18 + agent.geneA.z * 0.64, 0.0, 1.0),
+        clamp(0.18 + agent.geneC.x * 0.74, 0.0, 1.0),
+        clamp(0.18 + agent.geneC.y * 0.74, 0.0, 1.0)
+    );
+    cell.signals = float4(
+        centrality,
+        1.0 - centrality,
+        0.02 + random01(seed + localIndex * 31u) * 0.025,
+        0.0
+    );
+    cell.interaction = float4(0.0);
+    return cell;
+}
+
+inline void seedOrganismCells(
+    device CellState* cells,
+    device atomic_uint* cellOccupancy,
+    device CellAggregate* aggregates,
+    uint owner,
+    AgentState agent,
+    uint seed
+) {
+    uint base = owner * cellsPerAgent;
+    const uint founderCellCount = 7u;
+    for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+        uint index = base + localIndex;
+        if (localIndex < founderCellCount) {
+            cells[index] = founderCell(agent, localIndex, seed);
+            atomic_store_explicit(&cellOccupancy[index], 1u, memory_order_relaxed);
+        } else {
+            cells[index] = emptyCell();
+            atomic_store_explicit(&cellOccupancy[index], 0u, memory_order_relaxed);
+        }
+    }
+    CellAggregate aggregate;
+    aggregate.physiology = float4(float(founderCellCount), 0.68, 0.88, 0.03);
+    aggregate.morphology = float4(0.0, 0.0, 0.29, 0.0);
+    aggregates[owner] = aggregate;
 }
 
 kernel void initializeAgents(
     device AgentState* agents [[buffer(0)]],
     device atomic_uint* occupancy [[buffer(1)]],
     constant SimulationUniforms& uniforms [[buffer(2)]],
+    device CellState* cells [[buffer(3)]],
+    device atomic_uint* cellOccupancy [[buffer(4)]],
+    device CellAggregate* cellAggregates [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxAgentCount) { return; }
     AgentState agent;
     agent.position = float2(0.5);
     agent.velocity = float2(0.0);
+    agent.behavior = float4(0.0);
     agent.geneA = float4(0.76, 0.66, 0.48, 0.72);
     agent.geneB = float4(0.58, 0.032, 0.72, 0.42);
     agent.geneC = float4(0.72, 0.68, 0.34, 0.06);
@@ -831,12 +962,40 @@ kernel void initializeAgents(
     agent.generation = 0u;
     agents[gid] = agent;
     atomic_store_explicit(&occupancy[gid], 0u, memory_order_relaxed);
+    uint base = gid * cellsPerAgent;
+    for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+        cells[base + localIndex] = emptyCell();
+        atomic_store_explicit(&cellOccupancy[base + localIndex], 0u, memory_order_relaxed);
+    }
+    CellAggregate aggregate;
+    aggregate.physiology = float4(0.0);
+    aggregate.morphology = float4(0.0);
+    cellAggregates[gid] = aggregate;
+}
+
+kernel void collectAgentObservations(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* occupancy [[buffer(1)]],
+    device AgentObservationRecord* observations [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= maxAgentCount) { return; }
+    uint occupied = atomic_load_explicit(&occupancy[gid], memory_order_relaxed);
+    AgentState agent = agents[gid];
+    AgentObservationRecord observation;
+    observation.position = agent.position;
+    observation.generation = agent.generation;
+    observation.flags = occupied != 0u ? (1u | (agent.geneC.w >= 0.08 ? 2u : 0u)) : 0u;
+    observations[gid] = observation;
 }
 
 kernel void nucleateAutogenicFounder(
     device AgentState* agents [[buffer(0)]],
     device atomic_uint* occupancy [[buffer(1)]],
     constant SimulationUniforms& uniforms [[buffer(2)]],
+    device CellState* cells [[buffer(3)]],
+    device atomic_uint* cellOccupancy [[buffer(4)]],
+    device CellAggregate* cellAggregates [[buffer(5)]],
     texture2d_array<float, access::read> state [[texture(0)]],
     texture2d_array<float, access::read> genomeA [[texture(1)]],
     texture2d_array<float, access::read> genomeB [[texture(2)]],
@@ -879,11 +1038,14 @@ kernel void nucleateAutogenicFounder(
     float spatialScale = 1.0 / max(uniforms.worldScale, 1.0);
     founder.velocity = float2(cos(heading), sin(heading)) *
         (0.000020 + 0.000050 * founder.geneB.z) * spatialScale;
+    founder.behavior = float4(0.0);
     founder.energy = clamp(0.62 + localState.z * 8.0, 0.62, 1.02);
     founder.biomass = clamp(0.42 + localState.y * 1.8, 0.42, 0.70);
     founder.age = 0.0;
     founder.generation = 0u;
     agents[0] = founder;
+    seedOrganismCells(cells, cellOccupancy, cellAggregates, 0u, founder,
+        hash32(gid.x * 2246822519u ^ gid.y * 3266489917u ^ uniforms.step));
 }
 
 kernel void evolveAgents(
@@ -891,6 +1053,7 @@ kernel void evolveAgents(
     device AgentState* agentsOut [[buffer(1)]],
     device atomic_uint* occupancy [[buffer(2)]],
     constant SimulationUniforms& uniforms [[buffer(3)]],
+    device const CellAggregate* cellAggregates [[buffer(4)]],
     texture2d_array<float, access::read> state [[texture(0)]],
     texture2d_array<float, access::read> ecology [[texture(1)]],
     texture2d_array<float, access::read> environment [[texture(2)]],
@@ -974,6 +1137,18 @@ kernel void evolveAgents(
         }
     }
 
+    float preySignal = nearestPrey < preySenseRadius
+        ? saturate(1.0 - nearestPrey / preySenseRadius)
+        : 0.0;
+    float threatSignal = nearestThreat < threatSenseRadius
+        ? saturate(1.0 - nearestThreat / threatSenseRadius)
+        : 0.0;
+    agent.behavior = float4(
+        preyVector * preySignal,
+        saturate(preyOpportunity * 8.0),
+        saturate(incomingAttack * 8.0 + threatSignal * 0.35)
+    );
+
     float2 inheritedHeading = normalize(float2(
         cos(agent.geneB.w * 2.0 * M_PI_F), sin(agent.geneB.w * 2.0 * M_PI_F)
     ));
@@ -1009,17 +1184,26 @@ kernel void evolveAgents(
         localState.x * agent.geneC.x + localEcology.x * agent.geneC.y + localEcology.y * agent.geneC.z
     ) / (1.0 + crowding * 0.72);
     float predationGain = 0.00042 * agent.geneC.w * preyOpportunity;
+    CellAggregate cellAggregate = cellAggregates[gid];
+    float cellularViability = cellAggregate.physiology.x > 0.5
+        ? saturate(cellAggregate.physiology.y * cellAggregate.physiology.z)
+        : 0.0;
     float maintenance = 0.000050 *
         (0.72 + agent.biomass * 0.65 + speed / max(cruiseSpeed, 0.000001) * 0.42) +
         crowding * 0.000014;
+    maintenance *= mix(1.04, 0.96, cellularViability);
     float environmentalDamage = 0.00034 * localEnvironment.z * (1.0 - agent.geneA.w) +
-        0.00046 * localEnvironment.w + 0.00030 * incomingAttack;
+        0.00046 * localEnvironment.w + 0.00030 * incomingAttack +
+        cellAggregate.physiology.w * 0.000025;
     agent.energy = clamp(agent.energy + resourceGain + predationGain - maintenance - environmentalDamage, 0.0, 1.45);
     agent.biomass = clamp(agent.biomass + (agent.energy - 0.55) * 0.00008 - environmentalDamage * 0.18, 0.12, 1.0);
     agent.age += 1.0;
-    if (agent.energy <= 0.0001 || agent.biomass <= 0.121 || agent.age > 180000.0) {
+    bool cellularFailure = agent.age > 240.0 && cellAggregate.physiology.x < 0.5;
+    if (agent.energy <= 0.0001 || agent.biomass <= 0.121 ||
+        agent.age > 180000.0 || cellularFailure) {
         agent.energy = 0.0;
         agent.biomass = 0.0;
+        agent.behavior = float4(0.0);
         atomic_store_explicit(&occupancy[gid], 0u, memory_order_relaxed);
     }
     agentsOut[gid] = agent;
@@ -1029,6 +1213,9 @@ kernel void spawnAgents(
     device AgentState* agents [[buffer(0)]],
     device atomic_uint* occupancy [[buffer(1)]],
     constant SimulationUniforms& uniforms [[buffer(2)]],
+    device CellState* cells [[buffer(3)]],
+    device atomic_uint* cellOccupancy [[buffer(4)]],
+    device CellAggregate* cellAggregates [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxAgentCount || atomic_load_explicit(&occupancy[gid], memory_order_relaxed) == 0u) { return; }
@@ -1069,6 +1256,7 @@ kernel void spawnAgents(
     child.position = fract(parent.position + offset + 1.0);
     child.velocity = normalize(offset) *
         (0.000020 + 0.000050 * child.geneB.z) * spatialScale;
+    child.behavior = float4(0.0);
     child.energy = 0.34;
     child.biomass = 0.38;
     child.age = 0.0;
@@ -1077,12 +1265,16 @@ kernel void spawnAgents(
     parent.age = 0.0;
     agents[gid] = parent;
     agents[target] = child;
+    seedOrganismCells(cells, cellOccupancy, cellAggregates, target, child, birthSeed ^ 0xa511e9b3u);
 }
 
 kernel void injectFounder(
     device AgentState* agents [[buffer(0)]],
     device atomic_uint* occupancy [[buffer(1)]],
     constant SimulationUniforms& uniforms [[buffer(2)]],
+    device CellState* cells [[buffer(3)]],
+    device atomic_uint* cellOccupancy [[buffer(4)]],
+    device CellAggregate* cellAggregates [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid != 0u) { return; }
@@ -1110,11 +1302,292 @@ kernel void injectFounder(
     float spatialScale = 1.0 / max(uniforms.worldScale, 1.0);
     founder.velocity = float2(cos(heading), sin(heading)) *
         (0.000020 + 0.000050 * founder.geneB.z) * spatialScale;
+    founder.behavior = float4(0.0);
     founder.energy = 1.02;
     founder.biomass = 0.66;
     founder.age = 0.0;
     founder.generation = 0u;
     agents[claimed] = founder;
+    seedOrganismCells(cells, cellOccupancy, cellAggregates, claimed, founder, seed ^ 0x63d83595u);
+}
+
+kernel void evolveOrganismCells(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cellsIn [[buffer(2)]],
+    device CellState* cellsOut [[buffer(3)]],
+    device atomic_uint* cellOccupancy [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    texture2d_array<float, access::read> state [[texture(0)]],
+    texture2d_array<float, access::read> ecology [[texture(1)]],
+    texture2d_array<float, access::read> environment [[texture(2)]],
+    texture2d_array<float, access::read> events [[texture(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= maxCellCount) { return; }
+    uint owner = gid / cellsPerAgent;
+    if (atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) {
+        cellsOut[gid] = emptyCell();
+        atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
+        return;
+    }
+    if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) {
+        cellsOut[gid] = cellsIn[gid];
+        return;
+    }
+
+    AgentState agent = agents[owner];
+    CellState cell = cellsIn[gid];
+    uint ownerBase = owner * cellsPerAgent;
+    float2 mechanicalForce = -cell.position * (0.00045 + cell.phenotype.y * 0.00045);
+    float2 contactSignal = float2(0.0);
+    float2 nearestContact = float2(0.0);
+    float nearestDistance = 10.0;
+    float neighborATP = 0.0;
+    float contactCount = 0.0;
+    float contactConflict = 0.0;
+    float adhesion = 0.0;
+    for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+        uint otherIndex = ownerBase + localIndex;
+        if (otherIndex == gid ||
+            atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) == 0u) { continue; }
+        CellState other = cellsIn[otherIndex];
+        float2 delta = other.position - cell.position;
+        float distance = max(length(delta), 0.0001);
+        float2 direction = delta / distance;
+        if (distance < 0.31) {
+            mechanicalForce -= direction * (0.31 - distance) * 0.018;
+        } else if (distance < 0.62) {
+            float pairAdhesion = min(cell.phenotype.x, other.phenotype.x);
+            mechanicalForce += direction * (distance - 0.31) * pairAdhesion * 0.0038;
+        }
+        if (distance < 0.58) {
+            float weight = 1.0 - distance / 0.58;
+            contactSignal += other.signals.xy * weight;
+            neighborATP += other.physiology.x * weight;
+            adhesion += min(cell.phenotype.x, other.phenotype.x) * weight;
+            contactConflict += abs(cell.phenotype.y - other.phenotype.y) * weight;
+            contactCount += weight;
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestContact = direction;
+            }
+        }
+    }
+
+    float inheritedAngle = agent.geneB.w * 2.0 * M_PI_F;
+    float agentSpeed = length(agent.velocity);
+    float2 heading = agentSpeed > 0.000001
+        ? agent.velocity / agentSpeed
+        : float2(cos(inheritedAngle), sin(inheritedAngle));
+    float2 lateral = float2(-heading.y, heading.x);
+    float spatialScale = 1.0 / max(uniforms.worldScale, 1.0);
+    float bodyWorldRadius = (0.012 + 0.0045 * agent.geneB.z + 0.0025 * agent.biomass) * spatialScale;
+    float2 worldPosition = clamp(
+        agent.position + heading * cell.position.x * bodyWorldRadius +
+            lateral * cell.position.y * bodyWorldRadius * 0.72,
+        float2(0.0), float2(1.0)
+    );
+    uint2 coordinate = min(
+        uint2(worldPosition * float2(uniforms.width, uniforms.height)),
+        uint2(uniforms.width - 1u, uniforms.height - 1u)
+    );
+    float4 localState = state.read(coordinate, 0);
+    float4 localEcology = ecology.read(coordinate, 0);
+    float4 localEnvironment = environment.read(coordinate, 0);
+    float4 localEvents = events.read(coordinate, 0);
+
+    float uptake = 0.00022 + 0.00072 * (
+        localState.x * cell.phenotype.z + localEcology.x * cell.phenotype.w +
+        localEcology.y * agent.geneC.z * 0.34
+    );
+    uptake *= 0.62 + agent.energy * 0.38;
+    float maintenance = 0.00046 * (
+        0.62 + cell.physiology.y * 0.48 + cell.phenotype.y * 0.28
+    );
+    float externalStress = saturate(
+        localEnvironment.z * 0.72 + localEnvironment.w * 0.36 + localEcology.z * 0.58 +
+        localEvents.z * 0.24 + max(contactCount - 4.5, 0.0) * 0.08
+    );
+    float atp = clamp(cell.physiology.x + uptake - maintenance - externalStress * 0.00042, 0.0, 1.2);
+    float stress = mix(cell.signals.z, externalStress + (atp < 0.18 ? 0.36 : 0.0), 0.018);
+    float apoptosis = clamp(cell.signals.w + max(stress - 0.72, 0.0) * 0.0024 - 0.00035, 0.0, 1.0);
+    float membraneIntegrity = clamp(
+        cell.physiology.w + (atp - 0.38) * 0.00020 - stress * 0.00030 - apoptosis * 0.00045,
+        0.0, 1.0
+    );
+    float biomass = clamp(cell.physiology.y + (atp - 0.48) * 0.00018, 0.42, 1.08);
+    float contactInhibition = saturate(contactCount / (3.6 + cell.phenotype.x * 1.8));
+    float cycleRate = 0.00054 * smoothstep(0.44, 0.76, atp) *
+        (1.0 - contactInhibition * (0.72 + cell.phenotype.x * 0.20)) *
+        (1.0 - stress);
+    float cycle = clamp(
+        cell.physiology.z + cycleRate - contactInhibition * 0.00022,
+        0.0, 1.2
+    );
+
+    float2 localMorphogens = contactCount > 0.001 ? contactSignal / contactCount : cell.signals.xy;
+    float radialPosition = saturate(length(cell.position) / 0.82);
+    float2 targetMorphogens = float2(1.0 - radialPosition, radialPosition);
+    cell.signals.xy = mix(cell.signals.xy, mix(targetMorphogens, localMorphogens, 0.58), 0.014);
+    cell.signals.zw = float2(stress, apoptosis);
+    float centralProgram = saturate(cell.signals.x - cell.signals.y + 0.5);
+    cell.phenotype.x = mix(cell.phenotype.x,
+        clamp(0.24 + agent.geneA.y * 0.46 + centralProgram * 0.24, 0.0, 1.0), 0.0016);
+    cell.phenotype.y = mix(cell.phenotype.y,
+        clamp(0.16 + agent.geneA.z * 0.42 + (1.0 - centralProgram) * 0.32, 0.0, 1.0), 0.0016);
+    cell.phenotype.z = mix(cell.phenotype.z,
+        clamp(0.14 + agent.geneC.x * 0.62 + centralProgram * 0.16, 0.0, 1.0), 0.0012);
+    cell.phenotype.w = mix(cell.phenotype.w,
+        clamp(0.14 + agent.geneC.y * 0.62 + (1.0 - centralProgram) * 0.16, 0.0, 1.0), 0.0012);
+    cell.physiology = float4(atp, biomass, cycle, membraneIntegrity);
+
+    float2 polarity = float2(cell.signals.x - cell.signals.y, signedRandom(gid * 31u + uniforms.step / 16u));
+    mechanicalForce += polarity * cell.phenotype.y * 0.00016;
+    cell.velocity = cell.velocity * 0.90 + mechanicalForce;
+    float cellSpeed = length(cell.velocity);
+    if (cellSpeed > 0.0024) { cell.velocity *= 0.0024 / cellSpeed; }
+    cell.position += cell.velocity * uniforms.transportScale;
+    float radialDistance = length(cell.position);
+    if (radialDistance > 0.86) {
+        float2 normal = cell.position / radialDistance;
+        cell.position = normal * 0.86;
+        cell.velocity -= normal * max(dot(cell.velocity, normal), 0.0) * 1.6;
+    }
+
+    float exchange = contactCount > 0.001 ? abs(atp - neighborATP / contactCount) : 0.0;
+    cell.interaction = float4(
+        nearestContact,
+        saturate(exchange * 2.4 + adhesion * 0.08),
+        saturate(contactConflict * 0.18 + localEvents.z * 0.72 + stress * 0.22)
+    );
+
+    if (membraneIntegrity < 0.055 || apoptosis > 0.985 ||
+        (atp < 0.008 && stress > 0.82)) {
+        atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
+    }
+    cellsOut[gid] = cell;
+}
+
+kernel void divideAndReduceOrganismCells(
+    device AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device CellState* cells [[buffer(2)]],
+    device atomic_uint* cellOccupancy [[buffer(3)]],
+    device CellAggregate* aggregates [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    uint owner [[thread_position_in_grid]]
+) {
+    if (owner >= maxAgentCount) { return; }
+    uint base = owner * cellsPerAgent;
+    if (atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) {
+        for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+            atomic_store_explicit(&cellOccupancy[base + localIndex], 0u, memory_order_relaxed);
+        }
+        CellAggregate emptyAggregate;
+        emptyAggregate.physiology = float4(0.0);
+        emptyAggregate.morphology = float4(0.0);
+        aggregates[owner] = emptyAggregate;
+        return;
+    }
+
+    uint divisionParent = maxCellCount;
+    uint divisionTarget = maxCellCount;
+    float mostAdvancedCycle = 1.0;
+    for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+        uint index = base + localIndex;
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) == 0u) {
+            if (divisionTarget == maxCellCount) { divisionTarget = index; }
+            continue;
+        }
+        float cycle = cells[index].physiology.z;
+        if (cycle >= mostAdvancedCycle) {
+            mostAdvancedCycle = cycle;
+            divisionParent = index;
+        }
+    }
+
+    AgentState agent = agents[owner];
+    if (divisionParent != maxCellCount && divisionTarget != maxCellCount && agent.energy > 0.42) {
+        uint expected = 0u;
+        if (atomic_compare_exchange_weak_explicit(
+            &cellOccupancy[divisionTarget], &expected, 1u,
+            memory_order_relaxed, memory_order_relaxed
+        )) {
+            CellState parent = cells[divisionParent];
+            uint divisionSeed = hash32(owner * 2246822519u ^ divisionParent * 3266489917u ^ uniforms.step);
+            float angle = random01(divisionSeed) * 2.0 * M_PI_F;
+            float2 axis = float2(cos(angle), sin(angle));
+            CellState child = parent;
+            parent.position -= axis * 0.095;
+            child.position += axis * 0.095;
+            parent.velocity -= axis * 0.00035;
+            child.velocity += axis * 0.00035;
+            parent.physiology.x *= 0.56;
+            child.physiology.x = parent.physiology.x;
+            parent.physiology.y *= 0.62;
+            child.physiology.y = parent.physiology.y;
+            parent.physiology.z = 0.0;
+            child.physiology.z = 0.0;
+            child.signals.xy += float2(signedRandom(divisionSeed + 1u), signedRandom(divisionSeed + 2u)) * 0.018;
+            child.interaction = float4(0.0);
+            cells[divisionParent] = parent;
+            cells[divisionTarget] = child;
+            agent.energy = max(agent.energy - 0.0045, 0.0);
+            agent.biomass = min(agent.biomass + 0.0008, 1.0);
+            agents[owner] = agent;
+        }
+    } else if (divisionTarget == maxCellCount) {
+        for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+            uint index = base + localIndex;
+            if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) == 0u) { continue; }
+            CellState cell = cells[index];
+            if (cell.physiology.z > 0.74) {
+                cell.physiology.z = max(0.70, cell.physiology.z - 0.0032);
+                cells[index] = cell;
+            }
+        }
+    }
+
+    float activeCount = 0.0;
+    float atpTotal = 0.0;
+    float integrityTotal = 0.0;
+    float stressTotal = 0.0;
+    float dividingCount = 0.0;
+    float2 centroid = float2(0.0);
+    for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+        uint index = base + localIndex;
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) == 0u) { continue; }
+        CellState cell = cells[index];
+        activeCount += 1.0;
+        atpTotal += cell.physiology.x;
+        integrityTotal += cell.physiology.w;
+        stressTotal += cell.signals.z;
+        dividingCount += cell.physiology.z >= 0.78 ? 1.0 : 0.0;
+        centroid += cell.position;
+    }
+    centroid /= max(activeCount, 1.0);
+    float squaredRadius = 0.0;
+    for (uint localIndex = 0u; localIndex < cellsPerAgent; ++localIndex) {
+        uint index = base + localIndex;
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) == 0u) { continue; }
+        float2 offset = cells[index].position - centroid;
+        squaredRadius += dot(offset, offset);
+    }
+    CellAggregate aggregate;
+    float inverseCount = 1.0 / max(activeCount, 1.0);
+    aggregate.physiology = float4(
+        activeCount,
+        atpTotal * inverseCount,
+        integrityTotal * inverseCount,
+        stressTotal * inverseCount
+    );
+    aggregate.morphology = float4(
+        centroid,
+        sqrt(squaredRadius * inverseCount),
+        dividingCount * inverseCount
+    );
+    aggregates[owner] = aggregate;
 }
 
 kernel void expandAgents(
@@ -1360,6 +1833,9 @@ struct AgentRasterData {
     float biomass;
     float age;
     float speed;
+    float4 behavior;
+    float4 cellularPhysiology;
+    float4 tissueMorphology;
     float focus;
     float tracked;
     float trackingActive;
@@ -1369,6 +1845,7 @@ vertex AgentRasterData agentVertex(
     device const AgentState* agents [[buffer(0)]],
     device const uint* occupancy [[buffer(1)]],
     constant SimulationUniforms& uniforms [[buffer(2)]],
+    device const CellAggregate* cellAggregates [[buffer(3)]],
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]]
 ) {
@@ -1406,6 +1883,13 @@ vertex AgentRasterData agentVertex(
     output.biomass = agent.biomass;
     output.age = agent.age;
     output.speed = speed;
+    output.behavior = float4(
+        dot(agent.behavior.xy, heading),
+        dot(agent.behavior.xy, lateral),
+        agent.behavior.zw
+    );
+    output.cellularPhysiology = cellAggregates[instanceID].physiology;
+    output.tissueMorphology = cellAggregates[instanceID].morphology;
     output.focus = uniforms.trackedAgentID == instanceID ? 1.0 : 0.0;
     output.tracked = uniforms.trackedAgentID == instanceID ? 1.0 : 0.0;
     output.trackingActive = uniforms.trackedAgentID == 0xffffffffu ? 0.0 : 1.0;
@@ -1425,22 +1909,28 @@ fragment float4 agentFragment(
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
     float scaleVisibility = 1.0 - smoothstep(18.0, 48.0, observationZoom);
     float focusVisibility = input.trackingActive > 0.5 && input.focus > 0.5
-        ? 1.0
+        ? max(scaleVisibility, 1.0 - smoothstep(64.0, 128.0, observationZoom))
         : scaleVisibility;
     if (focusVisibility <= 0.001) { discard_fragment(); }
     float pulsePhase = float(uniforms.step) * (0.032 + input.geneA.x * 0.018) + input.geneB.w * 11.0;
     float pulse = sin(pulsePhase);
     float locomotorSpeed = saturate(input.speed * max(uniforms.worldScale, 1.0) * 16000.0);
 
-    float abdomenLength = 0.66 + input.geneB.z * 0.15;
-    float abdomenWidth = 0.36 + input.geneA.y * 0.16;
+    float tissueOccupancy = saturate(input.cellularPhysiology.x / float(cellsPerAgent));
+    float tissueRadius = saturate(input.tissueMorphology.z / 0.86);
+    float tissueATP = saturate(input.cellularPhysiology.y);
+    float tissueIntegrity = saturate(input.cellularPhysiology.z);
+    float tissueStress = saturate(input.cellularPhysiology.w);
+    float abdomenLength = (0.66 + input.geneB.z * 0.15) * mix(0.88, 1.08, tissueRadius);
+    float abdomenWidth = (0.36 + input.geneA.y * 0.16) * mix(0.84, 1.12, sqrt(tissueOccupancy));
     float2 abdomenP = float2((p.x + 0.08) / abdomenLength, p.y / abdomenWidth);
     float abdomenDistance = length(abdomenP);
     float abdomenAA = max(fwidth(abdomenDistance) * 1.15, 0.0025);
     float abdomen = 1.0 - smoothstep(1.0 - abdomenAA, 1.0 + abdomenAA, abdomenDistance);
 
     float2 headCenter = float2(0.56 + input.geneB.z * 0.04, 0.0);
-    float headRadius = 0.19 + input.geneC.w * 0.13 + input.geneA.z * 0.045;
+    float headRadius = (0.19 + input.geneC.w * 0.13 + input.geneA.z * 0.045) *
+        mix(0.90, 1.06, tissueIntegrity);
     float headDistance = length(p - headCenter) / headRadius;
     float headAA = max(fwidth(headDistance) * 1.15, 0.003);
     float head = 1.0 - smoothstep(1.0 - headAA, 1.0 + headAA, headDistance);
@@ -1456,7 +1946,7 @@ fragment float4 agentFragment(
     float gait = pulse * (0.06 + locomotorSpeed * 0.12);
     float appendageWidth = 0.018 + input.geneA.y * 0.024;
     float appendageAA = max(fwidth(p.y) * 1.4, 0.003);
-    float appendageReach = 0.48 + input.geneA.z * 0.22;
+    float appendageReach = (0.48 + input.geneA.z * 0.22) * mix(0.86, 1.04, tissueATP);
     const float appendageAnchors[3] = { -0.34, -0.07, 0.20 };
     float limbs = 0.0;
     float limbJoints = 0.0;
@@ -1503,7 +1993,8 @@ fragment float4 agentFragment(
     spines *= defenseInvestment;
 
     float predatoryInvestment = smoothstep(0.08, 0.38, input.geneC.w);
-    float jawAperture = 0.10 + predatoryInvestment * (0.08 + 0.035 * (0.5 + 0.5 * pulse));
+    float jawAperture = 0.10 + predatoryInvestment *
+        (0.08 + 0.035 * (0.5 + 0.5 * pulse) + input.behavior.z * 0.075);
     float jawTop = 1.0 - smoothstep(0.020, 0.020 + appendageAA, segmentDistance(
         p, headCenter + float2(headRadius * 0.48, 0.025), float2(0.98, jawAperture)
     ));
@@ -1545,14 +2036,27 @@ fragment float4 agentFragment(
         input.geneC.y * float3(1.0, 0.52, 0.025) +
         input.geneC.z * float3(0.86, 0.08, 0.78)) / nicheTotal;
     float3 bodyColor = mix(lineage, nicheColor, 0.16 + input.geneB.x * 0.20);
+    bodyColor = mix(bodyColor, float3(0.72, 0.055, 0.025), tissueStress * 0.42);
     float3 color = bodyColor * body * diffuse * (0.60 + input.biomass * 0.40);
-    color += rim * edge * (0.42 + input.geneA.w * 0.72);
+    color += rim * edge * (0.42 + input.geneA.w * 0.72) * (0.34 + tissueIntegrity * 0.66);
     color += float3(1.0, 0.69, 0.045) * interior * energy * energy * 0.40;
     color += float3(0.84, 0.98, 1.0) * sensor * 1.34;
     color += predatorColor * jaws * (0.72 + input.geneC.w * 1.18);
     color += float3(0.84, 0.96, 1.0) * specular * (0.14 + input.geneA.y * 0.24);
     color += rim * limbJoints * (0.24 + input.geneA.z * 0.34);
     color += float3(0.12, 0.92, 1.0) * trackedRing * 1.8;
+    float pursuitStrength = length(input.behavior.xy);
+    float2 pursuitDirection = pursuitStrength > 0.0001
+        ? input.behavior.xy / pursuitStrength
+        : float2(1.0, 0.0);
+    float pursuitPath = 1.0 - smoothstep(0.012, 0.035, segmentDistance(
+        p, headCenter + pursuitDirection * headRadius * 0.42,
+        headCenter + pursuitDirection * (0.34 + pursuitStrength * 0.34)
+    ));
+    pursuitPath *= pursuitStrength * (1.0 - head) * predatoryInvestment;
+    color += mix(float3(1.0, 0.42, 0.02), predatorColor, input.behavior.z) * pursuitPath * 0.92;
+    color += float3(1.0, 0.08, 0.18) * edge * input.behavior.w *
+        (0.32 + 0.24 * sin(pulsePhase * 2.3));
 
     float organismReveal = smoothstep(4.0, 18.0, observationZoom);
     float chemistryReveal = smoothstep(18.0, 58.0, observationZoom);
@@ -1651,8 +2155,152 @@ fragment float4 agentFragment(
         color = input.geneC.xyz / enzymes * body * 1.2 + predatorColor * input.geneC.w * head;
     }
     color += float3(0.12, 0.92, 1.0) * trackedRing * 1.8;
-    float alpha = saturate(max(body, trackedRing)) * focusVisibility;
+    float organismEnvelope = 1.0 - smoothstep(14.0, 24.0, observationZoom);
+    float alpha = saturate(max(body, trackedRing)) * focusVisibility * organismEnvelope;
     return float4(max(color, 0.0) * focusVisibility * 0.84, alpha);
+}
+
+struct CellRasterData {
+    float4 position [[position]];
+    float2 local;
+    float4 physiology;
+    float4 phenotype;
+    float4 signals;
+    float4 interaction;
+    float lineageHue;
+    float ownerEnergy;
+    float visibility;
+    float tracked;
+};
+
+vertex CellRasterData cellVertex(
+    device const AgentState* agents [[buffer(0)]],
+    device const uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const uint* cellOccupancy [[buffer(3)]],
+    constant SimulationUniforms& uniforms [[buffer(4)]],
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]]
+) {
+    const float2 corners[6] = {
+        float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0),
+        float2(-1.0, 1.0), float2(1.0, -1.0), float2(1.0, 1.0)
+    };
+    uint owner = instanceID / cellsPerAgent;
+    AgentState agent = agents[owner];
+    CellState cell = cells[instanceID];
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    float scaleVisibility = smoothstep(5.0, 11.0, observationZoom) *
+        (1.0 - smoothstep(112.0, 180.0, observationZoom));
+    float trackingVisibility = uniforms.trackedAgentID == 0xffffffffu ||
+        uniforms.trackedAgentID == owner ? 1.0 : 1.0 - smoothstep(16.0, 34.0, observationZoom);
+    float visibility = scaleVisibility * trackingVisibility;
+
+    float speed = length(agent.velocity);
+    float inheritedAngle = agent.geneB.w * 2.0 * M_PI_F;
+    float2 heading = speed > 0.000001
+        ? agent.velocity / speed
+        : float2(cos(inheritedAngle), sin(inheritedAngle));
+    float2 lateral = float2(-heading.y, heading.x);
+    float bodyWorldRadius = (0.012 + 0.0045 * agent.geneB.z + 0.0025 * agent.biomass) /
+        max(uniforms.worldScale, 1.0);
+    float cellRadius = bodyWorldRadius * (0.105 + cell.physiology.y * 0.020);
+    float2 cellCenter = agent.position + heading * cell.position.x * bodyWorldRadius +
+        lateral * cell.position.y * bodyWorldRadius * 0.72;
+    float2 corner = corners[vertexID];
+    float2 worldPosition = cellCenter + heading * corner.x * cellRadius + lateral * corner.y * cellRadius;
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    bool occupied = owner < maxAgentCount && instanceID < maxCellCount &&
+        agentOccupancy[owner] != 0u && cellOccupancy[instanceID] != 0u && visibility > 0.001;
+
+    CellRasterData output;
+    output.position = occupied
+        ? float4(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0)
+        : float4(3.0, 3.0, 0.0, 1.0);
+    output.local = corner;
+    output.physiology = cell.physiology;
+    output.phenotype = cell.phenotype;
+    output.signals = cell.signals;
+    output.interaction = cell.interaction;
+    output.lineageHue = agent.geneB.w;
+    output.ownerEnergy = agent.energy;
+    output.visibility = visibility;
+    output.tracked = uniforms.trackedAgentID == owner ? 1.0 : 0.0;
+    return output;
+}
+
+fragment float4 cellFragment(
+    CellRasterData input [[stage_in]],
+    constant SimulationUniforms& uniforms [[buffer(0)]]
+) {
+    float2 p = input.local;
+    float angle = atan2(p.y, p.x);
+    float irregularRadius = 0.91 + 0.035 * sin(angle * (5.0 + floor(input.phenotype.x * 3.0)) +
+        input.lineageHue * 13.0);
+    float radius = length(p) / irregularRadius;
+    float aa = max(fwidth(radius) * 1.15, 0.004);
+    float body = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, radius);
+    if (body <= 0.001) { discard_fragment(); }
+
+    float integrity = saturate(input.physiology.w);
+    float membrane = body * smoothstep(0.72 - integrity * 0.10, 0.98, radius);
+    float cytoplasm = body * (1.0 - smoothstep(0.62, 0.94, radius));
+    float nucleusRadius = 0.20 + input.signals.x * 0.08;
+    float2 nucleusPosition = float2((input.signals.x - input.signals.y) * 0.12, 0.0);
+    float nucleus = (1.0 - smoothstep(nucleusRadius, nucleusRadius + aa * 2.0,
+        length(p - nucleusPosition))) * body;
+    float mitochondriaPattern = visualNoise(p * (13.0 + input.phenotype.z * 7.0) +
+        float2(input.lineageHue * 17.0, input.phenotype.w * 11.0));
+    float mitochondria = smoothstep(0.73, 0.92, mitochondriaPattern) * cytoplasm *
+        (1.0 - nucleus);
+    float cycle = saturate(input.physiology.z);
+    float2 divisionAxis = normalize(float2(cos(input.lineageHue * 19.0), sin(input.lineageHue * 19.0)));
+    float cleavage = (1.0 - smoothstep(0.025, 0.075, abs(dot(p, divisionAxis)))) *
+        body * smoothstep(0.76, 1.0, cycle);
+
+    float contactStrength = length(input.interaction.xy) > 0.001 ? input.interaction.z : 0.0;
+    float2 contactDirection = length(input.interaction.xy) > 0.001
+        ? normalize(input.interaction.xy)
+        : float2(1.0, 0.0);
+    float junction = 1.0 - smoothstep(0.018, 0.055, segmentDistance(
+        p, contactDirection * 0.58, contactDirection * 1.04
+    ));
+    junction *= body * contactStrength;
+
+    float3 lineage = hsvToRGB(float3(input.lineageHue, 0.78, 0.62));
+    float3 phenotypeColor = input.phenotype.z * float3(0.02, 0.64, 0.96) +
+        input.phenotype.w * float3(0.98, 0.54, 0.035) +
+        input.phenotype.y * float3(0.76, 0.08, 0.82);
+    phenotypeColor /= max(input.phenotype.z + input.phenotype.w + input.phenotype.y, 0.001);
+    float atp = saturate(input.physiology.x);
+    float stress = saturate(input.signals.z);
+    float apoptosis = saturate(input.signals.w);
+    float3 color = mix(lineage, phenotypeColor, 0.42) * cytoplasm * (0.22 + atp * 0.46);
+    float centralProgram = saturate(input.signals.x - input.signals.y + 0.5);
+    float3 differentiatedLineage = mix(lineage,
+        mix(float3(0.04, 0.56, 0.92), float3(0.92, 0.38, 0.04), 1.0 - centralProgram), 0.34);
+    color = mix(color, differentiatedLineage * cytoplasm * (0.24 + atp * 0.34), 0.42);
+    float3 membraneColor = mix(differentiatedLineage, float3(0.02, 0.76, 0.58), 0.28);
+    color += membraneColor * membrane * (0.30 + integrity * 0.34);
+    color += float3(1.0, 0.58, 0.025) * mitochondria * atp * 0.62;
+    color += mix(float3(0.86, 0.06, 0.68), lineage, 0.34) * nucleus * 0.72;
+    color += float3(0.96, 0.90, 0.58) * cleavage * cycle * 0.56;
+    color += mix(float3(0.08, 0.90, 1.0), float3(0.18, 1.0, 0.56), input.phenotype.x) *
+        junction * 0.54;
+    color += float3(1.0, 0.055, 0.025) * input.interaction.w * membrane * 0.72;
+    color = mix(color, float3(0.94, 0.055, 0.018) * body, stress * 0.34);
+    color *= 1.0 - apoptosis * (0.46 + 0.28 * mitochondriaPattern);
+    color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
+    color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
+
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    float cellDetail = smoothstep(14.0, 30.0, observationZoom);
+    color = mix(lineage * body * (0.32 + atp * 0.44), color, cellDetail);
+    float alpha = body * input.visibility * mix(0.62, 0.94, cellDetail) * (1.0 - apoptosis * 0.35);
+    return float4(max(color, 0.0) * input.visibility, alpha);
 }
 
 fragment float4 quantumSurfaceFragment(
@@ -1763,6 +2411,7 @@ fragment float4 worldSurfaceFragment(
     texture2d_array<float, access::sample> state [[texture(0)]],
     texture2d_array<float, access::sample> ecology [[texture(1)]],
     texture2d_array<float, access::sample> environment [[texture(2)]],
+    texture2d_array<float, access::sample> events [[texture(3)]],
     constant SimulationUniforms& uniforms [[buffer(0)]]
 ) {
     constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
@@ -1776,6 +2425,7 @@ fragment float4 worldSurfaceFragment(
     float4 cell = state.sample(fieldSampler, uv, 0);
     float4 chemistry = ecology.sample(fieldSampler, uv, 0);
     float4 geology = environment.sample(fieldSampler, uv, 0);
+    float4 biologicalEvents = events.sample(fieldSampler, uv, 0);
     float terrain = visualNoise(uv * 43.0);
     float fineTerrain = visualNoise(uv * 97.0 + float2(17.0, 31.0));
 
@@ -1849,7 +2499,63 @@ fragment float4 worldSurfaceFragment(
         color += float3(0.72, 0.12, 0.94) * ecotone * (1.0 - rock) * 0.10;
     }
 
+    if (uniforms.displayMode == 0) {
+        float birth = pow(saturate(biologicalEvents.x), 2.2);
+        float mutation = pow(saturate(biologicalEvents.y), 2.0);
+        float conflict = pow(saturate(biologicalEvents.z), 2.1);
+        float death = pow(saturate(biologicalEvents.w), 2.0);
+        color += float3(0.00, 0.96, 0.80) * birth * 0.48;
+        color += float3(0.96, 0.08, 0.72) * mutation * 0.42;
+        color += float3(1.00, 0.08, 0.018) * conflict * 0.58;
+        color += float3(0.42, 0.14, 0.96) * death * 0.46;
+    }
+
     return float4(max(color, 0.0) * 1.08, 1.0);
+}
+
+fragment float4 cellularSurfaceFragment(
+    RasterData input [[stage_in]],
+    texture2d_array<float, access::sample> state [[texture(0)]],
+    texture2d_array<float, access::sample> ecology [[texture(1)]],
+    texture2d_array<float, access::sample> environment [[texture(2)]],
+    texture2d_array<float, access::sample> events [[texture(3)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]]
+) {
+    constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float2 uv = clamp(
+        uniforms.cameraCenter + (input.uv - 0.5) * viewScale /
+            max(uniforms.cameraZoom, 0.000000001),
+        0.0, 1.0
+    );
+    float2 texel = 1.0 / float2(uniforms.width, uniforms.height);
+    float4 localState = state.sample(fieldSampler, uv, 0);
+    float4 localEcology = ecology.sample(fieldSampler, uv, 0);
+    float4 localEnvironment = environment.sample(fieldSampler, uv, 0);
+    float4 localEvents = events.sample(fieldSampler, uv, 0);
+    float biomassRight = state.sample(fieldSampler, uv + float2(texel.x, 0.0), 0).y;
+    float biomassUp = state.sample(fieldSampler, uv + float2(0.0, texel.y), 0).y;
+    float2 biomassGradient = float2(biomassRight - localState.y, biomassUp - localState.y);
+    float matrixStrain = saturate(length(biomassGradient) * 9.0);
+    float potential = saturate((localState.x + localEcology.x * 0.8 + localState.y * 2.2 +
+        localState.w * 3.0 + localEcology.z * 1.4) * 0.42);
+    float potentialContour = 1.0 - smoothstep(0.035, 0.12,
+        abs(fract(potential * 17.0) - 0.5));
+
+    float3 color = float3(0.003, 0.008, 0.013);
+    color += float3(0.012, 0.11, 0.16) * saturate(localState.x * 0.72);
+    color += float3(0.15, 0.055, 0.015) * saturate(localEcology.x * 0.66);
+    color += float3(0.018, 0.14, 0.10) * saturate(localState.w * 1.8);
+    color += float3(0.12, 0.18, 0.20) * matrixStrain * 0.32;
+    color += mix(float3(0.01, 0.28, 0.48), float3(0.02, 0.58, 0.32), potential) *
+        potentialContour * 0.11;
+    color += float3(0.84, 0.11, 0.025) * saturate(localEcology.z + localEnvironment.z) * 0.22;
+    color += float3(0.00, 0.76, 0.64) * pow(saturate(localEvents.x), 2.2) * 0.24;
+    color += float3(0.92, 0.06, 0.66) * pow(saturate(localEvents.y), 2.0) * 0.22;
+    color += float3(0.96, 0.06, 0.018) * pow(saturate(localEvents.z), 2.0) * 0.30;
+    color += float3(0.38, 0.10, 0.88) * pow(saturate(localEvents.w), 2.0) * 0.24;
+    return float4(max(color, 0.0), 1.0);
 }
 
 fragment float4 worldFragment(

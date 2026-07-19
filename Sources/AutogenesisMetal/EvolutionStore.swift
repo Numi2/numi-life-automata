@@ -50,6 +50,11 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var hunterCount: Int = 0
     var organismLineageCount: Int = 0
     var meanOrganismSpeed: Double = 0
+    var cellCount: Int = 0
+    var dividingCellCount: Int = 0
+    var meanCellATP: Double = 0
+    var meanCellIntegrity: Double = 0
+    var meanCellStress: Double = 0
     var metrics: WorldMetrics = .empty
     var fitness = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
 
@@ -63,6 +68,11 @@ struct EvolutionSnapshot: Sendable, Equatable {
         hunterCount: Int = 0,
         organismLineageCount: Int = 0,
         meanOrganismSpeed: Double = 0,
+        cellCount: Int = 0,
+        dividingCellCount: Int = 0,
+        meanCellATP: Double = 0,
+        meanCellIntegrity: Double = 0,
+        meanCellStress: Double = 0,
         metrics: WorldMetrics = .empty,
         fitness: FitnessVector = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
     ) {
@@ -75,6 +85,11 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.hunterCount = hunterCount
         self.organismLineageCount = organismLineageCount
         self.meanOrganismSpeed = meanOrganismSpeed
+        self.cellCount = cellCount
+        self.dividingCellCount = dividingCellCount
+        self.meanCellATP = meanCellATP
+        self.meanCellIntegrity = meanCellIntegrity
+        self.meanCellStress = meanCellStress
         self.metrics = metrics
         self.fitness = fitness
     }
@@ -232,7 +247,9 @@ final class EvolutionStore: ObservableObject {
 
     func applyAgentObservations(_ agents: [AgentObservation]) {
         observedAgents = agents
-        observableAgentCount = agents.count
+        if observableAgentCount != agents.count {
+            observableAgentCount = agents.count
+        }
         if !hasObservedFirstOrganism, let founder = agents.first {
             hasObservedFirstOrganism = true
             founderCount = 1
@@ -253,7 +270,9 @@ final class EvolutionStore: ObservableObject {
         }
         guard let followedAgentID else { return }
         if let followed = agents.first(where: { $0.id == followedAgentID }) {
-            cameraCenter = followed.position
+            if simd_distance_squared(cameraCenter, followed.position) > 1.0e-14 {
+                cameraCenter = followed.position
+            }
         } else if let replacement = agents.first {
             follow(replacement)
         } else {

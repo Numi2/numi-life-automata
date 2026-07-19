@@ -73,10 +73,16 @@ The interface uses one camera over one persistent simulation. The scale controls
   </tr>
   <tr>
     <td width="50%">
-      <img src="Docs/Media/numi-automata-agents.png" alt="Persistent agents at 10x" />
-      <br /><strong>Agent state, 10x.</strong> Stable GPU slots with inherited morphology, velocity, energy, biomass, age, and generation.
+      <img src="Docs/Media/numi-automata-cells.png" alt="Persistent multicellular tissue" />
+      <br /><strong>Cellular tissue, 27x.</strong> Persistent cells with ATP, membrane integrity, cell-cycle state, contact junctions, and intracellular structure.
     </td>
     <td width="50%">
+      <img src="Docs/Media/numi-automata-agents.png" alt="Persistent agents at 10x" />
+      <br /><strong>Organism morphology, 10x.</strong> Stable GPU identities whose body proportions and condition receive measured cellular feedback.
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2">
       <img src="Docs/Media/numi-automata-ecology.png" alt="Ecological field at 1x" />
       <br /><strong>Ecological field, 1x.</strong> Agent movement over nutrient deposits, mineral deposits, toxic vents, and rock obstacles.
     </td>
@@ -87,8 +93,9 @@ The interface uses one camera over one persistent simulation. The scale controls
 |---|---:|---|---|
 | Spinor field | `900x` | Real and imaginary parts of `psi_0`, `psi_1`; component phasors | Yes |
 | Wave observables | `160x` | `rho`, relative phase, probability-current proxy, local potential | Yes |
-| Reaction field | `36x` | `R_A`, `B`, `E`, `M`, `R_B`, detritus, toxin, catalyst | Yes |
-| Agent state | `10x` | Position, velocity, traits, energy, biomass, sensors, defense, predation morphology | Yes |
+| Molecular reaction field | `72x` | `R_A`, `B`, `E`, `M`, `R_B`, detritus, toxin, catalyst | Yes |
+| Cellular tissue | `27x` | Cell position, ATP, biomass, cycle, membrane, phenotype, morphogens, stress, apoptosis, contact | Yes |
+| Organism morphology | `10x` | Position, velocity, traits, cellular condition, energy, biomass, sensors, defense, predation morphology | Yes |
 | Ecological field | `1x` | Population, resources, hazards, obstacles, occupancy, trophic events | Yes |
 
 ## System state
@@ -100,11 +107,15 @@ The interface uses one camera over one persistent simulation. The scale controls
 | Spinor ping-pong textures | `2 x 1024 x 1024` | `RGBA32Float` | GPU private | `(Re psi_0, Im psi_0, Re psi_1, Im psi_1)` |
 | Reaction-state texture pairs | `193 x 193 x 1` each | `RGBA16Float` | GPU private | State, ecology, three trait fields, events, and environment |
 | Checkpoint texture | `193 x 193 x 1` | `RGBA16Float` | GPU private | Pre-perturbation biomass reference |
-| Agent state ping-pong buffers | `2 x 384` records | Swift/Metal struct | Shared | Persistent agent dynamics |
-| Occupancy buffer | `384` atomic integers | `UInt32` | Shared | Stable slot allocation and death |
-| Observation ring | `8` state/occupancy buffer pairs | Structured buffers | Shared | Camera-follow readback without reusing an in-flight slot |
-| Metric reductions | `32` fixed-point accumulators | Atomic `UInt32` | Shared | Population-level measurements |
-| Linear scene target | Drawable dimensions | `RGBA16Float` | GPU private | Unclamped field and agent radiance before display mapping |
+| Agent state ping-pong buffers | `2 x 384 x 96 B` | Swift/Metal ABI-matched struct | GPU private | Persistent organism dynamics and local behavioral observation |
+| Agent occupancy | `384` atomic integers | `UInt32` | GPU private | Stable slot allocation and death |
+| Cell state ping-pong buffers | `2 x 9,216 x 80 B` | Swift/Metal ABI-matched struct | GPU private | Persistent mechanics, metabolism, phenotype, signaling, and interaction state |
+| Cell occupancy | `9,216` atomic integers | `UInt32` | GPU private | Stable ownership of `24` cell slots per organism |
+| Cellular aggregates | `384 x 32 B` | Two `float4` vectors | GPU private | Cell count, ATP, integrity, stress, centroid, radius, and dividing fraction |
+| Observation ring | `3 x 384 x 16 B` | Compact structured buffers | Shared | Camera-follow state at `10 Hz`, or `30 Hz` while following |
+| Metric readback ring | `3` slots | Structured buffers | Shared | Asynchronous population reductions and cellular aggregates |
+| Metric reductions | `32` fixed-point accumulators | Atomic `UInt32` | GPU private | Population-level measurements |
+| Linear scene target | Drawable dimensions | `RG11B10Float` | GPU private | Compact HDR field, cell, and organism radiance before display mapping |
 | Bloom ping-pong textures | Quarter drawable dimensions | `RGBA16Float` | GPU private | Bright-pass extraction and separable Gaussian filtering |
 
 ### Reaction-channel layout
@@ -293,6 +304,43 @@ s=3B+5E+8M+2C-1.4T.
 
 A candidate must be no lower than its four cardinal neighbors. It then claims slot `0` using `atomic_compare_exchange_weak_explicit`. This separates distributed reaction state from persistent individual identity.
 
+## Persistent multicellular state
+
+Every occupied organism slot owns a fixed-capacity block of `24` cell slots. Ownership is `cellID / 24`, so cell lookup requires no allocator, indirection table, or CPU synchronization. A founder begins as one central cell plus a six-cell ring. Reproduction initializes a separate seven-cell tissue for the child; camera motion and zoom never allocate, merge, or rescale cells.
+
+Each `CellState` is an `80 B` GPU record:
+
+```text
+position.xy, velocity.xy
+physiology = (ATP, biomass, cycle phase, membrane integrity)
+phenotype  = (adhesion, contractility, uptake A, uptake B)
+signals    = (morphogen A, morphogen B, stress, apoptosis)
+interaction = (nearest-contact direction.xy, exchange, conflict)
+```
+
+For cell `i`, the mechanics kernel evaluates all occupied cells belonging to the same organism. Pairwise separation below the exclusion radius prevents collapse; intermediate-range adhesion maintains tissue cohesion. A weak contractile term confines the tissue around its organism-relative origin. This is a bounded local tissue model, not a continuum finite-element model.
+
+ATP is updated from local substrate channels and phenotype-dependent uptake:
+
+```math
+A_i(t+1)=\operatorname{clamp}(A_i+U_i-C_i-S_i,0,1.2),
+```
+
+where `U_i` samples resource A, resource B, and detritus; `C_i` increases with biomass and contractility; and `S_i` increases with toxin, environmental damage, conflict, and crowding. ATP regulates biomass accumulation, membrane repair, and cell-cycle progression. Low ATP and environmental load raise stress; persistent high stress raises apoptosis activation and can release the cell slot.
+
+Cell-cycle progression is energy-gated and inhibited by local contact density. A cell with completed cycle, sufficient organism energy, and an empty slot divides along a deterministic hashed axis. Parent and daughter split ATP and biomass, separate mechanically, reset cycle phase, and retain slightly perturbed morphogen state. When all `24` slots are occupied, late-cycle cells enter a quiescent range instead of remaining falsely marked as dividing.
+
+Two diffusing contact-averaged morphogen variables combine with radial tissue position to alter adhesion, contractility, and resource-uptake phenotype. The model therefore supports spatial differentiation without assigning fixed cell classes. These variables are dimensionless regulatory signals; they are not calibrated concentrations of named proteins.
+
+After every cell update, one thread per organism reduces its tissue to:
+
+```text
+(active count, mean ATP, mean integrity, mean stress)
+(centroid.x, centroid.y, RMS radius, dividing fraction)
+```
+
+The next organism update consumes this aggregate. Cellular ATP and integrity modify organism maintenance and damage; complete tissue loss terminates an established organism. The organism renderer also uses cell occupancy, RMS radius, ATP, integrity, and stress to change body proportions and surface condition. This closes the observable causal path from chemistry to cell state to morphology.
+
 ## Persistent agents
 
 Each `AgentState` occupies one stable slot and stores:
@@ -300,6 +348,7 @@ Each `AgentState` occupies one stable slot and stores:
 ```swift
 position:   float2
 velocity:   float2
+behavior:   float4
 geneA:      float4
 geneB:      float4
 geneC:      float4
@@ -308,6 +357,8 @@ biomass:    float
 age:        float
 generation: uint
 ```
+
+`behavior.xy` stores the last local pursuit direction, `behavior.z` stores attack contact, and `behavior.w` stores threat intensity. It is simulated state used to visualize action; it is not a renderer-generated animation.
 
 ### Trait semantics
 
@@ -450,20 +501,25 @@ flowchart LR
     W1 --> N[nucleateAutogenicFounder]
     N -->|resource-scoped barrier| A[evolveAgents]
     A -->|resource-scoped barrier| S[spawnAgents]
+    S --> CM[evolveOrganismCells]
+    CM --> CR[divideAndReduceOrganismCells]
+    CR -->|cellular feedback on next step| A
     W1 --> Q[evolveQuantumField]
     Q --> Q1[swap spinor texture references]
     W1 --> F[scale-specific field fragment]
     Q1 --> F
-    S --> I[384-instance agent draw with scale rejection]
-    F --> H[RGBA16Float linear scene]
+    S --> I[384-instance organism draw]
+    CR --> CI[9216-instance cell draw]
+    F --> H[RG11B10Float linear scene]
     I --> H
+    CI --> H
     H --> P[quarter-resolution bright prefilter]
     P --> BX[horizontal Gaussian blur]
     BX --> BY[vertical Gaussian blur]
     H --> C[hue-preserving exposure and tone map]
     BY --> C
     C --> D[BGRA8 sRGB drawable]
-    S --> O[8-slot observation ring]
+    S --> O[3-slot compact observation ring]
 ```
 
 ### Kernels and render stages
@@ -476,10 +532,13 @@ flowchart LR
 | Founder scan | `193²` | `nucleateAutogenicFounder` |
 | Agent dynamics | `384` | `evolveAgents` |
 | Agent reproduction | `384` | `spawnAgents` |
+| Cell mechanics and physiology | `9,216` | `evolveOrganismCells` |
+| Cell division and tissue reduction | `384` | `divideAndReduceOrganismCells` |
 | Spinor update | `1024²` | `evolveQuantumField` |
 | Measurement | `193²` / `1024²` | `measureWorld`, `measureQuantumField` |
-| Field rendering | One full-screen triangle | `quantumSurfaceFragment` or `worldSurfaceFragment` |
+| Field rendering | One full-screen triangle | `quantumSurfaceFragment`, `cellularSurfaceFragment`, or `worldSurfaceFragment` |
 | Agent rendering | `384` instanced quads | `agentVertex`, `agentFragment` |
+| Cell rendering | `9,216` instanced quads | `cellVertex`, `cellFragment` |
 | Bright-pass extraction | Quarter drawable dimensions | `bloomPrefilter` |
 | Separable bloom | Two quarter-resolution dispatches | `blurBloom` |
 | Display composition | One full-screen triangle | `compositeFragment` |
@@ -492,15 +551,17 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **True ping-pong state.** The renderer swaps `MTLTexture` references after each update instead of blitting entire state textures back into fixed roles.
 - **Scoped barriers.** Founder allocation, movement, and reproduction share one compute encoder with `memoryBarrier(resources:)` only at the two read-after-write boundaries.
 - **Power-of-two addressing.** The `1024²` spinor lattice uses integer masks instead of modulus for periodic neighbors.
-- **Linear HDR scene.** Scale-specialized field and agent fragments write unclamped values into a drawable-sized `RGBA16Float` target. Display transfer is deferred to the final composite.
+- **Private persistent individuals.** Agent and cell ping-pong buffers, occupancy maps, and cell aggregates remain in GPU-private memory. The CPU receives only periodic measurements and compact follow-camera records.
+- **Linear HDR scene.** Scale-specialized field, cell, and organism fragments write unclamped values into a drawable-sized `RG11B10Float` target. Display transfer is deferred to the final composite.
 - **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; intermediate scales expose phase winding, density isolines, reaction channels, trait-dependent morphology, resource flux, and geological gradients.
-- **Morphology from inherited state.** Abdomen geometry, appendage reach, defensive spines, predatory jaws, pigmentation, trophic color, and reproductive-readiness emission are deterministic functions of `geneA`, `geneB`, `geneC`, energy, biomass, age, and velocity.
+- **Morphology from inherited and cellular state.** Abdomen geometry, appendage reach, defensive spines, predatory jaws, pigmentation, and trophic color are deterministic functions of inherited traits plus measured tissue occupancy, radius, ATP, integrity, and stress.
 - **Analytic antialiasing.** Signed-distance boundaries use `fwidth`-derived transition widths, preserving subpixel morphology without multisample render targets.
 - **Quarter-resolution bloom.** A soft-knee bright pass and two five-tap bilinear Gaussian dispatches isolate high-radiance events at wave, reaction, agent, and ecology scales. The `900x` spinor instrument bypasses bloom and its texture sample so component and lattice boundaries remain spatially exact.
 - **Hue-preserving display map.** Peak-channel exponential compression applies one scalar to all RGB channels, followed by a small scale-specific saturation correction and `1/1023` temporal dither.
-- **Deep-scale visibility rejection.** Untracked agent quads fade over `18x-48x` and are discarded before morphology or quantum sampling. A tracked agent remains observable across scales.
+- **Deep-scale visibility rejection.** Untracked organism quads fade before cell scale and are discarded before morphology or spinor sampling. A tracked tissue remains observable while its analytic organism envelope fades out.
 - **Instanced agents.** One draw call submits all `384` slots. The occupancy buffer rejects inactive instances in the vertex path.
-- **Ring-buffered observation.** Eight readback slots prevent the CPU camera observer from reusing a buffer still owned by an in-flight command buffer.
+- **Instanced cells.** One draw call submits all `9,216` fixed-capacity cell slots; unoccupied slots are rejected in the vertex path.
+- **Asynchronous readback.** Three compact observation slots and three metric slots prevent CPU access to buffers still owned by an in-flight command buffer. Agent observations are `16 B` records sampled at `10 Hz`, rising to `30 Hz` while following.
 - **Framebuffer-only drawable.** `MTKView.framebufferOnly = true` keeps the presentation resource render-target optimized.
 - **Fixed-point reductions.** Atomic integer accumulation avoids requiring device-wide floating-point atomic support for observer metrics.
 
@@ -622,12 +683,13 @@ The current implementation deliberately makes narrower claims than the project o
 1. **Classical numerical spinor.** The spinor is computed on an Apple GPU. There are no qubits, quantum measurements, entanglement experiments, or claims of quantum advantage.
 2. **Designed coupling equations.** The cross-scale source terms are explicit model choices, not parameters fitted to molecular or cellular data.
 3. **Dimensionless chemistry.** Reaction variables do not currently map to SI units or named chemical species.
-4. **Finite state capacity.** The reaction lattice is `193²`, the spinor lattice is `1024²`, and the agent pool is capped at `384` slots.
+4. **Finite state capacity.** The reaction lattice is `193²`, the spinor lattice is `1024²`, the organism pool is capped at `384` slots, and each organism owns at most `24` cells.
 5. **Operational rather than literal infinity.** Recursive coordinate expansion preserves observation continuity while retaining finite backing storage.
 6. **No proof of open-ended evolution.** Genotype length is fixed at twelve continuous traits; the model can diversify within this space but cannot yet increase representational dimensionality.
 7. **Single-world default.** Pareto and novelty machinery is active as a diagnostic evaluator, but the application currently simulates one world and therefore does not perform between-world selection.
 8. **Partial stochastic reproducibility.** Hash-based variation is seeded, but parallel atomic founder/slot claims can depend on GPU execution ordering.
-9. **Heuristic morphology.** Agent appearance encodes trait values for observation; it is not a biomechanical body simulation.
+9. **Reduced cell biology.** Cells implement explicit mechanics, energetic state, regulatory signals, contact inhibition, division, and apoptosis, but omit membranes as deformable meshes, organelles as independent dynamical systems, gene-regulatory networks, and calibrated molecular kinetics.
+10. **Reduced biomechanics.** Tissue aggregates causally alter organism geometry and condition, but the analytic organism envelope is not a finite-element biomechanical body simulation.
 
 These limits define concrete research directions: evolvable genome dimensionality, multiple coupled worlds, calibrated reaction systems, causal ablation experiments, long-run diversity statistics, and cross-device performance characterization.
 
