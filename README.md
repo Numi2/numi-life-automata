@@ -14,7 +14,7 @@ The initial state contains zero occupied agent slots. A persistent founder is al
 
 </div>
 
-![Numi Automata agent-scale simulation](Docs/Media/numi-automata-agents.gif)
+![Numi Automata observation levels from spinor dynamics to ecology](Docs/Media/numi-automata-levels.gif)
 
 > [!IMPORTANT]
 > Numi Automata is an artificial-life research system, not a physical model of biological abiogenesis and not a quantum-computer program. Its spinor layer is a classical numerical implementation of a discrete coined quantum walk. All chemistry, energy, distance, and time quantities are dimensionless simulation variables unless stated otherwise.
