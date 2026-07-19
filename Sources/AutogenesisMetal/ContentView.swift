@@ -277,7 +277,7 @@ struct ContentView: View {
     private var causalDock: some View {
         HStack(spacing: 18) {
             VStack(alignment: .leading, spacing: 3) {
-                sectionLabel("BOTTOM-UP SCALE")
+                sectionLabel("OBSERVATION SCALE")
                 Text(scaleName)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                 Text(zoomLabel)

@@ -27,6 +27,14 @@ private struct SimulationUniforms {
     var viewportAspect: Float
 }
 
+private struct PostProcessUniforms {
+    var sourceSize: SIMD2<Float>
+    var exposure: Float
+    var bloomIntensity: Float
+    var observationZoom: Float
+    var frameIndex: UInt32
+}
+
 private struct AgentState {
     var position: SIMD2<Float>
     var velocity: SIMD2<Float>
@@ -83,6 +91,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let metricCount = 32
     private static let metricScale = 4096.0
     private static let quantumMetricScale = 1_000_000_000.0
+    private static let gpuTimingEnabled = ProcessInfo.processInfo.environment["NUMI_GPU_TIMING"] == "1"
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -105,6 +114,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let renderPipeline: MTLRenderPipelineState
     private let quantumRenderPipeline: MTLRenderPipelineState
     private let agentRenderPipeline: MTLRenderPipelineState
+    private let bloomPrefilterPipeline: MTLComputePipelineState
+    private let bloomBlurPipeline: MTLComputePipelineState
+    private let compositePipeline: MTLRenderPipelineState
+    private var sceneColor: MTLTexture?
+    private var bloomTextureA: MTLTexture?
+    private var bloomTextureB: MTLTexture?
+    private var renderTargetSize = MTLSize(width: 0, height: 0, depth: 1)
     private var state: MTLTexture
     private var reactionState: MTLTexture
     private var genomeA: MTLTexture
@@ -188,6 +204,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         spawnAgentPipeline = try Self.computePipeline(named: "spawnAgents", library: library, device: device)
         injectFounderPipeline = try Self.computePipeline(named: "injectFounder", library: library, device: device)
         expandAgentPipeline = try Self.computePipeline(named: "expandAgents", library: library, device: device)
+        bloomPrefilterPipeline = try Self.computePipeline(named: "bloomPrefilter", library: library, device: device)
+        bloomBlurPipeline = try Self.computePipeline(named: "blurBloom", library: library, device: device)
 
         guard let vertex = library.makeFunction(name: "fullscreenVertex") else {
             throw EvolutionRendererError.missingFunction("fullscreenVertex")
@@ -199,17 +217,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         renderDescriptor.label = "Numi Automata world renderer"
         renderDescriptor.vertexFunction = vertex
         renderDescriptor.fragmentFunction = fragment
-        renderDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        renderDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         renderPipeline = try device.makeRenderPipelineState(descriptor: renderDescriptor)
 
         guard let quantumFragment = library.makeFunction(name: "quantumSurfaceFragment") else {
             throw EvolutionRendererError.missingFunction("quantumSurfaceFragment")
         }
         let quantumRenderDescriptor = MTLRenderPipelineDescriptor()
-        quantumRenderDescriptor.label = "Bottom-up quantum scale renderer"
+        quantumRenderDescriptor.label = "Spinor and wave-observable renderer"
         quantumRenderDescriptor.vertexFunction = vertex
         quantumRenderDescriptor.fragmentFunction = quantumFragment
-        quantumRenderDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        quantumRenderDescriptor.colorAttachments[0].pixelFormat = .rgba16Float
         quantumRenderPipeline = try device.makeRenderPipelineState(descriptor: quantumRenderDescriptor)
 
         guard let agentVertex = library.makeFunction(name: "agentVertex") else {
@@ -223,15 +241,25 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         agentRenderDescriptor.vertexFunction = agentVertex
         agentRenderDescriptor.fragmentFunction = agentFragment
         let agentAttachment = agentRenderDescriptor.colorAttachments[0]!
-        agentAttachment.pixelFormat = .bgra8Unorm_srgb
+        agentAttachment.pixelFormat = .rgba16Float
         agentAttachment.isBlendingEnabled = true
         agentAttachment.rgbBlendOperation = .add
         agentAttachment.alphaBlendOperation = .add
-        agentAttachment.sourceRGBBlendFactor = .sourceAlpha
+        agentAttachment.sourceRGBBlendFactor = .one
         agentAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
         agentAttachment.sourceAlphaBlendFactor = .one
         agentAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         agentRenderPipeline = try device.makeRenderPipelineState(descriptor: agentRenderDescriptor)
+
+        guard let compositeFragment = library.makeFunction(name: "compositeFragment") else {
+            throw EvolutionRendererError.missingFunction("compositeFragment")
+        }
+        let compositeDescriptor = MTLRenderPipelineDescriptor()
+        compositeDescriptor.label = "HDR bloom and tone-mapping composite"
+        compositeDescriptor.vertexFunction = vertex
+        compositeDescriptor.fragmentFunction = compositeFragment
+        compositeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
+        compositePipeline = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
 
         state = try Self.makeWorldTexture(device: device, label: "Living state")
         reactionState = try Self.makeWorldTexture(device: device, label: "Reaction state")
@@ -382,6 +410,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
 
         if evaluateGeneration {
+            attachGPUTiming(to: commandBuffer)
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
             observeWorld(settings: frameSettings)
@@ -389,10 +418,22 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             evolutionBuffer.label = "Numi Automata observation cycle"
             generation &+= 1
             encodeRender(view: view, into: evolutionBuffer, settings: frameSettings)
+            attachGPUTiming(to: evolutionBuffer)
             evolutionBuffer.commit()
         } else {
             encodeRender(view: view, into: commandBuffer, settings: frameSettings)
+            attachGPUTiming(to: commandBuffer)
             commandBuffer.commit()
+        }
+    }
+
+    private func attachGPUTiming(to commandBuffer: MTLCommandBuffer) {
+        guard Self.gpuTimingEnabled else { return }
+        commandBuffer.addCompletedHandler { buffer in
+            let milliseconds = max(buffer.gpuEndTime - buffer.gpuStartTime, 0) * 1_000
+            let formattedMilliseconds = String(format: "%.4f", milliseconds)
+            let label = buffer.label ?? "unlabeled"
+            print("gpu_frame_ms=\(formattedMilliseconds) label=\(label)")
         }
     }
 
@@ -690,9 +731,21 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeRender(view: MTKView, into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
-        guard let descriptor = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
-              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
-        encoder.label = "Render evolving fields"
+        guard let drawable = view.currentDrawable,
+              let drawableDescriptor = view.currentRenderPassDescriptor,
+              ensureRenderTargets(width: drawable.texture.width, height: drawable.texture.height),
+              let sceneColor,
+              let bloomTextureA,
+              let bloomTextureB else { return }
+
+        let sceneDescriptor = MTLRenderPassDescriptor()
+        let sceneAttachment = sceneDescriptor.colorAttachments[0]!
+        sceneAttachment.texture = sceneColor
+        sceneAttachment.loadAction = .clear
+        sceneAttachment.storeAction = .store
+        sceneAttachment.clearColor = MTLClearColorMake(0.0015, 0.003, 0.006, 1)
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: sceneDescriptor) else { return }
+        encoder.label = "Render linear HDR simulation state"
         var uniforms = makeUniforms(settings: settings)
         let observationZoom = settings.cameraZoom / max(settings.worldScale, 1)
         if observationZoom >= 24 {
@@ -724,8 +777,114 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             instanceCount: Self.maxAgentCount
         )
         encoder.endEncoding()
+
+        var postUniforms = PostProcessUniforms(
+            sourceSize: SIMD2<Float>(Float(sceneColor.width), Float(sceneColor.height)),
+            exposure: observationZoom >= 24 ? 1.06 : (observationZoom >= 6 ? 0.92 : 1.16),
+            bloomIntensity: observationZoom >= 420 ? 0.0 :
+                (observationZoom >= 24 ? 0.22 : (observationZoom >= 6 ? 0.16 : 0.24)),
+            observationZoom: observationZoom,
+            frameIndex: UInt32(truncatingIfNeeded: frameSerial)
+        )
+        if postUniforms.bloomIntensity > 0.001 {
+            encodeBloom(
+                source: sceneColor,
+                textureA: bloomTextureA,
+                textureB: bloomTextureB,
+                uniforms: &postUniforms,
+                into: commandBuffer
+            )
+        }
+
+        guard let compositeEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: drawableDescriptor) else { return }
+        compositeEncoder.label = "Composite HDR scene into display gamut"
+        compositeEncoder.setRenderPipelineState(compositePipeline)
+        compositeEncoder.setFragmentTexture(sceneColor, index: 0)
+        compositeEncoder.setFragmentTexture(bloomTextureA, index: 1)
+        compositeEncoder.setFragmentBytes(
+            &postUniforms,
+            length: MemoryLayout<PostProcessUniforms>.stride,
+            index: 0
+        )
+        compositeEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        compositeEncoder.endEncoding()
         encodeAgentObservation(into: commandBuffer)
         commandBuffer.present(drawable)
+    }
+
+    private func encodeBloom(
+        source: MTLTexture,
+        textureA: MTLTexture,
+        textureB: MTLTexture,
+        uniforms: inout PostProcessUniforms,
+        into commandBuffer: MTLCommandBuffer
+    ) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.label = "Quarter-resolution HDR bloom"
+        encoder.setComputePipelineState(bloomPrefilterPipeline)
+        encoder.setTexture(source, index: 0)
+        encoder.setTexture(textureA, index: 1)
+        encoder.setBytes(&uniforms, length: MemoryLayout<PostProcessUniforms>.stride, index: 0)
+        dispatchTexture(encoder, pipeline: bloomPrefilterPipeline, texture: textureA)
+        encoder.memoryBarrier(resources: [textureA])
+
+        var direction = SIMD2<Float>(1, 0)
+        encoder.setComputePipelineState(bloomBlurPipeline)
+        encoder.setTexture(textureA, index: 0)
+        encoder.setTexture(textureB, index: 1)
+        encoder.setBytes(&direction, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        dispatchTexture(encoder, pipeline: bloomBlurPipeline, texture: textureB)
+        encoder.memoryBarrier(resources: [textureB])
+
+        direction = SIMD2<Float>(0, 1)
+        encoder.setTexture(textureB, index: 0)
+        encoder.setTexture(textureA, index: 1)
+        encoder.setBytes(&direction, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+        dispatchTexture(encoder, pipeline: bloomBlurPipeline, texture: textureA)
+        encoder.endEncoding()
+    }
+
+    private func ensureRenderTargets(width: Int, height: Int) -> Bool {
+        let size = MTLSize(width: width, height: height, depth: 1)
+        if size.width == renderTargetSize.width,
+           size.height == renderTargetSize.height,
+           sceneColor != nil,
+           bloomTextureA != nil,
+           bloomTextureB != nil {
+            return true
+        }
+
+        let sceneDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: max(width, 1),
+            height: max(height, 1),
+            mipmapped: false
+        )
+        sceneDescriptor.storageMode = .private
+        sceneDescriptor.usage = [.renderTarget, .shaderRead]
+
+        let bloomDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: max((width + 3) / 4, 1),
+            height: max((height + 3) / 4, 1),
+            mipmapped: false
+        )
+        bloomDescriptor.storageMode = .private
+        bloomDescriptor.usage = [.shaderRead, .shaderWrite]
+
+        guard let nextScene = device.makeTexture(descriptor: sceneDescriptor),
+              let nextBloomA = device.makeTexture(descriptor: bloomDescriptor),
+              let nextBloomB = device.makeTexture(descriptor: bloomDescriptor) else {
+            return false
+        }
+        nextScene.label = "Linear HDR simulation scene"
+        nextBloomA.label = "Quarter-resolution bloom A"
+        nextBloomB.label = "Quarter-resolution bloom B"
+        sceneColor = nextScene
+        bloomTextureA = nextBloomA
+        bloomTextureB = nextBloomB
+        renderTargetSize = size
+        return true
     }
 
     private func encodeAgentObservation(into commandBuffer: MTLCommandBuffer) {
@@ -954,6 +1113,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.dispatchThreads(
             MTLSize(width: Self.maxAgentCount, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1)
+        )
+    }
+
+    private func dispatchTexture(
+        _ encoder: MTLComputeCommandEncoder,
+        pipeline: MTLComputePipelineState,
+        texture: MTLTexture
+    ) {
+        let width = max(1, min(pipeline.threadExecutionWidth, 16))
+        let height = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / width, 16))
+        encoder.dispatchThreads(
+            MTLSize(width: texture.width, height: texture.height, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1)
         )
     }
 

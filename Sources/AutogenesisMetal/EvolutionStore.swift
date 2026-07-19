@@ -99,13 +99,15 @@ struct RendererSettings: Sendable {
 
 @MainActor
 final class EvolutionStore: ObservableObject {
+    private static let spinorOrigin = SIMD2<Float>(repeating: 0.500_488_281_25)
+
     @Published var isRunning = true
     @Published var stepsPerFrame = 3
     @Published var resourceFlux: Double = 1.0
     @Published var mutationScale: Double = 1.0
     @Published var transportScale: Double = 1.0
     @Published var displayMode: FieldDisplayMode = .ecology
-    @Published private(set) var cameraCenter = SIMD2<Float>(repeating: 0.5)
+    @Published private(set) var cameraCenter = spinorOrigin
     @Published private(set) var cameraZoom: Double = 900
     @Published private(set) var snapshot = EvolutionSnapshot()
     @Published private(set) var history: [EvolutionSnapshot] = []
@@ -206,7 +208,7 @@ final class EvolutionStore: ObservableObject {
 
     func resetCamera() {
         followedAgentID = nil
-        cameraCenter = SIMD2<Float>(repeating: 0.5)
+        cameraCenter = Self.spinorOrigin
         cameraZoom = worldScale * 900
     }
 

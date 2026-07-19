@@ -24,6 +24,14 @@ struct SimulationUniforms {
     float viewportAspect;
 };
 
+struct PostProcessUniforms {
+    float2 sourceSize;
+    float exposure;
+    float bloomIntensity;
+    float observationZoom;
+    uint frameIndex;
+};
+
 constant uint metricCount = 32;
 constant float metricScale = 4096.0;
 constant uint quantumGridSize = 1024u;
@@ -1156,15 +1164,189 @@ inline float complexCurrent(float2 amplitude, float2 neighbor) {
     return amplitude.x * neighbor.y - amplitude.y * neighbor.x;
 }
 
+inline float spinorPhase(float4 spinor) {
+    float2 amplitude = spinor.xy + spinor.zw;
+    return fract(atan2(amplitude.y, amplitude.x) / (2.0 * M_PI_F) + 1.0);
+}
+
+inline float wrappedPhaseDelta(float from, float to) {
+    return fract(to - from + 0.5) - 0.5;
+}
+
 inline float3 quantumPhaseColor(float phase) {
     float3 cycle = 0.5 + 0.5 * cos(2.0 * M_PI_F * (phase + float3(0.00, 0.67, 0.33)));
     return mix(float3(0.05, 0.13, 0.24), pow(cycle, float3(0.72)), 0.88);
+}
+
+kernel void bloomPrefilter(
+    texture2d<half, access::sample> source [[texture(0)]],
+    texture2d<half, access::write> destination [[texture(1)]],
+    constant PostProcessUniforms& uniforms [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= destination.get_width() || gid.y >= destination.get_height()) { return; }
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5) / float2(destination.get_width(), destination.get_height());
+    float2 sourceTexel = 1.0 / max(uniforms.sourceSize, float2(1.0));
+    float3 color = float3(source.sample(linearSampler, uv).rgb) * 0.50;
+    color += float3(source.sample(linearSampler, uv + sourceTexel * float2(-1.25, -1.25)).rgb) * 0.125;
+    color += float3(source.sample(linearSampler, uv + sourceTexel * float2( 1.25, -1.25)).rgb) * 0.125;
+    color += float3(source.sample(linearSampler, uv + sourceTexel * float2(-1.25,  1.25)).rgb) * 0.125;
+    color += float3(source.sample(linearSampler, uv + sourceTexel * float2( 1.25,  1.25)).rgb) * 0.125;
+
+    const float threshold = 0.92;
+    const float knee = 0.38;
+    float brightness = max(max(color.r, color.g), color.b);
+    float soft = clamp(brightness - threshold + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee + 0.0001);
+    float contribution = max(brightness - threshold, soft) / max(brightness, 0.0001);
+    destination.write(half4(half3(color * contribution), half(1.0)), gid);
+}
+
+kernel void blurBloom(
+    texture2d<half, access::sample> source [[texture(0)]],
+    texture2d<half, access::write> destination [[texture(1)]],
+    constant float2& direction [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= destination.get_width() || gid.y >= destination.get_height()) { return; }
+    constexpr sampler linearSampler(coord::pixel, address::clamp_to_edge, filter::linear);
+    float2 position = float2(gid) + 0.5;
+    half3 color = source.sample(linearSampler, position).rgb * half(0.227027);
+    color += source.sample(linearSampler, position + direction * 1.384615).rgb * half(0.316216);
+    color += source.sample(linearSampler, position - direction * 1.384615).rgb * half(0.316216);
+    color += source.sample(linearSampler, position + direction * 3.230769).rgb * half(0.070270);
+    color += source.sample(linearSampler, position - direction * 3.230769).rgb * half(0.070270);
+    destination.write(half4(color, half(1.0)), gid);
+}
+
+fragment float4 compositeFragment(
+    RasterData input [[stage_in]],
+    texture2d<half, access::sample> scene [[texture(0)]],
+    texture2d<half, access::sample> bloom [[texture(1)]],
+    constant PostProcessUniforms& uniforms [[buffer(0)]]
+) {
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float3 linearScene = float3(scene.sample(linearSampler, input.uv).rgb);
+    float3 linearBloom = uniforms.bloomIntensity > 0.001
+        ? float3(bloom.sample(linearSampler, input.uv).rgb)
+        : float3(0.0);
+    float3 hdr = linearScene * uniforms.exposure + linearBloom * uniforms.bloomIntensity;
+
+    float peak = max(max(hdr.r, hdr.g), hdr.b);
+    float peakScale = (1.0 - exp(-peak)) / max(peak, 0.0001);
+    float3 mapped = hdr * peakScale;
+    float luminance = dot(mapped, float3(0.2126, 0.7152, 0.0722));
+    float saturation = uniforms.observationZoom >= 420.0 ? 1.02 : 1.08;
+    mapped = mix(float3(luminance), mapped, saturation);
+
+    uint2 pixel = uint2(input.position.xy);
+    float dither = random01(pixel.x * 1597334677u ^ pixel.y * 3812015801u ^
+        uniforms.frameIndex * 2246822519u) - 0.5;
+    mapped = saturate(mapped + dither / 1023.0);
+    return float4(mapped, 1.0);
 }
 
 inline float segmentDistance(float2 point, float2 start, float2 end) {
     float2 segment = end - start;
     float position = saturate(dot(point - start, segment) / max(dot(segment, segment), 0.000001));
     return length(point - (start + segment * position));
+}
+
+inline float taperedSegmentMask(
+    float2 point,
+    float2 start,
+    float2 end,
+    float startWidth,
+    float endWidth,
+    float antialiasWidth
+) {
+    float2 segment = end - start;
+    float position = saturate(dot(point - start, segment) / max(dot(segment, segment), 0.000001));
+    float distance = length(point - (start + segment * position));
+    float width = mix(startWidth, endWidth, position);
+    return 1.0 - smoothstep(width - antialiasWidth, width + antialiasWidth, distance);
+}
+
+inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStrength) {
+    float2 quantumCell = fract(uv * float(quantumGridSize));
+    bool positiveComponent = quantumCell.x < 0.5;
+    float2 componentPosition = positiveComponent
+        ? float2(quantumCell.x * 2.0 - 0.5, quantumCell.y * 2.0 - 1.0)
+        : float2((quantumCell.x - 0.5) * 2.0 - 0.5, quantumCell.y * 2.0 - 1.0);
+    float2 positiveAmplitude = wave.xy;
+    float2 negativeAmplitude = wave.zw;
+    float probabilityA = dot(positiveAmplitude, positiveAmplitude);
+    float probabilityB = dot(negativeAmplitude, negativeAmplitude);
+    float totalProbability = probabilityA + probabilityB;
+    float componentProbability = positiveComponent ? probabilityA : probabilityB;
+    float scaledProbability = componentProbability * 900000.0;
+    float componentDensity = scaledProbability / (1.0 + scaledProbability);
+    float2 componentAmplitude = positiveComponent ? positiveAmplitude : negativeAmplitude;
+    float inverseComponentMagnitude = rsqrt(max(componentProbability, 0.0000000001));
+    float2 phasor = componentAmplitude * inverseComponentMagnitude;
+    float componentCosine = phasor.x;
+    float componentSine = phasor.y;
+    float crossMagnitude = sqrt(max(probabilityA * probabilityB, 0.0));
+    float balance = 2.0 * crossMagnitude / max(totalProbability, 0.0000000001);
+    float phaseAlignment = saturate(0.5 + 0.5 * dot(positiveAmplitude, negativeAmplitude) /
+        max(crossMagnitude, 0.0000000001));
+    float localCoherence = balance * phaseAlignment;
+
+    float3 componentBase = positiveComponent ? float3(0.02, 0.82, 1.0) : float3(1.0, 0.25, 0.035);
+    float3 phaseCycle = 0.5 + 0.5 * float3(
+        componentCosine,
+        -0.481754 * componentCosine + 0.876307 * componentSine,
+        -0.481754 * componentCosine - 0.876307 * componentSine
+    );
+    float3 phaseColor = mix(float3(0.05, 0.13, 0.24),
+        mix(phaseCycle, sqrt(max(phaseCycle, 0.0)), 0.56), 0.88);
+    float3 componentColor = mix(componentBase, phaseColor, 0.44);
+    float radius = length(componentPosition);
+    float antialiasWidth = max(fwidth(radius) * 1.25, 0.0015);
+    float componentMask = 1.0 - smoothstep(0.46 - antialiasWidth, 0.46 + antialiasWidth, radius);
+    float componentEdge = 1.0 - smoothstep(antialiasWidth * 0.8, antialiasWidth * 2.6,
+        abs(radius - 0.46));
+
+    float phasorDistance = abs(componentPosition.x * phasor.y - componentPosition.y * phasor.x);
+    float forwardProjection = dot(componentPosition, phasor);
+    float phasorLine = (1.0 - smoothstep(0.008, 0.008 + antialiasWidth * 2.2, phasorDistance)) *
+        smoothstep(-0.03, 0.03, forwardProjection) *
+        (1.0 - smoothstep(0.31, 0.36, forwardProjection));
+    float2 arrowTip = phasor * 0.34;
+    float2 arrowNormal = float2(-phasor.y, phasor.x);
+    float arrowHead = max(
+        taperedSegmentMask(componentPosition, arrowTip, arrowTip - phasor * 0.085 + arrowNormal * 0.060,
+            0.014, 0.004, antialiasWidth),
+        taperedSegmentMask(componentPosition, arrowTip, arrowTip - phasor * 0.085 - arrowNormal * 0.060,
+            0.014, 0.004, antialiasWidth)
+    );
+
+    float probabilityRadius = 0.10 + componentDensity * 0.24;
+    float probabilityRing = 1.0 - smoothstep(antialiasWidth * 1.2, antialiasWidth * 3.2,
+        abs(radius - probabilityRadius));
+    float latticeDistance = min(min(quantumCell.x, 1.0 - quantumCell.x),
+        min(quantumCell.y, 1.0 - quantumCell.y));
+    float latticeAA = max(fwidth(latticeDistance) * 1.5, 0.001);
+    float latticeEdge = 1.0 - smoothstep(latticeAA, latticeAA * 3.0, latticeDistance);
+    float componentDivider = 1.0 - smoothstep(latticeAA, latticeAA * 2.8, abs(quantumCell.x - 0.5));
+    float coherenceBridge = (1.0 - smoothstep(0.010, 0.010 + latticeAA * 3.0,
+        abs(quantumCell.y - 0.5))) *
+        smoothstep(0.19, 0.27, quantumCell.x) *
+        (1.0 - smoothstep(0.73, 0.81, quantumCell.x));
+
+    float radialShading = 0.38 + 0.62 * sqrt(saturate(1.0 - radius * radius / 0.22));
+    float3 color = float3(0.0015, 0.003, 0.009);
+    color += componentColor * componentMask * componentDensity * radialShading;
+    color += componentBase * componentEdge * (0.38 + componentDensity * 0.42);
+    color += componentColor * probabilityRing * componentMask * 0.72;
+    color += float3(0.94, 0.985, 1.0) * max(phasorLine, arrowHead) * componentMask *
+        (0.54 + componentDensity * 0.72);
+    color += mix(float3(0.12, 0.52, 0.96), float3(0.96, 0.28, 0.48), phaseAlignment) *
+        coherenceBridge * localCoherence * (0.42 + currentStrength * 0.46);
+    color += float3(0.08, 0.18, 0.27) * latticeEdge * 0.72;
+    color += float3(0.18, 0.38, 0.50) * componentDivider * 0.44;
+    return color;
 }
 
 struct AgentRasterData {
@@ -1179,6 +1361,8 @@ struct AgentRasterData {
     float age;
     float speed;
     float focus;
+    float tracked;
+    float trackingActive;
 };
 
 vertex AgentRasterData agentVertex(
@@ -1222,9 +1406,9 @@ vertex AgentRasterData agentVertex(
     output.biomass = agent.biomass;
     output.age = agent.age;
     output.speed = speed;
-    output.focus = uniforms.trackedAgentID == 0xffffffffu || uniforms.trackedAgentID == instanceID
-        ? 1.0
-        : 0.0;
+    output.focus = uniforms.trackedAgentID == instanceID ? 1.0 : 0.0;
+    output.tracked = uniforms.trackedAgentID == instanceID ? 1.0 : 0.0;
+    output.trackingActive = uniforms.trackedAgentID == 0xffffffffu ? 0.0 : 1.0;
     return output;
 }
 
@@ -1239,64 +1423,136 @@ fragment float4 agentFragment(
     constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::linear);
     float2 p = input.local;
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    float focusVisibility = input.focus > 0.5
+    float scaleVisibility = 1.0 - smoothstep(18.0, 48.0, observationZoom);
+    float focusVisibility = input.trackingActive > 0.5 && input.focus > 0.5
         ? 1.0
-        : 1.0 - smoothstep(5.0, 7.0, observationZoom);
+        : scaleVisibility;
     if (focusVisibility <= 0.001) { discard_fragment(); }
-    float pulse = sin(float(uniforms.step) * (0.032 + input.geneA.x * 0.018) + input.geneB.w * 11.0);
+    float pulsePhase = float(uniforms.step) * (0.032 + input.geneA.x * 0.018) + input.geneB.w * 11.0;
+    float pulse = sin(pulsePhase);
+    float locomotorSpeed = saturate(input.speed * max(uniforms.worldScale, 1.0) * 16000.0);
 
-    float2 abdomenP = float2((p.x + 0.08) / (0.70 + input.geneB.z * 0.08),
-        p.y / (0.42 + input.geneA.y * 0.12));
+    float abdomenLength = 0.66 + input.geneB.z * 0.15;
+    float abdomenWidth = 0.36 + input.geneA.y * 0.16;
+    float2 abdomenP = float2((p.x + 0.08) / abdomenLength, p.y / abdomenWidth);
     float abdomenDistance = length(abdomenP);
-    float abdomen = 1.0 - smoothstep(0.88, 1.02, abdomenDistance);
-    float2 headCenter = float2(0.58, 0.0);
-    float headRadius = 0.22 + input.geneC.w * 0.08 + input.geneA.z * 0.035;
+    float abdomenAA = max(fwidth(abdomenDistance) * 1.15, 0.0025);
+    float abdomen = 1.0 - smoothstep(1.0 - abdomenAA, 1.0 + abdomenAA, abdomenDistance);
+
+    float2 headCenter = float2(0.56 + input.geneB.z * 0.04, 0.0);
+    float headRadius = 0.19 + input.geneC.w * 0.13 + input.geneA.z * 0.045;
     float headDistance = length(p - headCenter) / headRadius;
-    float head = 1.0 - smoothstep(0.84, 1.06, headDistance);
-    float tailWave = sin((p.x + 0.76) * (11.0 + input.geneB.z * 5.0) + pulse * 1.4) *
-        (0.07 + input.geneB.z * 0.035);
-    float tailRange = smoothstep(-1.03, -0.77, p.x) * (1.0 - smoothstep(-0.56, -0.43, p.x));
-    float tail = (1.0 - smoothstep(0.035, 0.085, abs(p.y - tailWave))) * tailRange;
-    float limbWidth = 0.030 + input.geneA.y * 0.022;
-    float stride = pulse * (0.08 + input.speed * 180.0);
-    float limbs = 1.0 - smoothstep(limbWidth, limbWidth + 0.035, segmentDistance(
-        p, float2(-0.17, 0.29), float2(-0.33 + stride, 0.64)
-    ));
-    limbs = max(limbs, 1.0 - smoothstep(limbWidth, limbWidth + 0.035, segmentDistance(
-        p, float2(-0.17, -0.29), float2(-0.33 - stride, -0.64)
-    )));
-    limbs *= 0.34 + input.geneA.z * 0.66;
-    float body = max(max(abdomen, head), max(tail, limbs));
-    if (body <= 0.001) { discard_fragment(); }
+    float headAA = max(fwidth(headDistance) * 1.15, 0.003);
+    float head = 1.0 - smoothstep(1.0 - headAA, 1.0 + headAA, headDistance);
 
-    float abdomenEdge = abdomen * smoothstep(0.70, 0.96, abdomenDistance);
-    float headEdge = head * smoothstep(0.63, 0.94, headDistance);
-    float edge = max(abdomenEdge, headEdge);
-    float interior = abdomen * (1.0 - smoothstep(0.34, 0.79, abdomenDistance));
-    float sensor = 1.0 - smoothstep(0.035, 0.075,
-        length(p - headCenter - float2(headRadius * 0.25, headRadius * 0.36)));
-    sensor *= head;
-    float jawTop = 1.0 - smoothstep(0.025, 0.060, segmentDistance(
-        p, headCenter + float2(headRadius * 0.48, 0.03), float2(0.98, 0.16)
-    ));
-    float jawBottom = 1.0 - smoothstep(0.025, 0.060, segmentDistance(
-        p, headCenter + float2(headRadius * 0.48, -0.03), float2(0.98, -0.16)
-    ));
-    float jaws = max(jawTop, jawBottom) * smoothstep(0.08, 0.38, input.geneC.w);
-    body = max(body, jaws);
+    float tailWave = sin((p.x + 0.78) * (10.0 + input.geneB.z * 7.0) + pulsePhase * 1.35) *
+        (0.045 + input.geneB.z * 0.055) * (0.55 + locomotorSpeed * 0.45);
+    float tailRange = smoothstep(-1.02, -0.80, p.x) * (1.0 - smoothstep(-0.56, -0.45, p.x));
+    float tailDistance = abs(p.y - tailWave);
+    float tailWidth = 0.036 + input.geneB.z * 0.022;
+    float tailAA = max(fwidth(tailDistance) * 1.2, 0.0025);
+    float tail = (1.0 - smoothstep(tailWidth - tailAA, tailWidth + tailAA, tailDistance)) * tailRange;
 
-    float3 lineage = hsvToRGB(float3(input.geneB.w, 0.84, 0.64 + input.geneA.w * 0.22));
+    float gait = pulse * (0.06 + locomotorSpeed * 0.12);
+    float appendageWidth = 0.018 + input.geneA.y * 0.024;
+    float appendageAA = max(fwidth(p.y) * 1.4, 0.003);
+    float appendageReach = 0.48 + input.geneA.z * 0.22;
+    const float appendageAnchors[3] = { -0.34, -0.07, 0.20 };
+    float limbs = 0.0;
+    float limbJoints = 0.0;
+    for (uint limbIndex = 0; limbIndex < 3; ++limbIndex) {
+        float anchorX = appendageAnchors[limbIndex];
+        float gaitSign = limbIndex == 1u ? -1.0 : 1.0;
+        float tipX = anchorX - 0.14 + gait * gaitSign;
+        float rootY = abdomenWidth * (0.70 - float(limbIndex) * 0.035);
+        float tipY = appendageReach * (0.82 + float(limbIndex) * 0.08);
+        float2 upperRoot = float2(anchorX, rootY);
+        float2 upperKnee = float2(anchorX - 0.08 + gait * 0.45, mix(rootY, tipY, 0.48));
+        float2 upperTip = float2(tipX, tipY);
+        float2 lowerRoot = float2(anchorX, -rootY);
+        float2 lowerKnee = float2(anchorX - 0.08 - gait * 0.55, -mix(rootY, tipY, 0.48));
+        float2 lowerTip = float2(tipX - gait * 1.4, -tipY);
+        float upperLimb = max(
+            taperedSegmentMask(p, upperRoot, upperKnee, appendageWidth, appendageWidth * 0.74, appendageAA),
+            taperedSegmentMask(p, upperKnee, upperTip, appendageWidth * 0.74, appendageWidth * 0.30, appendageAA)
+        );
+        float lowerLimb = max(
+            taperedSegmentMask(p, lowerRoot, lowerKnee, appendageWidth, appendageWidth * 0.74, appendageAA),
+            taperedSegmentMask(p, lowerKnee, lowerTip, appendageWidth * 0.74, appendageWidth * 0.30, appendageAA)
+        );
+        limbs = max(limbs, max(upperLimb, lowerLimb));
+        float jointRadius = appendageWidth * 1.18;
+        limbJoints = max(limbJoints, 1.0 - smoothstep(jointRadius - appendageAA,
+            jointRadius + appendageAA, min(length(p - upperKnee), length(p - lowerKnee))));
+    }
+    limbs *= 0.24 + input.geneA.z * 0.76;
+
+    float defenseInvestment = smoothstep(0.48, 0.90, input.geneA.w);
+    float spines = 0.0;
+    const float spineAnchors[3] = { -0.38, -0.12, 0.15 };
+    for (uint spineIndex = 0; spineIndex < 3; ++spineIndex) {
+        float spineX = spineAnchors[spineIndex];
+        float spineLength = 0.10 + input.geneA.w * 0.14;
+        float upperSpine = segmentDistance(p, float2(spineX, abdomenWidth * 0.80),
+            float2(spineX - 0.035, abdomenWidth + spineLength));
+        float lowerSpine = segmentDistance(p, float2(spineX, -abdomenWidth * 0.80),
+            float2(spineX - 0.035, -abdomenWidth - spineLength));
+        spines = max(spines, 1.0 - smoothstep(0.012, 0.012 + appendageAA,
+            min(upperSpine, lowerSpine)));
+    }
+    spines *= defenseInvestment;
+
+    float predatoryInvestment = smoothstep(0.08, 0.38, input.geneC.w);
+    float jawAperture = 0.10 + predatoryInvestment * (0.08 + 0.035 * (0.5 + 0.5 * pulse));
+    float jawTop = 1.0 - smoothstep(0.020, 0.020 + appendageAA, segmentDistance(
+        p, headCenter + float2(headRadius * 0.48, 0.025), float2(0.98, jawAperture)
+    ));
+    float jawBottom = 1.0 - smoothstep(0.020, 0.020 + appendageAA, segmentDistance(
+        p, headCenter + float2(headRadius * 0.48, -0.025), float2(0.98, -jawAperture)
+    ));
+    float jaws = max(jawTop, jawBottom) * predatoryInvestment;
+
+    float body = max(max(abdomen, head), max(max(tail, limbs), max(spines, jaws)));
+    float trackedRing = input.tracked *
+        (1.0 - smoothstep(0.010, 0.026, abs(length(p) - 0.91))) *
+        smoothstep(0.34, 0.48, 0.5 + 0.5 * sin(atan2(p.y, p.x) * 12.0 - pulsePhase));
+    if (max(body, trackedRing) <= 0.001) { discard_fragment(); }
+
+    float abdomenEdge = abdomen * smoothstep(0.72, 0.97, abdomenDistance);
+    float headEdge = head * smoothstep(0.64, 0.95, headDistance);
+    float edge = max(max(abdomenEdge, headEdge), max(spines, jaws));
+    float interior = abdomen * (1.0 - smoothstep(0.38, 0.82, abdomenDistance));
+    float sensorA = 1.0 - smoothstep(0.022, 0.022 + appendageAA,
+        length(p - headCenter - float2(headRadius * 0.24, headRadius * 0.34)));
+    float sensorB = 1.0 - smoothstep(0.022, 0.022 + appendageAA,
+        length(p - headCenter - float2(headRadius * 0.24, -headRadius * 0.34)));
+    float sensor = max(sensorA, sensorB) * head;
+
+    float3 lineage = hsvToRGB(float3(input.geneB.w, 0.82, 0.62 + input.geneA.w * 0.24));
     float3 defenseColor = float3(0.02, 0.95, 0.64);
     float3 predatorColor = float3(1.0, 0.045, 0.012);
-    float3 rim = mix(defenseColor, predatorColor, input.geneC.w);
+    float3 rim = mix(defenseColor, predatorColor, saturate(input.geneC.w * 1.35));
     float energy = saturate(input.energy / 1.25);
     float bodyBulge = sqrt(saturate(1.0 - abdomenDistance * abdomenDistance));
-    float light = 0.48 + bodyBulge * 0.44;
-    float3 color = lineage * body * light * (0.62 + input.biomass * 0.38);
-    color += rim * edge * (0.52 + input.geneA.w * 0.58);
-    color += float3(1.0, 0.69, 0.045) * interior * energy * energy * 0.54;
-    color += float3(0.84, 0.98, 1.0) * sensor * 0.96;
-    color += predatorColor * jaws * (0.56 + input.geneC.w * 0.92);
+    float3 surfaceNormal = normalize(float3(abdomenP.x * 0.42, abdomenP.y * 0.62,
+        max(bodyBulge, 0.08)));
+    float3 lightDirection = normalize(float3(-0.42, 0.58, 0.74));
+    float diffuse = 0.34 + 0.66 * saturate(dot(surfaceNormal, lightDirection));
+    float specular = pow(saturate(dot(surfaceNormal, normalize(lightDirection + float3(0.0, 0.0, 1.0)))),
+        28.0 + input.geneA.y * 52.0) * abdomen;
+    float nicheTotal = max(input.geneC.x + input.geneC.y + input.geneC.z, 0.001);
+    float3 nicheColor = (input.geneC.x * float3(0.02, 0.78, 0.94) +
+        input.geneC.y * float3(1.0, 0.52, 0.025) +
+        input.geneC.z * float3(0.86, 0.08, 0.78)) / nicheTotal;
+    float3 bodyColor = mix(lineage, nicheColor, 0.16 + input.geneB.x * 0.20);
+    float3 color = bodyColor * body * diffuse * (0.60 + input.biomass * 0.40);
+    color += rim * edge * (0.42 + input.geneA.w * 0.72);
+    color += float3(1.0, 0.69, 0.045) * interior * energy * energy * 0.40;
+    color += float3(0.84, 0.98, 1.0) * sensor * 1.34;
+    color += predatorColor * jaws * (0.72 + input.geneC.w * 1.18);
+    color += float3(0.84, 0.96, 1.0) * specular * (0.14 + input.geneA.y * 0.24);
+    color += rim * limbJoints * (0.24 + input.geneA.z * 0.34);
+    color += float3(0.12, 0.92, 1.0) * trackedRing * 1.8;
 
     float organismReveal = smoothstep(4.0, 18.0, observationZoom);
     float chemistryReveal = smoothstep(18.0, 58.0, observationZoom);
@@ -1305,12 +1561,24 @@ fragment float4 agentFragment(
     float tissueNoiseA = visualNoise(p * (16.0 + input.geneB.x * 9.0) + input.geneA.xy * 17.0);
     float tissueNoiseB = visualNoise(p * 31.0 + input.geneA.zw * 29.0);
     float channels = (1.0 - smoothstep(0.035, 0.14, abs(tissueNoiseA - tissueNoiseB))) * abdomen;
+    float segmentCount = 3.0 + floor(input.geneB.x * 5.0);
+    float segmentCoordinate = saturate((p.x + abdomenLength * 0.92) / (abdomenLength * 1.72));
+    float segmentPhase = fract(segmentCoordinate * segmentCount);
+    float segmentRidge = (1.0 - smoothstep(0.035, 0.12, min(segmentPhase, 1.0 - segmentPhase))) *
+        abdomen * smoothstep(0.42, 0.92, abdomenDistance);
+    float pigmentation = smoothstep(0.58 + input.geneA.x * 0.16, 0.94, tissueNoiseA * 0.62 + tissueNoiseB * 0.38) *
+        abdomen * (1.0 - abdomenEdge);
     float nucleusRadius = 0.095 + input.geneB.x * 0.045;
     float nucleus = (1.0 - smoothstep(nucleusRadius, nucleusRadius * 1.55,
         length(p - float2(-0.12, (input.geneA.z - 0.5) * 0.12)))) * abdomen;
+    float reproductionReadiness = smoothstep(0.88, 1.06, input.energy) * smoothstep(560.0, 720.0, input.age);
+    float broodPulse = reproductionReadiness * (0.72 + 0.28 * sin(pulsePhase * 1.7)) * nucleus;
     color += mix(float3(0.03, 0.58, 0.98), float3(0.98, 0.59, 0.04), input.geneA.x) *
-        channels * organismReveal * 0.34;
-    color += float3(0.98, 0.08, 0.74) * nucleus * organismReveal * 0.82;
+        channels * organismReveal * 0.22;
+    color += nicheColor * pigmentation * organismReveal * 0.34;
+    color += rim * segmentRidge * organismReveal * (0.18 + input.geneA.w * 0.28);
+    color += float3(0.98, 0.08, 0.74) * nucleus * organismReveal * 0.74;
+    color += float3(0.98, 0.92, 0.30) * broodPulse * organismReveal * 1.10;
 
     float4 localState = state.sample(fieldSampler, input.worldUV, 0);
     float4 localEcology = ecology.sample(fieldSampler, input.worldUV, 0);
@@ -1323,51 +1591,56 @@ fragment float4 agentFragment(
     color = mix(color, chemistryColor, chemistryReveal * abdomen);
     color += float3(0.68, 1.0, 0.88) * edge * chemistryReveal * 0.48;
 
-    float4 wave = quantum.sample(quantumSampler, input.worldUV);
-    float2 quantumTexel = 1.0 / float(quantumGridSize);
-    float4 waveRight = quantum.sample(quantumSampler, input.worldUV + float2(quantumTexel.x, 0.0));
-    float4 waveUp = quantum.sample(quantumSampler, input.worldUV + float2(0.0, quantumTexel.y));
-    float probabilityA = dot(wave.xy, wave.xy);
-    float probabilityB = dot(wave.zw, wave.zw);
-    float probability = probabilityA + probabilityB;
-    float2 amplitude = wave.xy + wave.zw;
-    float phase = fract(atan2(amplitude.y, amplitude.x) / (2.0 * M_PI_F) + 1.0);
-    float density = 1.0 - exp(-probability * 285000.0);
-    float polarization = (probabilityA - probabilityB) / max(probability, 0.0000000001);
-    float2 current = float2(
-        complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
-        complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
-    );
-    float currentStrength = saturate(length(current) * 950000.0);
-    float3 spinColor = mix(float3(1.0, 0.22, 0.025), float3(0.02, 0.82, 1.0), polarization * 0.5 + 0.5);
-    float3 quantumColor = mix(quantumPhaseColor(phase), spinColor, 0.38) * density;
-    quantumColor += float3(0.82, 0.97, 1.0) * currentStrength * density * 0.56;
+    if (quantumReveal > 0.001) {
+        float4 wave = quantum.sample(quantumSampler, input.worldUV);
+        float2 quantumTexel = 1.0 / float(quantumGridSize);
+        float4 waveRight = quantum.sample(quantumSampler, input.worldUV + float2(quantumTexel.x, 0.0));
+        float4 waveUp = quantum.sample(quantumSampler, input.worldUV + float2(0.0, quantumTexel.y));
+        float4 waveDiagonal = quantum.sample(quantumSampler, input.worldUV + quantumTexel);
+        float probabilityA = dot(wave.xy, wave.xy);
+        float probabilityB = dot(wave.zw, wave.zw);
+        float probability = probabilityA + probabilityB;
+        float phase = spinorPhase(wave);
+        float phaseRight = spinorPhase(waveRight);
+        float phaseUp = spinorPhase(waveUp);
+        float phaseDiagonal = spinorPhase(waveDiagonal);
+        float phaseWinding = abs(
+            wrappedPhaseDelta(phase, phaseRight) +
+            wrappedPhaseDelta(phaseRight, phaseDiagonal) +
+            wrappedPhaseDelta(phaseDiagonal, phaseUp) +
+            wrappedPhaseDelta(phaseUp, phase)
+        );
+        float density = 1.0 - exp(-probability * 285000.0);
+        float polarization = (probabilityA - probabilityB) / max(probability, 0.0000000001);
+        float2 current = float2(
+            complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
+            complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
+        );
+        float currentMagnitude = length(current);
+        float currentStrength = saturate(currentMagnitude * 950000.0);
+        float2 currentDirection = current / max(currentMagnitude, 0.0000000001);
+        float phaseContour = 0.60 + 0.40 * cos(phase * 28.0 * M_PI_F);
+        float flowCoordinate = fract(dot(input.worldUV * float(quantumGridSize), currentDirection) * 0.22 -
+            float(uniforms.step) * 0.012);
+        float currentPulse = 1.0 - smoothstep(0.035, 0.13, abs(flowCoordinate - 0.5));
+        float3 spinColor = mix(float3(1.0, 0.22, 0.025), float3(0.02, 0.82, 1.0),
+            polarization * 0.5 + 0.5);
+        float3 quantumColor = mix(quantumPhaseColor(phase), spinColor, 0.38) *
+            density * (0.52 + phaseContour * 0.48);
+        quantumColor += float3(0.82, 0.97, 1.0) * currentPulse * currentStrength * density * 0.68;
+        float logDensity = log2(1.0 + probability * 1200000.0);
+        float densityIsoline = 1.0 - smoothstep(0.025, 0.095,
+            abs(fract(logDensity * 2.4) - 0.5));
+        float vortexCore = smoothstep(0.55, 0.92, phaseWinding) *
+            (1.0 - smoothstep(0.025, 0.28, density));
+        quantumColor += float3(0.38, 0.92, 1.0) * densityIsoline * density * 0.18;
+        quantumColor += float3(1.0, 0.08, 0.72) * vortexCore * 1.65;
 
-    float2 quantumCell = fract(input.worldUV * float(quantumGridSize));
-    bool positiveComponent = quantumCell.x < 0.5;
-    float2 componentPosition = positiveComponent
-        ? float2(quantumCell.x * 2.0, quantumCell.y) - 0.5
-        : float2((quantumCell.x - 0.5) * 2.0, quantumCell.y) - 0.5;
-    float2 componentAmplitude = positiveComponent ? wave.xy : wave.zw;
-    float componentProbability = positiveComponent ? probabilityA : probabilityB;
-    float componentDensity = 1.0 - exp(-componentProbability * 520000.0);
-    float componentPhase = fract(atan2(componentAmplitude.y, componentAmplitude.x) / (2.0 * M_PI_F) + 1.0);
-    float3 componentBase = positiveComponent ? float3(0.02, 0.82, 1.0) : float3(1.0, 0.25, 0.035);
-    float3 componentColor = mix(componentBase, quantumPhaseColor(componentPhase), 0.46);
-    float componentMask = 1.0 - smoothstep(0.37, 0.48, length(componentPosition));
-    float2 phasor = float2(cos(componentPhase * 2.0 * M_PI_F), sin(componentPhase * 2.0 * M_PI_F));
-    float phasorLine = 1.0 - smoothstep(0.018, 0.055,
-        abs(componentPosition.x * phasor.y - componentPosition.y * phasor.x));
-    phasorLine *= smoothstep(0.38, 0.12, length(componentPosition));
-    float latticeEdge = 1.0 - smoothstep(0.015, 0.065,
-        min(min(quantumCell.x, 1.0 - quantumCell.x), min(quantumCell.y, 1.0 - quantumCell.y)));
-    float3 spinorTile = float3(0.002, 0.004, 0.010) +
-        componentColor * componentMask * componentDensity;
-    spinorTile += float3(0.92, 0.98, 1.0) * phasorLine * componentMask * componentDensity * 0.86;
-    spinorTile += float3(0.08, 0.18, 0.26) * latticeEdge * 0.52;
-    quantumColor = mix(quantumColor, spinorTile, latticeReveal);
-    color = mix(color, quantumColor, quantumReveal * abdomen);
-    color += rim * edge * quantumReveal * (0.18 + currentStrength * 0.52);
+        float3 spinorTile = spinorCellVisualization(input.worldUV, wave, currentStrength);
+        quantumColor = mix(quantumColor, spinorTile, latticeReveal);
+        color = mix(color, quantumColor, quantumReveal * abdomen);
+        color += rim * edge * quantumReveal * (0.18 + currentStrength * 0.52);
+    }
 
     if (uniforms.displayMode == 1) {
         color = mix(color, float3(localState.x, localEcology.x, localEcology.y) * body * 1.3, 0.72);
@@ -1377,8 +1650,9 @@ fragment float4 agentFragment(
         float enzymes = max(input.geneC.x + input.geneC.y + input.geneC.z, 0.001);
         color = input.geneC.xyz / enzymes * body * 1.2 + predatorColor * input.geneC.w * head;
     }
-    color = 1.0 - exp(-max(color, 0.0) * 1.42);
-    return float4(color, saturate(body) * focusVisibility);
+    color += float3(0.12, 0.92, 1.0) * trackedRing * 1.8;
+    float alpha = saturate(max(body, trackedRing)) * focusVisibility;
+    return float4(max(color, 0.0) * focusVisibility * 0.84, alpha);
 }
 
 fragment float4 quantumSurfaceFragment(
@@ -1404,16 +1678,32 @@ fragment float4 quantumSurfaceFragment(
     float probabilityA = dot(wave.xy, wave.xy);
     float probabilityB = dot(wave.zw, wave.zw);
     float probability = probabilityA + probabilityB;
-    float density = 1.0 - exp(-probability * 285000.0);
-    float2 combinedAmplitude = wave.xy + wave.zw;
-    float phase = fract(atan2(combinedAmplitude.y, combinedAmplitude.x) / (2.0 * M_PI_F) + 1.0);
-    float polarization = (probabilityA - probabilityB) / max(probability, 0.0000000001);
     float2 current = float2(
         complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
         complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
     );
     float currentMagnitude = length(current);
     float currentStrength = saturate(currentMagnitude * 950000.0);
+    float latticeReveal = smoothstep(420.0, 900.0, observationZoom);
+    if (latticeReveal >= 0.999) {
+        float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
+        return float4(max(spinorTile, 0.0) * 1.16, 1.0);
+    }
+
+    float density = 1.0 - exp(-probability * 285000.0);
+    float4 waveDiagonal = quantum.sample(quantumSampler, uv + quantumTexel);
+    float2 combinedAmplitude = wave.xy + wave.zw;
+    float phase = fract(atan2(combinedAmplitude.y, combinedAmplitude.x) / (2.0 * M_PI_F) + 1.0);
+    float phaseRight = spinorPhase(waveRight);
+    float phaseUp = spinorPhase(waveUp);
+    float phaseDiagonal = spinorPhase(waveDiagonal);
+    float phaseWinding = abs(
+        wrappedPhaseDelta(phase, phaseRight) +
+        wrappedPhaseDelta(phaseRight, phaseDiagonal) +
+        wrappedPhaseDelta(phaseDiagonal, phaseUp) +
+        wrappedPhaseDelta(phaseUp, phase)
+    );
+    float polarization = (probabilityA - probabilityB) / max(probability, 0.0000000001);
     float2 currentDirection = current / max(currentMagnitude, 0.0000000001);
     float phaseContour = 0.62 + 0.38 * cos(phase * 28.0 * M_PI_F);
     float flowCoordinate = fract(dot(uv * float(quantumGridSize), currentDirection) * 0.22 -
@@ -1429,6 +1719,13 @@ fragment float4 quantumSurfaceFragment(
     waveColor += float3(0.82, 0.97, 1.0) * currentPulse * currentStrength * density * 0.68;
     float node = 1.0 - smoothstep(0.018, 0.15, density);
     waveColor *= 1.0 - node * 0.84;
+    float logDensity = log2(1.0 + probability * 1200000.0);
+    float densityIsoline = 1.0 - smoothstep(0.025, 0.095,
+        abs(fract(logDensity * 2.4) - 0.5));
+    float vortexCore = smoothstep(0.55, 0.92, phaseWinding) *
+        (1.0 - smoothstep(0.025, 0.28, density));
+    waveColor += float3(0.38, 0.92, 1.0) * densityIsoline * density * 0.18;
+    waveColor += float3(1.0, 0.08, 0.72) * vortexCore * 1.65;
 
     float4 localState = state.sample(fieldSampler, uv, 0);
     float4 localEcology = ecology.sample(fieldSampler, uv, 0);
@@ -1455,35 +1752,10 @@ fragment float4 quantumSurfaceFragment(
     color += mix(float3(0.03, 0.34, 0.84), float3(0.05, 0.96, 0.55), potential) *
         potentialBands * (1.0 - waveReveal) * density * 0.26;
 
-    float2 quantumCell = fract(uv * float(quantumGridSize));
-    bool positiveComponent = quantumCell.x < 0.5;
-    float2 componentPosition = positiveComponent
-        ? float2(quantumCell.x * 2.0, quantumCell.y) - 0.5
-        : float2((quantumCell.x - 0.5) * 2.0, quantumCell.y) - 0.5;
-    float2 componentAmplitude = positiveComponent ? wave.xy : wave.zw;
-    float componentProbability = positiveComponent ? probabilityA : probabilityB;
-    float componentDensity = 1.0 - exp(-componentProbability * 520000.0);
-    float componentPhase = fract(
-        atan2(componentAmplitude.y, componentAmplitude.x) / (2.0 * M_PI_F) + 1.0
-    );
-    float3 componentBase = positiveComponent ? float3(0.02, 0.82, 1.0) : float3(1.0, 0.25, 0.035);
-    float3 componentColor = mix(componentBase, quantumPhaseColor(componentPhase), 0.46);
-    float componentMask = 1.0 - smoothstep(0.37, 0.48, length(componentPosition));
-    float2 phasor = float2(cos(componentPhase * 2.0 * M_PI_F), sin(componentPhase * 2.0 * M_PI_F));
-    float phasorLine = 1.0 - smoothstep(0.018, 0.055,
-        abs(componentPosition.x * phasor.y - componentPosition.y * phasor.x));
-    phasorLine *= smoothstep(0.38, 0.12, length(componentPosition));
-    float latticeEdge = 1.0 - smoothstep(0.015, 0.065,
-        min(min(quantumCell.x, 1.0 - quantumCell.x), min(quantumCell.y, 1.0 - quantumCell.y)));
-    float3 spinorTile = float3(0.002, 0.004, 0.010) +
-        componentColor * componentMask * componentDensity;
-    spinorTile += float3(0.92, 0.98, 1.0) * phasorLine * componentMask * componentDensity * 0.86;
-    spinorTile += float3(0.08, 0.18, 0.26) * latticeEdge * 0.52;
-    float latticeReveal = smoothstep(420.0, 900.0, observationZoom);
+    float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
     color = mix(color, spinorTile, latticeReveal);
 
-    color = 1.0 - exp(-max(color, 0.0) * 1.52);
-    return float4(color, 1.0);
+    return float4(max(color, 0.0) * 1.16, 1.0);
 }
 
 fragment float4 worldSurfaceFragment(
@@ -1493,7 +1765,6 @@ fragment float4 worldSurfaceFragment(
     texture2d_array<float, access::sample> environment [[texture(2)]],
     constant SimulationUniforms& uniforms [[buffer(0)]]
 ) {
-    constexpr sampler cellSampler(coord::normalized, address::clamp_to_edge, filter::nearest);
     constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
     float safeAspect = max(uniforms.viewportAspect, 0.001);
     float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
@@ -1502,15 +1773,16 @@ fragment float4 worldSurfaceFragment(
     float2 uv = clamp(rawUV, 0.0, 1.0);
     float2 texel = 1.0 / float2(uniforms.width, uniforms.height);
 
-    float4 cell = state.sample(cellSampler, uv, 0);
-    float4 chemistry = ecology.sample(cellSampler, uv, 0);
+    float4 cell = state.sample(fieldSampler, uv, 0);
+    float4 chemistry = ecology.sample(fieldSampler, uv, 0);
     float4 geology = environment.sample(fieldSampler, uv, 0);
     float terrain = visualNoise(uv * 43.0);
     float fineTerrain = visualNoise(uv * 97.0 + float2(17.0, 31.0));
 
-    float rockRight = environment.sample(fieldSampler, uv + float2(texel.x, 0.0), 0).w;
-    float rockUp = environment.sample(fieldSampler, uv + float2(0.0, texel.y), 0).w;
-    float rockGradient = length(float2(rockRight - geology.w, rockUp - geology.w));
+    float4 geologyRight = environment.sample(fieldSampler, uv + float2(texel.x, 0.0), 0);
+    float4 geologyUp = environment.sample(fieldSampler, uv + float2(0.0, texel.y), 0);
+    float2 rockSlope = float2(geologyRight.w - geology.w, geologyUp.w - geology.w);
+    float rockGradient = length(rockSlope);
     float rock = smoothstep(0.30, 0.68, geology.w + (terrain - 0.5) * 0.52);
     float rockRim = smoothstep(0.018, 0.12, rockGradient) * (1.0 - rock * 0.35);
 
@@ -1518,6 +1790,18 @@ fragment float4 worldSurfaceFragment(
     float resourceB = saturate(chemistry.x * 0.86);
     float detritus = saturate(chemistry.y * 1.18);
     float toxin = saturate(max(chemistry.z, geology.z) * 1.28);
+    float4 stateRight = state.sample(fieldSampler, uv + float2(texel.x, 0.0), 0);
+    float4 stateUp = state.sample(fieldSampler, uv + float2(0.0, texel.y), 0);
+    float4 ecologyRight = ecology.sample(fieldSampler, uv + float2(texel.x, 0.0), 0);
+    float4 ecologyUp = ecology.sample(fieldSampler, uv + float2(0.0, texel.y), 0);
+    float2 resourceGradientA = float2(stateRight.x - cell.x, stateUp.x - cell.x);
+    float2 resourceGradientB = float2(ecologyRight.x - chemistry.x, ecologyUp.x - chemistry.x);
+    float resourceFlux = saturate((length(resourceGradientA) + length(resourceGradientB)) * 5.5);
+    float resourcePotential = cell.x * 0.62 + chemistry.x * 0.52 + chemistry.y * 0.22;
+    float resourceIsoline = 1.0 - smoothstep(0.025, 0.095,
+        abs(fract(resourcePotential * 13.0 + terrain * 0.12) - 0.5));
+    float ecotone = smoothstep(0.025, 0.22, abs(resourceA - resourceB)) *
+        smoothstep(0.02, 0.24, min(resourceA, resourceB));
     float nutrientBed = smoothstep(0.16, 0.66, geology.x + (terrain - 0.5) * 0.30);
     float mineralBed = smoothstep(0.16, 0.66, geology.y + (fineTerrain - 0.5) * 0.34);
     float grain = visualNoise(uv * float2(uniforms.width, uniforms.height) * 0.84 + float2(11.0, 3.0));
@@ -1551,15 +1835,21 @@ fragment float4 worldSurfaceFragment(
         color += float3(0.00, 0.045, 0.055) * resourceA;
         color += float3(0.045, 0.007, 0.064) * resourceB;
         color *= 1.0 - rock * 0.76;
-        color += float3(0.055, 0.070, 0.078) * rock * (0.58 + terrain * 0.34);
-        color += float3(0.30, 0.38, 0.40) * rockRim * 0.24;
+        float3 rockNormal = normalize(float3(-rockSlope * 15.0, 0.42));
+        float rockLight = 0.32 + 0.68 * saturate(dot(rockNormal, normalize(float3(-0.44, 0.56, 0.70))));
+        float rockStrata = 0.72 + 0.28 * sin((geology.w * 11.0 + fineTerrain * 2.0) * M_PI_F);
+        color += float3(0.065, 0.082, 0.090) * rock * rockLight * rockStrata;
+        color += float3(0.42, 0.50, 0.50) * rockRim * (0.18 + rockLight * 0.32);
         color += float3(0.02, 0.82, 0.48) * nutrient * (1.0 - rock) * 0.40;
         color += float3(1.0, 0.56, 0.025) * mineral * (1.0 - rock) * 0.48;
         color += float3(1.0, 0.025, 0.012) * hazard * 0.66;
+        color += mix(float3(0.02, 0.44, 0.78), float3(0.06, 0.92, 0.54),
+            saturate(resourceA / max(resourceA + resourceB, 0.001))) *
+            resourceIsoline * resourceFlux * (1.0 - rock) * 0.18;
+        color += float3(0.72, 0.12, 0.94) * ecotone * (1.0 - rock) * 0.10;
     }
 
-    color = 1.0 - exp(-max(color, 0.0) * 1.46);
-    return float4(color, 1.0);
+    return float4(max(color, 0.0) * 1.08, 1.0);
 }
 
 fragment float4 worldFragment(

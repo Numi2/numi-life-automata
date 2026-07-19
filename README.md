@@ -104,6 +104,8 @@ The interface uses one camera over one persistent simulation. The scale controls
 | Occupancy buffer | `384` atomic integers | `UInt32` | Shared | Stable slot allocation and death |
 | Observation ring | `8` state/occupancy buffer pairs | Structured buffers | Shared | Camera-follow readback without reusing an in-flight slot |
 | Metric reductions | `32` fixed-point accumulators | Atomic `UInt32` | Shared | Population-level measurements |
+| Linear scene target | Drawable dimensions | `RGBA16Float` | GPU private | Unclamped field and agent radiance before display mapping |
+| Bloom ping-pong textures | Quarter drawable dimensions | `RGBA16Float` | GPU private | Bright-pass extraction and separable Gaussian filtering |
 
 ### Reaction-channel layout
 
@@ -184,6 +186,31 @@ The reported norm is the fixed-point GPU reduction
 ```
 
 It is an error monitor, not a normalization constraint imposed after every frame.
+
+### Spinor instrument encoding
+
+At `900x`, each displayed lattice site is divided into one glyph for `psi_0` and one for `psi_1`. The component amplitude `a_c = (Re psi_c, Im psi_c)` is mapped to
+
+```math
+d_c=\frac{900000|a_c|^2}{1+900000|a_c|^2},
+\qquad
+r_c=0.10+0.24d_c.
+```
+
+The fixed outer circle identifies the component support, while the inner ring radius `r_c` and interior radiance encode bounded component probability. The phasor direction is
+
+```math
+\phi_c=\operatorname{atan2}(\operatorname{Im}\psi_c,\operatorname{Re}\psi_c).
+```
+
+The bridge between components is modulated by the local coherence proxy
+
+```math
+\chi=\frac{2|a_0||a_1|}{|a_0|^2+|a_1|^2+\epsilon}
+\frac{1+\cos(\phi_0-\phi_1)}{2}.
+```
+
+At `160x`, logarithmic density isolines, phase contours, a finite-difference probability-current proxy, and phase-winding cores replace the component-cell instrument. These marks are visual measurements of the simulated spinor; they are not independent particles or additional state variables.
 
 ### Spinor-to-reaction coupling
 
@@ -425,11 +452,17 @@ flowchart LR
     A -->|resource-scoped barrier| S[spawnAgents]
     W1 --> Q[evolveQuantumField]
     Q --> Q1[swap spinor texture references]
-    W1 --> F[full-screen fragment pass]
+    W1 --> F[scale-specific field fragment]
     Q1 --> F
-    S --> I[384-instance agent draw]
-    F --> D[drawable]
-    I --> D
+    S --> I[384-instance agent draw with scale rejection]
+    F --> H[RGBA16Float linear scene]
+    I --> H
+    H --> P[quarter-resolution bright prefilter]
+    P --> BX[horizontal Gaussian blur]
+    BX --> BY[vertical Gaussian blur]
+    H --> C[hue-preserving exposure and tone map]
+    BY --> C
+    C --> D[BGRA8 sRGB drawable]
     S --> O[8-slot observation ring]
 ```
 
@@ -447,6 +480,9 @@ flowchart LR
 | Measurement | `193²` / `1024²` | `measureWorld`, `measureQuantumField` |
 | Field rendering | One full-screen triangle | `quantumSurfaceFragment` or `worldSurfaceFragment` |
 | Agent rendering | `384` instanced quads | `agentVertex`, `agentFragment` |
+| Bright-pass extraction | Quarter drawable dimensions | `bloomPrefilter` |
+| Separable bloom | Two quarter-resolution dispatches | `blurBloom` |
+| Display composition | One full-screen triangle | `compositeFragment` |
 
 Threadgroup dimensions are selected from each compute pipeline's `threadExecutionWidth` and `maxTotalThreadsPerThreadgroup`, capped at `16 x 16` for two-dimensional dispatches.
 
@@ -456,7 +492,13 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **True ping-pong state.** The renderer swaps `MTLTexture` references after each update instead of blitting entire state textures back into fixed roles.
 - **Scoped barriers.** Founder allocation, movement, and reproduction share one compute encoder with `memoryBarrier(resources:)` only at the two read-after-write boundaries.
 - **Power-of-two addressing.** The `1024²` spinor lattice uses integer masks instead of modulus for periodic neighbors.
-- **Single-triangle field pass.** Scale-specialized fragments render the current state directly; there is no intermediate presentation texture.
+- **Linear HDR scene.** Scale-specialized field and agent fragments write unclamped values into a drawable-sized `RGBA16Float` target. Display transfer is deferred to the final composite.
+- **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; intermediate scales expose phase winding, density isolines, reaction channels, trait-dependent morphology, resource flux, and geological gradients.
+- **Morphology from inherited state.** Abdomen geometry, appendage reach, defensive spines, predatory jaws, pigmentation, trophic color, and reproductive-readiness emission are deterministic functions of `geneA`, `geneB`, `geneC`, energy, biomass, age, and velocity.
+- **Analytic antialiasing.** Signed-distance boundaries use `fwidth`-derived transition widths, preserving subpixel morphology without multisample render targets.
+- **Quarter-resolution bloom.** A soft-knee bright pass and two five-tap bilinear Gaussian dispatches isolate high-radiance events at wave, reaction, agent, and ecology scales. The `900x` spinor instrument bypasses bloom and its texture sample so component and lattice boundaries remain spatially exact.
+- **Hue-preserving display map.** Peak-channel exponential compression applies one scalar to all RGB channels, followed by a small scale-specific saturation correction and `1/1023` temporal dither.
+- **Deep-scale visibility rejection.** Untracked agent quads fade over `18x-48x` and are discarded before morphology or quantum sampling. A tracked agent remains observable across scales.
 - **Instanced agents.** One draw call submits all `384` slots. The occupancy buffer rejects inactive instances in the vertex path.
 - **Ring-buffered observation.** Eight readback slots prevent the CPU camera observer from reusing a buffer still owned by an in-flight command buffer.
 - **Framebuffer-only drawable.** `MTKView.framebufferOnly = true` keeps the presentation resource render-target optimized.
@@ -466,13 +508,27 @@ These choices follow Metal's explicit resource, command-encoder, and synchroniza
 
 ## Measured GPU optimization
 
-The current resource-swapping implementation was compared with the preceding full-texture-copy implementation using Xcode Metal frame captures on the development machine.
+### State-transport optimization
+
+The current resource-swapping implementation was compared with the preceding full-texture-copy implementation using Xcode Metal frame captures on the development machine. This trace predates the HDR graphics graph and isolates the state-transport change.
 
 | Capture statistic | Copy-based baseline | Current implementation | Change |
 |---|---:|---:|---:|
 | Median GPU frame time | `10.682 ms` | `3.052 ms` | `-71.4%` |
 | 95th-percentile GPU frame time | `14.988 ms` | `8.915 ms` | `-40.5%` |
 | Full-state texture copy commands in capture | `1,734` | `0` | Removed |
+
+### Current HDR graphics trace
+
+The current graph was measured over `180` consecutive completed command buffers after a `100`-frame warm-up with `NUMI_GPU_TIMING=1`. Timing uses Metal's `gpuStartTime` and `gpuEndTime`; it includes simulation, rendering, scale-conditional bloom, composition, measurement, and observation blits, but excludes CPU scheduling and display synchronization.
+
+| Renderer state | Median GPU time | 95th percentile | Mean GPU time |
+|---|---:|---:|---:|
+| Initial HDR graph with all agent quads active at deep scales | `7.148 ms` | `14.402 ms` | `8.129 ms` |
+| HDR graph after deep-scale agent-fragment rejection | `5.886 ms` | `13.042 ms` | `7.017 ms` |
+| Final graph with normalized-amplitude phasors and spinor-scale bloom bypass | `4.297 ms` | `9.068 ms` | `4.702 ms` |
+
+The final 95th-percentile value is `7.599 ms` below a `16.667 ms` 60 Hz GPU budget on this machine. The final spinor view adds local probability, phase, and coherence geometry; its deep-lattice branch returns before the more expensive wave-contour and matter-coupling visualization path. Phasor direction is computed by normalizing the complex amplitude directly rather than evaluating `atan2` followed by `sin` and `cos`.
 
 Measurement environment:
 
@@ -485,7 +541,7 @@ Xcode 26.4
 Metal 4
 ```
 
-This is a single-device engineering trace, not a cross-device benchmark. Small buffer fills for metric resets and compact agent-observation blits remain intentionally present. Apple documents GPU counters, frame capture, and the Dependencies viewer as the appropriate tools for inspecting pass timing and resource dependencies [9-10].
+These are single-device engineering traces, not cross-device benchmarks. The Xcode capture and command-buffer timestamp tables use different measurement methods and should not be compared as one time series. Small buffer fills for metric resets and compact agent-observation blits remain intentionally present. Apple documents GPU counters, frame capture, and the Dependencies viewer as the appropriate tools for inspecting pass timing and resource dependencies [9-10].
 
 ## Build and controls
 
