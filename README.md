@@ -211,7 +211,7 @@ r_c=0.10+0.24d_c.
 The fixed outer circle identifies the component support, while the inner ring radius `r_c` and interior radiance encode bounded component probability. The phasor direction is
 
 ```math
-\phi_c=\operatorname{atan2}(\operatorname{Im}\psi_c,\operatorname{Re}\psi_c).
+\phi_c=\mathrm{atan2}(\mathrm{Im}\,\psi_c,\mathrm{Re}\,\psi_c).
 ```
 
 The bridge between components is modulated by the local coherence proxy
@@ -235,7 +235,7 @@ and a normalized real-component overlap
 
 ```math
 \kappa =
-\frac{|\operatorname{Re}(\psi_0\psi_1^*)|}
+\frac{|\mathrm{Re}(\psi_0\psi_1^*)|}
 {|\psi_0||\psi_1|+\epsilon}.
 ```
 
@@ -323,7 +323,7 @@ For cell `i`, the mechanics kernel evaluates all occupied cells belonging to the
 ATP is updated from local substrate channels and phenotype-dependent uptake:
 
 ```math
-A_i(t+1)=\operatorname{clamp}(A_i+U_i-C_i-S_i,0,1.2),
+A_i(t+1)=\mathrm{clamp}(A_i+U_i-C_i-S_i,0,1.2),
 ```
 
 where `U_i` samples resource A, resource B, and detritus; `C_i` increases with biomass and contractility; and `S_i` increases with toxin, environmental damage, conflict, and crowding. ATP regulates biomass accumulation, membrane repair, and cell-cycle progression. Low ATP and environmental load raise stress; persistent high stress raises apoptosis activation and can release the cell slot.
