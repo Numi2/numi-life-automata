@@ -72,6 +72,12 @@ constant uint invariantReferenceCount = 1u << 3u;
 constant uint invariantOrphanedJunction = 1u << 4u;
 constant uint invariantInvalidMembrane = 1u << 5u;
 constant uint invariantDisconnectedOwnership = 1u << 6u;
+constant uint lifeStageProtocell = 0u;
+constant uint lifeStageAutonomousCell = 1u;
+constant uint lifeStageDevelopingTissue = 2u;
+constant uint lifeStageIntegratedOrganism = 3u;
+constant uint autonomousHomeostasisStepCount = 600u;
+constant uint integratedOrganismStepCount = 900u;
 
 struct AgentState {
     float2 position;
@@ -97,9 +103,9 @@ struct AgentState {
     uint lineageFlags;
     uint dominantProgramIndex;
     uint dominantProgramGeneration;
-    uint identityPadding0;
-    uint identityPadding1;
-    uint identityPadding2;
+    uint homeostasisSteps;
+    uint integrationSteps;
+    uint lifeStage;
     // Tissue orientation, angular velocity, contact load, and propagule refractory state.
     float4 tissueKinematics;
 };
@@ -2460,9 +2466,9 @@ inline AgentState mutatePropaguleProgram(
     child.lineageFlags = branchMutation ? 2u : 0u;
     child.dominantProgramIndex = childProgramIndex;
     child.dominantProgramGeneration = childProgramGeneration;
-    child.identityPadding0 = 0u;
-    child.identityPadding1 = 0u;
-    child.identityPadding2 = 0u;
+    child.homeostasisSteps = 0u;
+    child.integrationSteps = 0u;
+    child.lifeStage = lifeStageProtocell;
 
     ResonanceGenome childResonance = resonanceGenomes[parentProgramIndex];
     float resonanceMutation = 0.012 + mutation * (branchMutation ? 1.8 : 0.65);
@@ -2644,9 +2650,9 @@ kernel void initializeAgents(
     agent.lineageFlags = 0u;
     agent.dominantProgramIndex = maxHeritableProgramCount;
     agent.dominantProgramGeneration = 0u;
-    agent.identityPadding0 = 0u;
-    agent.identityPadding1 = 0u;
-    agent.identityPadding2 = 0u;
+    agent.homeostasisSteps = 0u;
+    agent.integrationSteps = 0u;
+    agent.lifeStage = lifeStageProtocell;
     agent.tissueKinematics = float4(0.0);
     agents[gid] = agent;
     atomic_store_explicit(&occupancy[gid], 0u, memory_order_relaxed);
@@ -2786,7 +2792,9 @@ kernel void collectAgentObservations(
     AgentObservationRecord observation;
     observation.position = agent.position;
     observation.generation = agent.generation;
-    observation.flags = occupied != 0u ? (1u | (agent.geneC.w >= 0.08 ? 2u : 0u)) : 0u;
+    observation.flags = occupied != 0u
+        ? (1u | (agent.geneC.w >= 0.08 ? 2u : 0u) | ((agent.lifeStage & 3u) << 2u))
+        : 0u;
     observation.birthID = agent.birthID;
     observation.parentBirthID = agent.parentBirthID;
     observation.genomeHash = agent.genomeHash;
@@ -2813,7 +2821,11 @@ kernel void collectAgentObservations(
         aggregate.mechanics.y
     );
     observation.mutationDistance = agent.mutationDistance;
-    observation.padding = float3(0.0);
+    observation.padding = float3(
+        saturate(float(agent.homeostasisSteps) / float(autonomousHomeostasisStepCount)),
+        saturate(float(agent.integrationSteps) / float(integratedOrganismStepCount)),
+        float(agent.lifeStage)
+    );
     observations[gid] = observation;
 }
 
@@ -2926,9 +2938,9 @@ kernel void nucleateAutogenicFounder(
     founder.lineageFlags = 1u;
     founder.dominantProgramIndex = programIndex;
     founder.dominantProgramGeneration = programGeneration;
-    founder.identityPadding0 = 0u;
-    founder.identityPadding1 = 0u;
-    founder.identityPadding2 = 0u;
+    founder.homeostasisSteps = 0u;
+    founder.integrationSteps = 0u;
+    founder.lifeStage = lifeStageProtocell;
     founder.tissueKinematics = float4(heading, 0.0, 0.0, 0.0);
     initializeFounderRegulatoryGenome(
         developmentalGenomes, regulatoryNodes, regulatoryEdges, identityCounters,
@@ -3050,6 +3062,33 @@ kernel void evolveAgents(
     agent.energy = clamp(mix(agent.energy, cellAggregate.physiology.y, 0.018), 0.0, 1.2);
     float measuredBiomass = saturate(cellCount / referenceTissueCellCount);
     agent.biomass = clamp(mix(agent.biomass, measuredBiomass, 0.012), 0.02, 1.0);
+    bool homeostasisQualified = dominantProgramValid &&
+        cellAggregate.physiology.y >= 0.10 && cellAggregate.physiology.z >= 0.30 &&
+        cellAggregate.physiology.w <= 0.60 && cellAggregate.geometryBoundary.w >= 0.10;
+    agent.homeostasisSteps = homeostasisQualified
+        ? min(agent.homeostasisSteps + 1u, 1000000u)
+        : agent.homeostasisSteps > 4u ? agent.homeostasisSteps - 4u : 0u;
+    if (agent.homeostasisSteps >= autonomousHomeostasisStepCount &&
+        agent.lifeStage < lifeStageAutonomousCell) {
+        agent.lifeStage = lifeStageAutonomousCell;
+    }
+    if (cellCount >= 2.0 && agent.lifeStage < lifeStageDevelopingTissue) {
+        agent.lifeStage = lifeStageDevelopingTissue;
+    }
+    bool integratedTissue = cellCount >= 6.0 &&
+        agent.homeostasisSteps >= autonomousHomeostasisStepCount &&
+        cellAggregate.physiology.y >= 0.12 && cellAggregate.physiology.z >= 0.42 &&
+        cellAggregate.physiology.w <= 0.48 &&
+        cellAggregate.development.w > 0.00000001 &&
+        cellAggregate.developmentCausality.x >= 0.006 &&
+        cellAggregate.geometryBoundary.w >= 0.45 &&
+        cellAggregate.dynamics.y >= 0.15 && cellAggregate.tissueMotion.w >= 0.000003;
+    agent.integrationSteps = integratedTissue
+        ? min(agent.integrationSteps + 1u, 1000000u)
+        : agent.integrationSteps > 2u ? agent.integrationSteps - 2u : 0u;
+    if (agent.integrationSteps >= integratedOrganismStepCount) {
+        agent.lifeStage = lifeStageIntegratedOrganism;
+    }
     agent.age += 1.0;
     bool cellularFailure = cellAggregate.physiology.x < 0.5;
     if (agent.age > 180000.0 || cellularFailure) {
@@ -3616,9 +3655,10 @@ kernel void assignCellComponentOwners(
     child.lineageFlags = branchMutation ? 2u : 0u;
     child.dominantProgramIndex = childProgramIndex;
     child.dominantProgramGeneration = childProgramGeneration;
-    child.identityPadding0 = 0u;
-    child.identityPadding1 = 0u;
-    child.identityPadding2 = 0u;
+    child.homeostasisSteps = 0u;
+    child.integrationSteps = 0u;
+    child.lifeStage = componentCount >= 2u
+        ? lifeStageDevelopingTissue : lifeStageProtocell;
     child.tissueKinematics = float4(parent.tissueKinematics.x, parent.tissueKinematics.y, 0.0, 1.0);
     ResonanceGenome childResonance = resonanceGenomes[childProgramIndex];
 
@@ -3831,9 +3871,9 @@ kernel void injectFounder(
     founder.lineageFlags = 1u;
     founder.dominantProgramIndex = programIndex;
     founder.dominantProgramGeneration = programGeneration;
-    founder.identityPadding0 = 0u;
-    founder.identityPadding1 = 0u;
-    founder.identityPadding2 = 0u;
+    founder.homeostasisSteps = 0u;
+    founder.integrationSteps = 0u;
+    founder.lifeStage = lifeStageProtocell;
     founder.tissueKinematics = float4(heading, 0.0, 0.0, 0.0);
     initializeFounderRegulatoryGenome(
         developmentalGenomes, regulatoryNodes, regulatoryEdges, identityCounters,
@@ -7048,7 +7088,7 @@ struct CellRasterData {
     float4 programEcology;
     float4 construction;
     float lineageHue;
-    float ownerEnergy;
+    float lifecycle;
     float visibility;
     float tracked;
     float radialCoordinate;
@@ -7167,7 +7207,8 @@ vertex CellRasterData cellVertex(
     ) &&
         programIndex != agent.dominantProgramIndex
         ? heritablePrograms[programIndex].geneB.w : agent.geneB.w;
-    output.ownerEnergy = agent.energy;
+    output.lifecycle = float(agent.lifeStage) +
+        saturate(float(agent.integrationSteps) / float(integratedOrganismStepCount)) * 0.25;
     output.visibility = visibility;
     output.tracked = uniforms.trackedAgentID == owner ? 1.0 : 0.0;
     output.radialCoordinate = triangleVertex == 0u ? 0.0 : 1.0;
@@ -7207,6 +7248,14 @@ fragment float4 cellFragment(
         ? normalize(input.tissueGeometry.xy) : morphologyAxis;
     float2 surfaceDirection = length(p) > 0.001 ? normalize(p) : boundaryNormal;
     float exposedArc = membrane * exposure;
+    float lifeStage = floor(input.lifecycle + 0.001);
+    float integrationProgress = saturate(fract(input.lifecycle) * 4.0);
+    float developingStage = step(1.5, lifeStage) * (1.0 - step(2.5, lifeStage));
+    float integratedStage = step(2.5, lifeStage);
+    float integrationSignal = max(developingStage * integrationProgress, integratedStage);
+    float integrationPulse = 0.84 + 0.16 * sin(
+        float(uniforms.step) * 0.018 + angle * 3.0
+    );
     float contactDamage = saturate(input.tissueForce.z * 1800.0);
     float trophicGain = saturate(max(input.tissueForce.w, 0.0) * 1800.0);
     float trophicLoss = saturate(max(-input.tissueForce.w, 0.0) * 1800.0);
@@ -7252,6 +7301,9 @@ fragment float4 cellFragment(
         coarseColor += float3(0.08, 0.92, 0.62) * exposedArc * input.construction.y * 0.72;
         coarseColor += float3(0.04, 0.78, 1.0) * exposedArc * input.construction.z * 0.88;
         coarseColor += float3(0.12, 1.0, 0.42) * exposedArc * input.construction.w * 0.74;
+        coarseColor += mix(
+            float3(0.08, 0.96, 0.70), float3(0.96, 0.99, 1.0), integratedStage
+        ) * exposedArc * integrationSignal * integrationPulse * 0.62;
         coarseColor += environmentalFrequencyColor * frequencyBand *
             (0.18 + frequencyMatch * 0.56);
         coarseColor += float3(1.0, 0.28, 0.02) * membrane * barrierCompression * 0.82;
@@ -7489,6 +7541,9 @@ fragment float4 cellFragment(
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
     float cellDetail = smoothstep(14.0, 30.0, observationZoom);
     color = mix(lineage * body * (0.32 + atp * 0.44), color, cellDetail);
+    color += mix(
+        float3(0.06, 0.88, 0.62), float3(0.92, 0.98, 1.0), integratedStage
+    ) * exposedArc * integrationSignal * integrationPulse * mix(0.28, 0.48, cellDetail);
     float alpha = body * input.visibility * mix(0.62, 0.94, cellDetail) * (1.0 - apoptosis * 0.35);
     return float4(max(color, 0.0) * input.visibility, alpha);
 }

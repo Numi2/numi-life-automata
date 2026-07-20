@@ -75,7 +75,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 3,
+            schemaVersion: 4,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -182,8 +182,9 @@ extension EvolutionRenderer {
                 batchReport = latestSample?.invariantReport ?? batchReport
                 if reportProgress {
                     print(
-                        "experiment_step=\(totalSteps) organisms=" +
-                        "\(latestSample?.livingOrganisms ?? 0) cells=" +
+                        "experiment_step=\(totalSteps) components=" +
+                        "\(latestSample?.livingOrganisms ?? 0) integrated=" +
+                        "\(latestSample?.integratedOrganisms ?? 0) cells=" +
                         "\(latestSample?.livingCells ?? 0) steps_per_second=" +
                         String(format: "%.1f", latestSample?.stepsPerSecond ?? 0) +
                         " invariants=0x\(String(batchReport?.flags ?? 0, radix: 16))"
@@ -396,6 +397,7 @@ extension EvolutionRenderer {
                 samples.map(\.meanJunctionMorphogenTransport).max() ?? 0,
             maximumMorphogenDifferentiation:
                 samples.map(\.meanMorphogenDifferentiation).max() ?? 0,
+            maximumIntegratedOrganisms: samples.map(\.integratedOrganisms).max() ?? 0,
             maximumLivingGeneration: samples.map(\.maximumLivingGeneration).max() ?? 0,
             fissions: fissions,
             invariantFlags: invariantReport.flags,
@@ -501,6 +503,10 @@ extension EvolutionRenderer {
         let livingCellCount = living.reduce(0) {
             $0 + max(Int(aggregates[$1].physiology.x.rounded()), 0)
         }
+        let lifecycleCounts = living.reduce(into: [Int](repeating: 0, count: 4)) {
+            counts, index in
+            counts[min(Int(agents[index].lifeStage), 3)] += 1
+        }
         let inverseOrganisms = 1.0 / Double(max(living.count, 1))
         let inverseCells = 1.0 / Double(max(livingCellCount, 1))
         let meanCells = Double(livingCellCount) * inverseOrganisms
@@ -559,6 +565,10 @@ extension EvolutionRenderer {
             stepsPerSecond: Double(totalSteps) / max(elapsed, 0.000_001),
             livingOrganisms: living.count,
             livingCells: livingCellCount,
+            protocells: lifecycleCounts[0],
+            autonomousCells: lifecycleCounts[1],
+            developingTissues: lifecycleCounts[2],
+            integratedOrganisms: lifecycleCounts[3],
             maximumLivingGeneration: maximumLivingGeneration,
             largestTissueCellCount: largestTissueCellCount,
             births: births,
@@ -654,9 +664,9 @@ private struct AgentState {
     var lineageFlags: UInt32
     var dominantProgramIndex: UInt32
     var dominantProgramGeneration: UInt32
-    var identityPadding0: UInt32
-    var identityPadding1: UInt32
-    var identityPadding2: UInt32
+    var homeostasisSteps: UInt32
+    var integrationSteps: UInt32
+    var lifeStage: UInt32
     var tissueKinematics: SIMD4<Float>
 }
 
@@ -826,6 +836,31 @@ private struct LineageEventRecord {
     var morphology: SIMD4<Float>
 }
 
+enum AgentLifeStage: UInt32, CaseIterable, Sendable, Equatable {
+    case protocell = 0
+    case autonomousCell = 1
+    case developingTissue = 2
+    case integratedOrganism = 3
+
+    var label: String {
+        switch self {
+        case .protocell: "Protocell"
+        case .autonomousCell: "Autonomous cell"
+        case .developingTissue: "Developing tissue"
+        case .integratedOrganism: "Integrated organism"
+        }
+    }
+
+    var abbreviation: String {
+        switch self {
+        case .protocell: "P"
+        case .autonomousCell: "A"
+        case .developingTissue: "T"
+        case .integratedOrganism: "O"
+        }
+    }
+}
+
 struct AgentObservation: Sendable, Equatable {
     let id: Int
     let birthID: UInt32
@@ -838,6 +873,9 @@ struct AgentObservation: Sendable, Equatable {
     let morphology: SIMD4<Float>
     let dynamics: SIMD4<Float>
     let mutationDistance: Float
+    let lifeStage: AgentLifeStage
+    let homeostasisProgress: Float
+    let integrationProgress: Float
 }
 
 struct RecordedLineageEvent: Sendable, Equatable {
@@ -3086,7 +3124,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     topologyHash: record.topologyHash,
                     morphology: record.morphology,
                     dynamics: record.dynamics,
-                    mutationDistance: record.mutationDistance
+                    mutationDistance: record.mutationDistance,
+                    lifeStage: AgentLifeStage(rawValue: (record.flags >> 2) & 3)
+                        ?? .protocell,
+                    homeostasisProgress: record.padding.x,
+                    integrationProgress: record.padding.y
                 ))
             }
             let eventRecords = buffers.lineageEvents.contents().bindMemory(

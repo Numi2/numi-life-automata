@@ -212,8 +212,13 @@ struct ExperimentSample: Codable {
     let generation: UInt32
     let elapsedSeconds: Double
     let stepsPerSecond: Double
+    // Retained in schema v4 for compatibility; this is the occupied component-owner count.
     let livingOrganisms: Int
     let livingCells: Int
+    let protocells: Int
+    let autonomousCells: Int
+    let developingTissues: Int
+    let integratedOrganisms: Int
     let maximumLivingGeneration: UInt32
     let largestTissueCellCount: Int
     let births: UInt64

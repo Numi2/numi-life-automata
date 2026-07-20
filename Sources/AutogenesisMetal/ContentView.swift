@@ -183,19 +183,19 @@ struct ContentView: View {
 
             commandDivider
 
-            numiIconButton("chevron.left", help: "Previous organism") {
+            numiIconButton("chevron.left", help: "Previous biological unit") {
                 store.followAdjacentOrganism(direction: -1)
             }
             .disabled(store.observableAgentCount < 2)
             numiIconButton(
                 "scope",
-                help: "Follow a random organism",
+                help: "Follow a random cell or tissue",
                 isSelected: store.followedAgentID != nil,
                 tint: .cyan
             ) {
                 store.followRandomOrganism()
             }
-            numiIconButton("chevron.right", help: "Next organism") {
+            numiIconButton("chevron.right", help: "Next biological unit") {
                 store.followAdjacentOrganism(direction: 1)
             }
             .disabled(store.observableAgentCount < 2)
@@ -206,12 +206,12 @@ struct ContentView: View {
                 HStack(spacing: 3) {
                     statusValue("GEN", value: "\(store.snapshot.generation)")
                     statusValue(
-                        "LIFE",
-                        value: "\(max(store.snapshot.organismCount, store.observableAgentCount))"
+                        "ORG",
+                        value: "\(store.integratedOrganismCount)/\(store.observableAgentCount)"
                     )
                     statusValue("MAG", value: zoomLabel)
                 }
-                statusValue("LIFE", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))")
+                statusValue("ORG", value: "\(store.integratedOrganismCount)")
             }
 
             commandDivider
@@ -284,6 +284,10 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if store.observationZoom < 64 {
+                    lifecyclePanel
                 }
 
                 HStack(alignment: .top, spacing: 9) {
@@ -379,6 +383,7 @@ struct ContentView: View {
             } else if store.observationZoom >= 18, store.displayMode == .causality {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Lifecycle P/A/T/O", value: lifecycleStageLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Mean / max component", value: "\(decimal(store.snapshot.meanCellsPerOrganism)) / \(store.snapshot.largestTissueCellCount)", tint: .green, values: store.history.map(\.meanCellsPerOrganism))
                 observerMetric("Global cell pool", value: percent(store.snapshot.cellPoolUtilization), tint: .blue, values: store.history.map(\.cellPoolUtilization))
                 observerMetric("Heritable programs", value: "\(store.snapshot.heritableProgramCount) / 4096", tint: .purple, values: store.history.map(\.heritableProgramPoolUtilization))
@@ -408,7 +413,8 @@ struct ContentView: View {
                 observerMetric("Obs Δmatch → Δtraction", value: frequencyTractionAssociationLabel, tint: .cyan, values: store.history.map(\.meanFrequencyMatch))
             } else if store.observationZoom >= 18 {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
-                observerMetric("Cells / tissues", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Lifecycle P/A/T/O", value: lifecycleStageLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
                 observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                 observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
@@ -441,8 +447,8 @@ struct ContentView: View {
                     observerMetric("Obs Δstrain → ΔVₘ", value: strainVoltageAssociationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
                     observerMetric("Obs ΔCa* → ΔERK*", value: calciumERKAssociationLabel, tint: .purple, values: store.history.map(\.meanCalciumActivity))
                 } else {
-                    observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
-                    observerMetric("Cells / tissue", value: "\(store.snapshot.cellCount) / \(decimal(store.snapshot.meanCellsPerOrganism))", tint: .blue, values: store.history.map { Double($0.cellCount) })
+                    observerMetric("Lifecycle P/A/T/O", value: lifecycleStageLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
+                    observerMetric("Cells / component", value: "\(store.snapshot.cellCount) / \(decimal(store.snapshot.meanCellsPerOrganism))", tint: .blue, values: store.history.map { Double($0.cellCount) })
                     observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .pink, values: store.history.map(\.meanDevelopmentalEdgeCount))
                     if store.displayMode == .development {
                         observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
@@ -456,17 +462,79 @@ struct ContentView: View {
                     observerMetric("Persistent clades", value: "\(store.snapshot.persistentCladeCount)", tint: .orange, values: store.history.map { Double($0.persistentCladeCount) })
                 }
             } else {
-                observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
+                observerMetric("Organisms / units", value: "\(store.integratedOrganismCount) / \(store.observableAgentCount)", tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Mean free R", value: resourceLabel, tint: .cyan, values: store.history.map(\.metrics.resourceDensity))
                 observerMetric("Substrate forcing", value: decimal(store.snapshot.metrics.substrateFluctuation), tint: .cyan, values: store.history.map(\.metrics.substrateFluctuation))
                 observerMetric("Detritus density", value: decimal(store.snapshot.metrics.detritusDensity), tint: .orange, values: store.history.map(\.metrics.detritusDensity))
                 observerMetric("Barrier area", value: percent(store.snapshot.metrics.barrierFraction), tint: .gray, values: store.history.map(\.metrics.barrierFraction))
                 observerMetric("Mechanical drive", value: decimal(store.snapshot.metrics.environmentalMechanicalDrive), tint: .pink, values: store.history.map(\.metrics.environmentalMechanicalDrive))
                 observerMetric("Mean |ΔB|", value: activityLabel, tint: .orange, values: store.history.map(\.metrics.temporalActivity))
-                observerMetric("Predatory trait", value: "\(store.snapshot.hunterCount) agents", tint: .red, values: store.history.map { Double($0.hunterCount) })
+                observerMetric("Predatory trait", value: "\(store.snapshot.hunterCount) units", tint: .red, values: store.history.map { Double($0.hunterCount) })
                 observerMetric("Persistent clades", value: "\(store.snapshot.persistentCladeCount)", tint: .pink, values: store.history.map { Double($0.persistentCladeCount) })
                 observerMetric("Energy residual", value: signedDecimal(store.snapshot.energyConservationResidual), tint: .white, values: store.history.map { abs($0.energyConservationResidual) })
             }
+        }
+    }
+
+    private var lifecyclePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("BIOLOGICAL LIFECYCLE")
+            HStack(spacing: 0) {
+                lifecycleStageCell(.protocell, count: store.protocellCount)
+                lifecycleStageCell(.autonomousCell, count: store.autonomousCellCount)
+                lifecycleStageCell(.developingTissue, count: store.developingTissueCount)
+                lifecycleStageCell(.integratedOrganism, count: store.integratedOrganismCount)
+            }
+
+            if let stage = store.followedLifeStage {
+                HStack {
+                    Text("TRACKED: \(stage.label.uppercased())")
+                    Spacer()
+                    Text("\(Int((followedLifecycleProgress * 100).rounded()))%")
+                }
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .foregroundStyle(lifecycleColor(stage))
+                ProgressView(value: followedLifecycleProgress)
+                    .progressViewStyle(.linear)
+                    .tint(lifecycleColor(stage))
+            }
+        }
+    }
+
+    private func lifecycleStageCell(_ stage: AgentLifeStage, count: Int) -> some View {
+        VStack(spacing: 4) {
+            Text("\(count)")
+                .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                .foregroundStyle(lifecycleColor(stage))
+            Text(stage.abbreviation)
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(lifecycleColor(stage).opacity(0.72))
+                .frame(height: 2)
+        }
+        .help(stage.label)
+    }
+
+    private var followedLifecycleProgress: Double {
+        guard let stage = store.followedLifeStage else { return 0 }
+        return switch stage {
+        case .protocell: Double(store.followedHomeostasisProgress)
+        case .autonomousCell: 1
+        case .developingTissue: Double(store.followedIntegrationProgress)
+        case .integratedOrganism: 1
+        }
+    }
+
+    private func lifecycleColor(_ stage: AgentLifeStage) -> Color {
+        switch stage {
+        case .protocell: .cyan
+        case .autonomousCell: .blue
+        case .developingTissue: .mint
+        case .integratedOrganism: .white
         }
     }
 
@@ -819,7 +887,7 @@ struct ContentView: View {
         if store.displayMode == .causality, zoom < 64 {
             return zoom >= 18
                 ? "Counterfactual mechanochemical pathways"
-                : "Causal activity across developed organisms"
+                : "Causal activity across cells, tissues, and organisms"
         }
         if zoom >= 512 { return "Two-component coined quantum walk" }
         if zoom >= 160 { return "Probability density, phase, and probability current" }
@@ -839,7 +907,7 @@ struct ContentView: View {
 
     private var worldSummary: String {
         let zoom = store.observationZoom
-        let life = max(store.snapshot.organismCount, store.observableAgentCount)
+        let units = max(store.snapshot.organismCount, store.observableAgentCount)
         if store.displayMode == .causality, zoom < 64 {
             let edgeState = store.mechanosensingBlocked ? "ablated (gain = 0)" : "active (gain = 1)"
             return "Mechanics→Ca* and Ca*→ERK* are factual-minus-single-edge-zero update differences. ERK*→traction and signaling ATP cost are direct equation terms. Mean values are \(causalRate(store.snapshot.meanMechanicsCalciumEffect)) ×10⁻³, \(causalRate(store.snapshot.meanCalciumERKEffect)) ×10⁻³, and \(scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000)) ×10⁻⁴ for the first three terms. Ca* and ERK* are dimensionless excitable-state variables, not resolved molecular concentrations. Mechanics gating is \(edgeState). Observational rows use predeclared one-sample-lag first-difference correlations with autocorrelation-adjusted 95% intervals; they are not causal effects."
@@ -857,15 +925,15 @@ struct ContentView: View {
             if store.displayMode == .development {
                 return "Morphogen A and B are synthesized and degraded using inherited kinetic constants, then diffuse only through recent persistent cell junctions. Their receptor-weighted imbalance updates continuous fate memory and tissue polarity, which alter division axes, membrane allocation, traction, feeding, and defense. Mean A/B is \(decimal(store.snapshot.meanMorphogenActivator))/\(decimal(store.snapshot.meanMorphogenInhibitor)); differentiation is \(decimal(store.snapshot.meanMorphogenDifferentiation))."
             }
-            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Exposed membrane arcs determine tissue covariance axes, elongation, polarity, and boundary length. Each cell samples its own chemical and hazard gradients; inherited Ca* entry, junction transmission, Ca*→ERK* gain, refractory recovery, signaling cost, and traction gain determine the force and torque transmitted to organism motion. Mean Ca*/ERK* is \(signalStateLabel)."
+            return "\(store.snapshot.cellCount) persistent cells are active across \(units) tracked components: \(lifecycleStageLabel) at protocell/autonomous-cell/developing-tissue/integrated-organism stages. Exposed membrane arcs determine tissue covariance axes, elongation, polarity, and boundary length. Cell-local chemistry, Ca*/ERK* signaling, adhesion, and traction produce component force and torque."
         }
         if zoom >= 6 {
-            return life == 0
-                ? "No agent slot is occupied. Nucleation remains gated by the measured chemistry thresholds, not by elapsed time."
-                : "Each organism is a measured membrane-connected component within one global pool of 9,216 persistent cells. Every cell references a generation-tagged slot in a recyclable pool of 4,096 heritable programs. Cross-owner fusion requires membrane contact, reciprocal recognition, and bilateral fusion investment; the oldest permanent cell anchors component continuity. During viable fission, every transmitted source program maps to its own independently mutated descendant."
+            return units == 0
+                ? "No biological component is active. Protocell nucleation remains gated by measured biomass, stored-energy, membrane, and catalyst thresholds, not elapsed time."
+                : "Lifecycle counts P/A/T/O are \(lifecycleStageLabel). A component becomes developing tissue at two connected cells. Integrated-organism classification requires at least six cells plus 900 qualifying steps with sustained ATP, membrane integrity, low stress, junction transport, morphogen differentiation, exposed boundary, phase coherence, and cell-generated traction. New detached components requalify under their own owner identity."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
-        return "\(life)/384 organism slots are occupied; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are currently resolved; occupied-field fraction is \(occupied). The clade count requires sustained divergence and is not labeled a species count. Organisms modify shared chemical and mechanical media without a global fitness function."
+        return "\(store.integratedOrganismCount) integrated organisms exist among \(units) active biological components; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are resolved; occupied-field fraction is \(occupied). The clade count requires sustained divergence and is not a species count."
     }
 
     private var scaleRelation: String {
@@ -1224,6 +1292,7 @@ struct ContentView: View {
         case .intervention: "plus"
         case .observation: "eye"
         case .fusion: "link"
+        case .emergence: "point.3.connected.trianglepath.dotted"
         }
     }
 
@@ -1237,7 +1306,13 @@ struct ContentView: View {
         case .intervention: .mint
         case .observation: .secondary
         case .fusion: .cyan
+        case .emergence: .green
         }
+    }
+
+    private var lifecycleStageLabel: String {
+        "\(store.protocellCount)/\(store.autonomousCellCount)/" +
+            "\(store.developingTissueCount)/\(store.integratedOrganismCount)"
     }
 }
 

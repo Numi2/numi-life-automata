@@ -36,6 +36,7 @@ enum EvolutionEventKind: Sendable, Equatable {
     case intervention
     case observation
     case fusion
+    case emergence
 }
 
 struct EvolutionEvent: Identifiable, Sendable, Equatable {
@@ -432,6 +433,13 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var fusionEventCount = 0
     @Published private(set) var followedAgentID: Int?
     @Published private(set) var observableAgentCount = 0
+    @Published private(set) var protocellCount = 0
+    @Published private(set) var autonomousCellCount = 0
+    @Published private(set) var developingTissueCount = 0
+    @Published private(set) var integratedOrganismCount = 0
+    @Published private(set) var followedLifeStage: AgentLifeStage?
+    @Published private(set) var followedHomeostasisProgress: Float = 0
+    @Published private(set) var followedIntegrationProgress: Float = 0
     @Published private(set) var lineageAnalysis = LineageAnalysis.empty
     @Published private(set) var lineageBranches: [ObservedLineageBranch] = []
     @Published private(set) var worldScale: Double = 1
@@ -445,8 +453,9 @@ final class EvolutionStore: ObservableObject {
     private var lastRecordedGeneration = 0
     private var observedAgents: [AgentObservation] = []
     private var followedBirthID: UInt32?
+    private var lifeStageByBirthID: [UInt32: AgentLifeStage] = [:]
     private var lineageTracker = LineageDivergenceTracker()
-    private var hasObservedFirstOrganism = false
+    private var hasObservedFirstBiologicalUnit = false
     private var pendingMechanosensoryIntervention: (baseline: EvolutionSnapshot, blocked: Bool)?
 
     var rendererSettings: RendererSettings {
@@ -481,10 +490,21 @@ final class EvolutionStore: ObservableObject {
         lineageBranches.removeAll(keepingCapacity: true)
         lineageTracker.reset()
         followedBirthID = nil
+        followedAgentID = nil
+        observableAgentCount = 0
+        protocellCount = 0
+        autonomousCellCount = 0
+        developingTissueCount = 0
+        integratedOrganismCount = 0
+        followedLifeStage = nil
+        followedHomeostasisProgress = 0
+        followedIntegrationProgress = 0
+        observedAgents.removeAll(keepingCapacity: true)
+        lifeStageByBirthID.removeAll(keepingCapacity: true)
         worldScale = 1
         expansionToken = 0
         lastRecordedGeneration = 0
-        hasObservedFirstOrganism = false
+        hasObservedFirstBiologicalUnit = false
         mechanosensingBlocked = false
         pendingMechanosensoryIntervention = nil
         resetCamera()
@@ -514,13 +534,13 @@ final class EvolutionStore: ObservableObject {
         addColonyPosition = textureCoordinate(cameraCenter + offset)
         addedColonyCount += 1
         founderCount += 1
-        hasObservedFirstOrganism = true
+        hasObservedFirstBiologicalUnit = true
         addColonyToken &+= 1
         recordEvent(
             generation: snapshot.generation,
             kind: .intervention,
-            title: "External agent slot initialized",
-            detail: "Founder \(founderCount) received three sampled four-component trait vectors at the camera position."
+            title: "External founder protocell initialized",
+            detail: "Founder \(founderCount) received an independent component owner, one persistent cell, and sampled heritable control parameters at the camera position. It is not yet classified as an integrated organism."
         )
         objectWillChange.send()
     }
@@ -548,14 +568,14 @@ final class EvolutionStore: ObservableObject {
     }
 
     func pan(by screenDelta: SIMD2<Float>, aspect: Float) {
-        followedAgentID = nil
+        clearFollow()
         let worldDelta = screenDelta * aspectScale(for: aspect) / Float(cameraZoom)
         cameraCenter -= worldDelta
         expandWorldIfNeeded(aspect: aspect)
     }
 
     func resetCamera() {
-        followedAgentID = nil
+        clearFollow()
         cameraCenter = Self.spinorOrigin
         cameraZoom = worldScale * 900
     }
@@ -598,15 +618,29 @@ final class EvolutionStore: ObservableObject {
         if observableAgentCount != agents.count {
             observableAgentCount = agents.count
         }
-        if !hasObservedFirstOrganism, let founder = agents.first {
-            hasObservedFirstOrganism = true
+        protocellCount = agents.count { $0.lifeStage == .protocell }
+        autonomousCellCount = agents.count { $0.lifeStage == .autonomousCell }
+        developingTissueCount = agents.count { $0.lifeStage == .developingTissue }
+        integratedOrganismCount = agents.count { $0.lifeStage == .integratedOrganism }
+
+        for agent in agents {
+            let previousStage = lifeStageByBirthID[agent.birthID] ?? .protocell
+            if agent.lifeStage.rawValue > previousStage.rawValue {
+                recordLifecycleTransition(agent)
+            }
+        }
+        lifeStageByBirthID = Dictionary(
+            uniqueKeysWithValues: agents.map { ($0.birthID, $0.lifeStage) }
+        )
+        if !hasObservedFirstBiologicalUnit, let founder = agents.first {
+            hasObservedFirstBiologicalUnit = true
             founderCount = 1
             recordEvent(
                 generation: snapshot.generation,
                 kind: .founding,
-                title: "Founder-state thresholds satisfied",
+                title: "Founder protocell nucleated",
                 detail: String(
-                    format: "Agent slot %d initialized at (%.4f, %.4f) after local biomass, energy, membrane, and catalyst thresholds were met.",
+                    format: "Component owner %d initialized at (%.4f, %.4f) after local biomass, stored-energy, membrane, and catalyst thresholds were met. Multicellular organism criteria have not yet been applied.",
                     founder.id,
                     founder.position.x,
                     founder.position.y
@@ -622,14 +656,16 @@ final class EvolutionStore: ObservableObject {
             }
             if let followed {
                 if self.followedAgentID != followed.id { self.followedAgentID = followed.id }
+                followedLifeStage = followed.lifeStage
+                followedHomeostasisProgress = followed.homeostasisProgress
+                followedIntegrationProgress = followed.integrationProgress
                 if simd_distance_squared(cameraCenter, followed.position) > 1.0e-14 {
                     cameraCenter = followed.position
                 }
             } else if let replacement = agents.first {
                 follow(replacement)
             } else {
-                self.followedAgentID = nil
-                followedBirthID = nil
+                clearFollow()
             }
         }
 
@@ -660,7 +696,43 @@ final class EvolutionStore: ObservableObject {
     private func follow(_ agent: AgentObservation) {
         followedAgentID = agent.id
         followedBirthID = agent.birthID
+        followedLifeStage = agent.lifeStage
+        followedHomeostasisProgress = agent.homeostasisProgress
+        followedIntegrationProgress = agent.integrationProgress
         cameraCenter = agent.position
+    }
+
+    private func clearFollow() {
+        followedAgentID = nil
+        followedBirthID = nil
+        followedLifeStage = nil
+        followedHomeostasisProgress = 0
+        followedIntegrationProgress = 0
+    }
+
+    private func recordLifecycleTransition(_ agent: AgentObservation) {
+        let cellCount = max(Int((agent.morphology.x * 24).rounded()), 1)
+        let title: String
+        let detail: String
+        switch agent.lifeStage {
+        case .protocell:
+            return
+        case .autonomousCell:
+            title = "Birth ID \(agent.birthID) sustained cellular homeostasis"
+            detail = "A single-cell component reached 600 units in a leaky homeostasis accumulator: each step with ATP >= 0.10, membrane integrity >= 0.30, stress <= 0.60, exposed membrane >= 0.10, and a valid inherited program adds 1; a failed step subtracts 4."
+        case .developingTissue:
+            title = "Birth ID \(agent.birthID) formed multicellular tissue"
+            detail = "The membrane-connectivity component now contains \(cellCount) persistent cells. Tissue classification begins at two cells; this is not yet integrated-organism classification."
+        case .integratedOrganism:
+            title = "Birth ID \(agent.birthID) became an integrated organism"
+            detail = "The integration accumulator reached 900: each qualifying step with at least six connected cells, ATP >= 0.12, integrity >= 0.42, stress <= 0.48, junction transport > 1e-8, differentiation >= 0.006, exposed membrane >= 0.45, phase coherence >= 0.15, and traction >= 3e-6 adds 1; failure subtracts 2."
+        }
+        recordEvent(
+            generation: snapshot.generation,
+            kind: .emergence,
+            title: title,
+            detail: detail
+        )
     }
 
     func applyLineageEvents(_ records: [RecordedLineageEvent]) {
@@ -693,10 +765,10 @@ final class EvolutionStore: ObservableObject {
                     generation: Int(record.generation),
                     kind: parent == nil ? .founding : .branching,
                     title: parent == nil
-                        ? "Founder birth ID \(record.birthID) initialized"
-                        : "Birth ID \(record.birthID) descended from \(parent!)",
+                        ? "Founder cell birth ID \(record.birthID) initialized"
+                        : "Detached component received birth ID \(record.birthID)",
                     detail: String(
-                        format: "GPU step %u; topology hash %08X; branch mutation distance %.4f; inherited resonance %.5f cycles/step.",
+                        format: "GPU step %u; component owner allocated after physical separation; topology hash %08X; branch mutation distance %.4f; inherited resonance %.5f cycles/step. The component must independently satisfy lifecycle criteria.",
                         record.step,
                         record.topologyHash,
                         record.mutationDistance,

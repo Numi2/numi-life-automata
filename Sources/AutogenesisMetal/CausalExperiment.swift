@@ -133,7 +133,8 @@ struct CausalExperimentHeader: Codable {
 }
 
 struct CausalOutcomeVector: Codable, Equatable, Sendable {
-    let livingOrganisms: Double
+    let livingComponents: Double
+    let integratedOrganisms: Double
     let livingCells: Double
     let meanCellATP: Double
     let meanCellIntegrity: Double
@@ -149,7 +150,8 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
     let trophicLoss: Double
 
     init(sample: ExperimentSample) {
-        livingOrganisms = Double(sample.livingOrganisms)
+        livingComponents = Double(sample.livingOrganisms)
+        integratedOrganisms = Double(sample.integratedOrganisms)
         livingCells = Double(sample.livingCells)
         meanCellATP = sample.meanCellATP
         meanCellIntegrity = sample.meanCellIntegrity
@@ -167,7 +169,8 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
 
     static func difference(treatment: Self, control: Self) -> Self {
         Self(
-            livingOrganisms: treatment.livingOrganisms - control.livingOrganisms,
+            livingComponents: treatment.livingComponents - control.livingComponents,
+            integratedOrganisms: treatment.integratedOrganisms - control.integratedOrganisms,
             livingCells: treatment.livingCells - control.livingCells,
             meanCellATP: treatment.meanCellATP - control.meanCellATP,
             meanCellIntegrity: treatment.meanCellIntegrity - control.meanCellIntegrity,
@@ -185,7 +188,8 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
     }
 
     private init(
-        livingOrganisms: Double,
+        livingComponents: Double,
+        integratedOrganisms: Double,
         livingCells: Double,
         meanCellATP: Double,
         meanCellIntegrity: Double,
@@ -200,7 +204,8 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
         trophicGain: Double,
         trophicLoss: Double
     ) {
-        self.livingOrganisms = livingOrganisms
+        self.livingComponents = livingComponents
+        self.integratedOrganisms = integratedOrganisms
         self.livingCells = livingCells
         self.meanCellATP = meanCellATP
         self.meanCellIntegrity = meanCellIntegrity
@@ -257,7 +262,8 @@ enum PairedCausalExperimentCLI {
     }
 
     @MainActor private static let outcomes = [
-        OutcomeDefinition(name: "living_organisms", unit: "count", keyPath: \.livingOrganisms),
+        OutcomeDefinition(name: "living_components", unit: "count", keyPath: \.livingComponents),
+        OutcomeDefinition(name: "integrated_organisms", unit: "count", keyPath: \.integratedOrganisms),
         OutcomeDefinition(name: "living_cells", unit: "count", keyPath: \.livingCells),
         OutcomeDefinition(name: "mean_cell_atp", unit: "model_energy_per_cell", keyPath: \.meanCellATP),
         OutcomeDefinition(name: "mean_cell_integrity", unit: "fraction", keyPath: \.meanCellIntegrity),
@@ -286,7 +292,7 @@ enum PairedCausalExperimentCLI {
         let discardedJournal = ExperimentJournal.discarding()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("causal_header", CausalExperimentHeader(
-            schemaVersion: 2,
+            schemaVersion: 3,
             startedAt: startedAt,
             device: device.name,
             intervention: "Set mechanics-to-voltage and mechanics-to-Ca* gain from 1 to 0 after the configured baseline step.",

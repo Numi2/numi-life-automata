@@ -7,6 +7,7 @@ public struct DevelopmentalQualificationInput: Sendable, Equatable {
     public let maximumActiveJunctions: UInt32
     public let maximumMorphogenTransport: Double
     public let maximumMorphogenDifferentiation: Double
+    public let maximumIntegratedOrganisms: Int
     public let maximumLivingGeneration: UInt32
     public let fissions: UInt64
     public let invariantFlags: UInt32
@@ -19,6 +20,7 @@ public struct DevelopmentalQualificationInput: Sendable, Equatable {
         maximumActiveJunctions: UInt32,
         maximumMorphogenTransport: Double,
         maximumMorphogenDifferentiation: Double,
+        maximumIntegratedOrganisms: Int,
         maximumLivingGeneration: UInt32,
         fissions: UInt64,
         invariantFlags: UInt32,
@@ -30,6 +32,7 @@ public struct DevelopmentalQualificationInput: Sendable, Equatable {
         self.maximumActiveJunctions = maximumActiveJunctions
         self.maximumMorphogenTransport = maximumMorphogenTransport
         self.maximumMorphogenDifferentiation = maximumMorphogenDifferentiation
+        self.maximumIntegratedOrganisms = maximumIntegratedOrganisms
         self.maximumLivingGeneration = maximumLivingGeneration
         self.fissions = fissions
         self.invariantFlags = invariantFlags
@@ -50,6 +53,7 @@ public struct DevelopmentalQualification: Codable, Sendable, Equatable {
     public let multicellularOrganization: Bool
     public let junctionCoupledDevelopment: Bool
     public let morphogenDifferentiation: Bool
+    public let integratedOrganismFormation: Bool
     public let cellularReproduction: Bool
     public let invariantAndEnergyConservation: Bool
 
@@ -63,12 +67,13 @@ public struct DevelopmentalQualification: Codable, Sendable, Equatable {
             input.maximumMorphogenTransport > 0.000_000_01
         let morphogenDifferentiation = input.maximumMorphogenDifferentiation >=
             minimumMorphogenDifferentiation
+        let integratedOrganismFormation = input.maximumIntegratedOrganisms > 0
         let cellularReproduction = input.fissions > 0 && input.maximumLivingGeneration > 0
         let invariantAndEnergyConservation = input.invariantFlags == 0 &&
             input.maximumAbsoluteEnergyResidual <= maximumEnergyResidual
         let passed = sufficientObservationWindow && persistentAtEndpoint &&
             multicellularOrganization && junctionCoupledDevelopment &&
-            morphogenDifferentiation && cellularReproduction &&
+            morphogenDifferentiation && integratedOrganismFormation && cellularReproduction &&
             invariantAndEnergyConservation
         return Self(
             passed: passed,
@@ -77,6 +82,7 @@ public struct DevelopmentalQualification: Codable, Sendable, Equatable {
             multicellularOrganization: multicellularOrganization,
             junctionCoupledDevelopment: junctionCoupledDevelopment,
             morphogenDifferentiation: morphogenDifferentiation,
+            integratedOrganismFormation: integratedOrganismFormation,
             cellularReproduction: cellularReproduction,
             invariantAndEnergyConservation: invariantAndEnergyConservation
         )
