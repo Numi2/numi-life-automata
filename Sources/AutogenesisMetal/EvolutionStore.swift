@@ -553,6 +553,21 @@ final class EvolutionStore: ObservableObject {
         follow(ordered[next])
     }
 
+    func followOrganism(at screenPosition: SIMD2<Float>, aspect: Float) {
+        guard !observedAgents.isEmpty else { return }
+        let viewScale = aspectScale(for: aspect)
+        let zoom = Float(cameraZoom)
+        let selected = observedAgents
+            .map { agent -> (AgentObservation, Float) in
+                let screenCoordinate = SIMD2<Float>(repeating: 0.5) +
+                    (agent.position - cameraCenter) * zoom / viewScale
+                return (agent, simd_distance_squared(screenCoordinate, screenPosition))
+            }
+            .min { $0.1 < $1.1 }
+        guard let selected, selected.1 <= 0.010 else { return }
+        follow(selected.0)
+    }
+
     func applyAgentObservations(_ agents: [AgentObservation]) {
         observedAgents = agents
         if observableAgentCount != agents.count {

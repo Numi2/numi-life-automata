@@ -118,13 +118,13 @@ The persistent 20-channel audit stores a bit set, exact first failure step, audi
 Zoom is one continuous camera transform over one coupled system, ordered from cause to consequence:
 
 1. **Spinor lattice** separates both complex components and their phasors at lattice resolution.
-2. **Quantum wave** resolves probability, phase, current, nodes, and matter-induced potential.
+2. **Quantum wave** resolves probability, phase, current, nodes, and the exact matter-induced phase-potential and coin-angle feedback terms. Wave feedback contours are derived diagnostics; the spinor kernel remains the only update path.
 3. **Molecular reaction chemistry** shows substrate, catalyst, energy, membrane, detritus, and toxin markers plus the exact positive source terms that connect quantum order, mechanical activity, recycling, and cellular substrate uptake. Marker occupancy uses a monotonic square-root concentration encoding, source-trace luminance uses a monotonic logarithmic rate encoding, and marker positions are deterministic visualization samples rather than atom-resolved trajectories. Numeric inspector values remain untransformed model state.
 4. **Cellular tissue** resolves persistent cell boundaries, ATP, voltage, Ca*/ERK* fronts, refractory state, oscillator phase, strain, nuclei, contact junctions, cycle state, differentiation, stress, and apoptosis.
 5. **Organism morphology** resolves inherited traits as constrained by cellular power, mechanochemical signaling, phase coherence, contractility, viability, and tissue geometry.
-6. **Ecology** shows descendants competing across resources, hazards, obstacles, trophic interactions, and a shared vibration field.
+6. **Ecology** shows descendants competing across resources, hazards, obstacles, trophic interactions, a shared vibration field, measured substrate-gradient transport, and catalyst-dependent detrital mineralization.
 
-The same full-screen camera renders every level; there is no duplicated canvas. The field evolves through a two-dimensional unitary quantum walk. Matter changes its coin angle and phase potential, while spinor probability and component coherence drive catalyst production in the substrate. This bidirectional loop is the causal bridge between scales.
+The same full-screen camera renders every level; there is no duplicated canvas. The field evolves through a two-dimensional unitary quantum walk. Matter changes its coin angle and phase potential, while spinor probability and component coherence drive catalyst production in the substrate. This bidirectional loop is the causal bridge between scales. Four-node process chains in the inspector consume asynchronous measured reductions only and have no write path into the simulation.
 
 ## GPU Frame
 
@@ -144,7 +144,7 @@ Each active frame performs:
 12. `evolveMechanicalField` consumes and clears contraction impulses, advances displacement and velocity, and swaps the mechanical texture pair.
 13. At the configured scientific-audit cadence, GPU reductions validate contact momentum, energy closure, program references, junctions, membranes, live roots, and the one-connectivity-root-per-owner condition before publishing a compact persistent failure state.
 14. `evolveQuantumField` advances the spinor under feedback from matter.
-15. A scale-specialized full-screen pipeline renders quantum, molecular, cellular, organismal, or ecological observables without duplicating state. Molecular mode reads local reaction concentrations and exact source equations only below the wave transition; wave and spinor views return before this additional texture and glyph work.
+15. A scale-specialized full-screen pipeline renders quantum, molecular, cellular, organismal, or ecological observables without duplicating state. Molecular mode reads local reaction concentrations and exact source equations only below the wave transition. Wave mode samples only the three fields required to display the exact matter potential and coin perturbation; deep spinor fragments return before these samples, and both wave and spinor paths return before molecular glyph work.
 16. `compactVisibleCells` rejects dead and scale-invisible cell records, writes compacted source indices, and atomically writes an indirect instance count entirely on the GPU.
 17. One contour renderer submits only compacted living membranes from ecological overview through cell scale. It exposes actual edge classification, traction, constructed protrusions and armor, contact damage, and trophic flux; there is no predefined organism submission.
 18. Triple-buffered observations publish stable organism positions, membrane-derived morphology, dynamics, energy-conservation channels, birth/death transitions, and cross-owner physical-fusion transitions without stalling private state.

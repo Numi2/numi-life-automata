@@ -248,7 +248,7 @@ The bridge between components is modulated by the local coherence proxy
 \frac{1+\cos(\phi_0-\phi_1)}{2}.
 ```
 
-At `160x`, logarithmic density isolines, phase contours, a finite-difference probability-current proxy, and phase-winding cores replace the component-cell instrument. These marks are visual measurements of the simulated spinor; they are not independent particles or additional state variables.
+At `160x`, logarithmic density isolines, phase contours, a finite-difference probability-current proxy, and phase-winding cores replace the component-cell instrument. Mint-to-amber feedback contours evaluate the same matter-dependent phase potential and membrane/trait-dependent coin angle used by `evolveQuantumField`. These marks are visual measurements of the simulated spinor and its explicit coupling coefficients; they are not independent particles, forces, or additional state variables. Only the wave interval performs the three feedback-field samples. The deep spinor view still returns before those samples and before all molecular glyph work.
 
 ### Spinor-to-reaction coupling
 
@@ -737,6 +737,8 @@ s_k(x,t)=0.12+0.88\left[\frac{1+\sin(2\pi f_k(x)t+\phi_k(x))}{2}\right]^2.
 
 `reactWorld` approaches the local geological carrying value at a rate proportional to `s_k`; cell claims are exact fixed-point debits. Supply is intentionally slower than cellular uptake, so occupied regions form persistent depletion gradients instead of receiving an effectively infinite reservoir. Detritus mineralizes only where permeability, catalyst, and low toxin permit it, returning bounded fractions to both resource classes and catalyst. This creates a causal loop from death and maintenance to later local substrate availability.
 
+The ecological renderer distinguishes these processes from pool concentration. Short cyan/green pulses follow the negative measured `R_A + R_B` gradient and encode bounded transport magnitude. Orange pulses use the exact nonnegative mineralization source term from `reactWorld` with logarithmic radiometry. The marks are derived diagnostics; they do not advect substrate or alter mineralization.
+
 Rock is a mechanical constraint, not only a visual or permeability mask. Cells measure the local rock gradient and receive an outward contact force, velocity damping, stress, and dissipative ATP cost proportional to barrier load. Tissue translation therefore depends on whether its exposed cells collectively redirect force around a barrier. Armor increases tissue mass and drag and lowers membrane uptake; predatory protrusions, sensors, and locomotor extensions also consume ATP. The contact kernel grants attack or defense only on the contacted membrane direction where those structures were physically constructed.
 
 The geological mechanical field has a continuous local forcing frequency in approximately `0.0010...0.0084` cycles per biological step. Each inherited resonator has a natural frequency and bandwidth. Frequency mismatch under nonzero environmental drive increases stress and dissipation; frequency match increases useful mechanosensory response but still pays frequency-dependent work. No species, biome, or niche label is assigned. Any persistent specialization must survive the coupled constraints of local substrate timing, depletion, recycling, barrier geometry, mechanical spectrum, construction cost, and prey membrane mechanics.
@@ -945,6 +947,7 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Dominant-program cache.** Homogeneous cells use the inherited trait and recognition vectors already cached in their component's `AgentState`. Only a mixed-program cell whose program index differs from the component's dominant index reads the independent `96 B` program record.
 - **Linear HDR scene.** Scale-specialized field, cell, and organism fragments write unclamped values into a drawable-sized `RG11B10Float` target. Display transfer is deferred to the final composite.
 - **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; intermediate scales expose phase winding, density isolines, reaction channels, trait-dependent morphology, resource flux, and geological gradients.
+- **Measured process chains.** Every observation scale exposes four compact observer nodes linking its measured input, state transition, and downstream output. These SwiftUI summaries read asynchronous reductions and never write simulation state.
 - **Exact deep-lattice sampling.** At `420x` and above, the spinor instrument uses nearest-cell `RGBA32Float` samples instead of blending adjacent lattice states. Wave-scale views retain linear filtering.
 - **Morphology from membrane construction.** The renderer contains no abdomen, leg, jaw, spine, or insect body primitive. Predatory protrusions, armor, sensory extensions, and locomotor extensions are visible only where exposed cells deform their simulated membrane vertices under the corresponding inherited regulatory output.
 - **Contour antialiasing.** Bounded quadratic interpolation expands each simulated twelve-edge membrane into forty-eight render segments. `fwidth`-derived transitions smooth that measured contour without changing collision geometry.
@@ -1123,6 +1126,7 @@ Each derived seed is run twice. The control remains at `g_mech = 1`; treatment c
 | Magnifier controls | Continuous zoom around the current center |
 | Viewfinder | Returns to the spinor origin at `900x` |
 | Previous / target / next | Selects a persistent agent ID for camera following |
+| Click organism | Selects the nearest observed persistent organism within a bounded screen-space radius and follows its permanent birth identity |
 | Drag | Pans in world coordinates |
 | Vertical scroll / pinch | Applies bounded, frame-coalesced zoom around the pointer with momentum and reversal damping |
 | Horizontal scroll | Cycles one persistent agent ID per gesture; momentum cannot skip through the population |

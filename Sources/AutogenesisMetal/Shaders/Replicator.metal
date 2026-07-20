@@ -6994,7 +6994,10 @@ fragment float4 cellFragment(
         visualNoise(p * 19.0 + float2(input.lineageHue * 23.0, input.dynamics.z * 17.0))) *
         membrane * input.regulation.w * (1.0 - integrity);
     color += float3(0.12, 0.48, 1.0) * repairPatch * 1.15;
-    float calciumFrontRadius = 0.20 + signalRefractory * 0.58;
+    float calciumFrontPhase = fract(
+        input.dynamics.z + neighborSignal * 0.18 + signalRefractory * 0.12
+    );
+    float calciumFrontRadius = 0.18 + calciumFrontPhase * 0.62;
     float calciumFront = (1.0 - smoothstep(0.022, 0.070,
         abs(length(p - nucleusPosition) - calciumFrontRadius))) * cytoplasm;
     float erkDomain = smoothstep(0.08, 0.44, erkSignal) *
@@ -7166,6 +7169,33 @@ fragment float4 quantumSurfaceFragment(
     if (observationZoom >= 176.0) {
         float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
         float3 quantumOnlyColor = mix(waveColor, spinorTile, latticeReveal);
+        if (observationZoom < 512.0) {
+            float4 feedbackState = state.sample(fieldSampler, uv, 0);
+            float4 feedbackEcology = ecology.sample(fieldSampler, uv, 0);
+            float4 feedbackGenome = genomeA.sample(fieldSampler, uv, 0);
+            float matterPotential = 0.012 * (
+                feedbackState.x + feedbackEcology.x * 0.8 + feedbackState.y * 2.2 +
+                feedbackState.w * 3.0 + feedbackEcology.z * 1.4
+            );
+            float potentialRadiance = saturate(matterPotential * 46.0);
+            float potentialContour = 1.0 - smoothstep(0.035, 0.11,
+                abs(fract(matterPotential * 420.0) - 0.5));
+            float coinAngle = 0.18 + 0.16 * saturate(feedbackState.w * 4.0) +
+                0.06 * saturate(feedbackGenome.y);
+            float coinPerturbation = saturate((coinAngle - 0.18) / 0.22);
+            float coinContour = 1.0 - smoothstep(0.035, 0.12,
+                abs(fract(coinAngle * 23.0) - 0.5));
+            float feedbackWindow = smoothstep(176.0, 210.0, observationZoom) *
+                (1.0 - smoothstep(420.0, 512.0, observationZoom));
+            float3 feedbackColor = mix(
+                float3(0.08, 1.0, 0.62), float3(1.0, 0.42, 0.025), coinPerturbation
+            );
+            quantumOnlyColor *= 1.0 - potentialRadiance * feedbackWindow * 0.12;
+            quantumOnlyColor += feedbackColor * potentialContour * potentialRadiance *
+                feedbackWindow * 0.42;
+            quantumOnlyColor += float3(1.0, 0.42, 0.025) * coinContour *
+                coinPerturbation * feedbackWindow * density * 0.24;
+        }
         return float4(max(quantumOnlyColor, 0.0) * 1.16, 1.0);
     }
 
@@ -7281,6 +7311,15 @@ fragment float4 worldSurfaceFragment(
     float2 resourceGradientA = float2(stateRight.x - cell.x, stateUp.x - cell.x);
     float2 resourceGradientB = float2(ecologyRight.x - chemistry.x, ecologyUp.x - chemistry.x);
     float resourceFlux = saturate((length(resourceGradientA) + length(resourceGradientB)) * 5.5);
+    float2 totalResourceGradient = resourceGradientA + resourceGradientB;
+    float2 resourceDirection = length(totalResourceGradient) > 0.000001
+        ? -normalize(totalResourceGradient) : float2(1.0, 0.0);
+    float resourceTransportCoordinate = fract(
+        dot(uv * float2(uniforms.width, uniforms.height), resourceDirection) * 0.095 -
+            float(uniforms.step) * 0.007
+    );
+    float resourceTransportPulse = 1.0 - smoothstep(0.025, 0.090,
+        abs(resourceTransportCoordinate - 0.5));
     float resourcePotential = cell.x * 0.62 + chemistry.x * 0.52 + chemistry.y * 0.22;
     float resourceIsoline = 1.0 - smoothstep(0.025, 0.095,
         abs(fract(resourcePotential * 13.0 + terrain * 0.12) - 0.5));
@@ -7301,6 +7340,20 @@ fragment float4 worldSurfaceFragment(
     float fissure = 1.0 - smoothstep(0.025, 0.12,
         abs(sin((uv.x * 17.0 + uv.y * 23.0 + terrain * 0.8) * M_PI_F)));
     float hazard = toxin * (0.18 + fissure * 0.82) * hazardPulse;
+    float obstacle = smoothstep(0.48, 0.84, geology.w);
+    float permeability = 1.0 - obstacle * 0.88;
+    float mineralization = min(
+        max(chemistry.y, 0.0),
+        uniforms.dt * max(chemistry.y, 0.0) *
+            (0.00035 + max(chemistry.w, 0.0) * 0.0032) * permeability *
+            (1.0 - saturate(chemistry.z) * 0.72)
+    );
+    float recycleRadiance = saturate(log2(1.0 + mineralization * 8.0e6) * 0.18);
+    float recycleCoordinate = fract(
+        uv.x * 17.0 - uv.y * 11.0 + terrain * 0.38 + float(uniforms.step) * 0.006
+    );
+    float recyclePulse = 1.0 - smoothstep(0.022, 0.082,
+        abs(recycleCoordinate - 0.5));
     float vibration = saturate(length(localMechanical.xy) * 16.0 + length(localMechanical.zw) * 72.0);
     float frequencyCoordinate = saturate((localEnvironmentalFrequency - 0.0010) / 0.0074);
     float3 frequencyColor = hsvToRGB(float3(mix(0.56, 0.94, frequencyCoordinate), 0.82, 0.84));
@@ -7362,6 +7415,17 @@ fragment float4 worldSurfaceFragment(
         color += float3(0.96, 0.08, 0.72) * mutation * 0.42;
         color += float3(1.00, 0.08, 0.018) * conflict * 0.58;
         color += float3(0.42, 0.14, 0.96) * death * 0.46;
+    }
+
+    if (uniforms.displayMode != 2) {
+        float3 transportColor = mix(
+            float3(0.02, 0.52, 1.0), float3(0.04, 0.98, 0.56),
+            saturate(resourceA / max(resourceA + resourceB, 0.001))
+        );
+        color += transportColor * resourceTransportPulse * resourceFlux *
+            (1.0 - rock) * 0.26;
+        color += float3(1.0, 0.30, 0.025) * recyclePulse * recycleRadiance *
+            (1.0 - rock) * 0.46;
     }
 
     return float4(max(color, 0.0) * 1.08, 1.0);

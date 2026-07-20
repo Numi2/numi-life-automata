@@ -1,6 +1,57 @@
 import AutogenesisCore
 import SwiftUI
 
+private struct ProcessPathNode: Identifiable {
+    let label: String
+    let value: String
+    let symbol: String
+    let tint: Color
+
+    var id: String { label }
+}
+
+private struct ProcessPathwayView: View {
+    let nodes: [ProcessPathNode]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("MEASURED PROCESS CHAIN")
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                ForEach(Array(nodes.enumerated()), id: \.element.id) { index, node in
+                    nodeView(node)
+                    if index < nodes.count - 1 {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(nodes[index + 1].tint)
+                            .frame(width: 20)
+                    }
+                }
+            }
+        }
+    }
+
+    private func nodeView(_ node: ProcessPathNode) -> some View {
+        VStack(spacing: 3) {
+            Image(systemName: node.symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(node.tint)
+                .frame(width: 24, height: 24)
+                .background(node.tint.opacity(0.12), in: Circle())
+            Text(node.label)
+                .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(node.value)
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(width: 44)
+    }
+}
+
 struct ContentView: View {
     @StateObject private var store = EvolutionStore()
 
@@ -239,9 +290,12 @@ struct ContentView: View {
                     }
                 }
 
+                Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
+
                 if activeObservationStop == 2 {
-                    Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
                     molecularReactionPathway
+                } else {
+                    scaleProcessPathway
                 }
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
@@ -439,6 +493,50 @@ struct ContentView: View {
                 molecularGate("TOXIN", value: store.snapshot.meanMolecularToxin, tint: .red)
                 molecularGate("RECYCLE", value: store.snapshot.meanDetritalMineralization, tint: .orange, scientific: true)
             }
+        }
+    }
+
+    private var scaleProcessPathway: some View {
+        ProcessPathwayView(nodes: processPathNodes)
+    }
+
+    private var processPathNodes: [ProcessPathNode] {
+        switch activeObservationStop {
+        case 0:
+            return [
+                .init(label: "NORM", value: quantumNormLabel, symbol: "waveform.path", tint: .cyan),
+                .init(label: "ORDER Q", value: decimal(store.snapshot.meanQuantumOrder), symbol: "circle.grid.cross", tint: .purple),
+                .init(label: "DELTA C", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
+                .init(label: "DELTA E", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
+            ]
+        case 1:
+            return [
+                .init(label: "ORDER Q", value: decimal(store.snapshot.meanQuantumOrder), symbol: "waveform.path", tint: .cyan),
+                .init(label: "A·B GATE", value: decimal(store.snapshot.meanChemicalAffinity), symbol: "point.3.connected.trianglepath.dotted", tint: .blue),
+                .init(label: "DELTA C", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
+                .init(label: "DELTA E", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
+            ]
+        case 3:
+            return [
+                .init(label: "SUBSTRATE", value: compactScientific(store.snapshot.auditedSubstrateEnergy), symbol: "circle.grid.2x2.fill", tint: .cyan),
+                .init(label: "ATP", value: decimal(store.snapshot.meanCellATP), symbol: "bolt.fill", tint: .yellow),
+                .init(label: "CA*/ERK*", value: signalCompactLabel, symbol: "waveform.path.ecg", tint: .pink),
+                .init(label: "FORCE", value: compactScientific(store.snapshot.meanCellGeneratedForce), symbol: "arrow.up.right", tint: .mint)
+            ]
+        case 4:
+            return [
+                .init(label: "CELLS", value: "\(store.snapshot.cellCount)", symbol: "circle.hexagonpath.fill", tint: .cyan),
+                .init(label: "EXPOSED P", value: decimal(store.snapshot.meanExposedMembraneLength), symbol: "circle.dashed", tint: .mint),
+                .init(label: "NET FORCE", value: compactScientific(store.snapshot.meanCellGeneratedForce), symbol: "arrow.up.right", tint: .green),
+                .init(label: "MOTION", value: compactScientific(store.snapshot.meanOrganismSpeed), symbol: "location.north.fill", tint: .orange)
+            ]
+        default:
+            return [
+                .init(label: "RESOURCE", value: decimal(store.snapshot.metrics.resourceDensity), symbol: "drop.fill", tint: .cyan),
+                .init(label: "ATP", value: compactScientific(store.snapshot.auditedATPHarvest), symbol: "bolt.fill", tint: .yellow),
+                .init(label: "WORK", value: compactScientific(ecologicalWork), symbol: "waveform.path", tint: .green),
+                .init(label: "DETRITUS", value: decimal(store.snapshot.metrics.detritusDensity), symbol: "arrow.triangle.2.circlepath", tint: .orange)
+            ]
         }
     }
 
@@ -761,7 +859,7 @@ struct ContentView: View {
             return "ψ = (ψ₀, ψ₁) is stored as four real components on a 1024² periodic lattice. Each update applies a local coin rotation and alternates conditional shifts along x and y. Measured Σρ = \(quantumNormValue)."
         }
         if zoom >= 160 {
-            return "ρ = |ψ₀|² + |ψ₁|². Component overlap contributes to the catalyst source term; local resource, biomass, membrane, toxin, and inherited trait fields modify the coin angle and phase potential."
+            return "ρ = |ψ₀|² + |ψ₁|². Component overlap contributes to the catalyst source term. Mint-to-amber feedback contours evaluate the same local resource, biomass, membrane, toxin, and inherited-trait terms that modify phase potential and coin angle in the quantum update; they are diagnostics, not additional forces."
         }
         if zoom >= 64 {
             return "The 193² reaction lattice stores substrate A, biomass, energy E, membrane precursor M, substrate B, detritus, toxin, and catalyst C. The canvas maps concentrations to species glyphs and maps the exact local source terms to moving flux pulses; glyphs are field markers, not atom-resolved particles. Spinor order and mechanical activity produce C, C gates E production, E and C gate M assembly, and catalyst accelerates detrital recycling."
@@ -823,6 +921,18 @@ struct ContentView: View {
     private var speedLabel: String {
         let speed = store.snapshot.meanOrganismSpeed
         return String(format: "%.2e world/step", max(speed, 0))
+    }
+
+    private var signalCompactLabel: String {
+        String(
+            format: "%.2f/%.2f",
+            max(store.snapshot.meanCalciumActivity, 0),
+            max(store.snapshot.meanERKActivity, 0)
+        )
+    }
+
+    private var ecologicalWork: Double {
+        max(store.snapshot.auditedActiveWork + store.snapshot.auditedFrequencyWork, 0)
     }
 
     private var zoomLabel: String {
@@ -901,7 +1011,7 @@ struct ContentView: View {
             return [("Spin +", .cyan), ("Spin -", .orange), ("Current", .white), ("Nodes", .purple)]
         }
         if store.observationZoom >= 160 {
-            return [("Probability", .cyan), ("Phase", .pink), ("Current", .white), ("Potential", .mint)]
+            return [("Probability", .cyan), ("Phase", .pink), ("Current", .white), ("Matter feedback", .mint)]
         }
         if store.observationZoom >= 64 {
             return switch store.displayMode {

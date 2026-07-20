@@ -8,7 +8,10 @@ final class InteractiveMetalView: MTKView {
     var zoomHandler: ((Double, SIMD2<Float>, Float) -> Void)?
     var resetCameraHandler: (() -> Void)?
     var cycleOrganismHandler: ((Int) -> Void)?
+    var selectOrganismHandler: ((SIMD2<Float>, Float) -> Void)?
     private var lastDragPosition: SIMD2<Float>?
+    private var mouseDownPosition: SIMD2<Float>?
+    private var hasDragged = false
     private var pendingZoomLog = 0.0
     private var pendingZoomAnchor = SIMD2<Float>(repeating: 0.5)
     private var pendingZoomAspect: Float = 1
@@ -24,10 +27,13 @@ final class InteractiveMetalView: MTKView {
         if event.clickCount == 2 {
             resetCameraHandler?()
             lastDragPosition = nil
+            mouseDownPosition = nil
             return
         }
         let position = normalizedPosition(for: event)
         lastDragPosition = position
+        mouseDownPosition = position
+        hasDragged = false
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -37,12 +43,20 @@ final class InteractiveMetalView: MTKView {
             return
         }
         let delta = position - previous
+        if simd_length(position - (mouseDownPosition ?? position)) > 0.006 {
+            hasDragged = true
+        }
         lastDragPosition = position
         panHandler?(delta, aspect)
     }
 
     override func mouseUp(with event: NSEvent) {
+        if !hasDragged, event.clickCount == 1 {
+            selectOrganismHandler?(normalizedPosition(for: event), aspect)
+        }
         lastDragPosition = nil
+        mouseDownPosition = nil
+        hasDragged = false
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -208,6 +222,9 @@ struct MetalEvolutionView: NSViewRepresentable {
             }
             view.cycleOrganismHandler = { [weak coordinator = context.coordinator] direction in
                 coordinator?.store.followAdjacentOrganism(direction: direction)
+            }
+            view.selectOrganismHandler = { [weak coordinator = context.coordinator] position, aspect in
+                coordinator?.store.followOrganism(at: position, aspect: aspect)
             }
         } catch {
             store.report(error: error)
