@@ -48,7 +48,7 @@ The implementation combines seven mechanisms:
 2. Spinor density and component overlap enter catalyst and stored-energy source terms on a `193 x 193` reaction lattice.
 3. Resource, biomass, membrane, and toxin state feed back into the spinor coin angle and phase potential.
 4. A local threshold maximum can atomically allocate the first persistent agent slot.
-5. Every organism starts as one cell and develops through division under an inherited sparse regulatory network driven only by local chemical, electrical, contact, polarity, and mechanical state.
+5. Founders start as one cell; descendants begin as physically separated viable cell components and continue development through division under inherited local regulatory and mechanochemical control.
 6. Cell contractions launch damped displacement waves into a shared mechanical field; strain feeds back into cell voltage, chemistry, and organism steering.
 7. Descendants inherit mutable trait vectors plus regulatory weights and topology; local resource, hazard, crowding, predation, and tissue-viability terms determine differential survival and reproduction.
 
@@ -110,13 +110,15 @@ The interface uses one camera over one persistent simulation. The scale controls
 | Reaction-state texture pairs | `193 x 193 x 1` each | `RGBA16Float` | GPU private | State, ecology, three trait fields, events, and environment |
 | Mechanical-field texture pair | `193 x 193 x 1` | `RGBA16Float` | GPU private | Displacement `(u_x,u_y)` and velocity `(v_x,v_y)` |
 | Checkpoint texture | `193 x 193 x 1` | `RGBA16Float` | GPU private | Pre-perturbation biomass reference |
-| Agent state ping-pong buffers | `2 x 384 x 128 B` | Swift/Metal ABI-matched struct | GPU private | Dynamics, permanent birth/parent IDs, genome hash, birth step, and mutation distance |
+| Agent state ping-pong buffers | `2 x 384 x 144 B` | Swift/Metal ABI-matched struct | GPU private | Position, tissue-derived velocity/orientation, permanent identity, lineage metadata, and propagule refractory state |
 | Agent occupancy | `384` atomic integers | `UInt32` | GPU private | Stable slot allocation and death |
-| Cell state ping-pong buffers | `2 x 9,216 x 224 B` | Swift/Metal ABI-matched struct | GPU private | Metabolism, electrophysiology, mechanochemical signaling, regulation, resonator state, and polygon measurements |
+| Cell state ping-pong buffers | `2 x 9,216 x 256 B` | Swift/Metal ABI-matched struct | GPU private | Metabolism, electrophysiology, mechanochemical signaling, vertex-derived exposure, traction, contact damage, and trophic transfer |
 | Cell occupancy | `9,216` atomic integers | `UInt32` | GPU private | Stable ownership of `24` cell slots per organism |
 | Membrane vertices | `9,216 x 12 x 32 B` | Position, velocity, and local mechanics | GPU private | Deformable cell polygons with edge, bending, pressure, integrity, and contact state |
-| Cellular aggregates | `384 x 192 B` | Twelve `float4` vectors | GPU private | Physiology, morphology, dynamics, mechanics, energy, actuator means, signaling, causal terms, resonance, and polygon shape |
-| Developmental headers | `384 x 64 B` | Counts, topology hash, mutation distances, actuator biases | GPU private | Bounded sparse graph metadata |
+| Cell spatial hash | `16,384` heads + `9,216` links | Atomic `UInt32` heads and `UInt32` links | GPU private | Broad-phase lookup for cross-organism membrane contacts |
+| Cell contact effects | `9,216 x 4` atomic integers | Fixed-point force, damage, and trophic flux | GPU private | Order-independent narrow-phase accumulation before cell-local application |
+| Cellular aggregates | `384 x 256 B` | Sixteen `float4` vectors | GPU private | Physiology, signaling, covariance axes, exposed boundary, net force, torque, contact load, trophic flux, and detachment state |
+| Developmental headers | `384 x 96 B` | Topology, mutation distances, actuator biases, and mechanochemical coefficients | GPU private | Bounded sparse graph metadata plus eight inherited pathway parameters |
 | Regulatory nodes | `384 x 16 x 32 B` | Parametric node records | GPU private | Bias, rate, sensor coupling, actuator mask, and permanent innovation ID |
 | Regulatory edges | `384 x 48 x 32 B` | Sparse directed edge records | GPU private | Weight, strain plasticity, endpoints, activity, and permanent innovation ID |
 | Cell regulatory activity | `9,216 x 16 x 4 B` | `Float` | GPU private | Cell-local dynamical state for inherited graphs |
@@ -319,9 +321,9 @@ A candidate must be no lower than its four cardinal neighbors. It then claims sl
 
 ## Persistent multicellular state
 
-Every occupied organism slot owns a fixed-capacity block of `24` cell slots. Ownership is `cellID / 24`, so cell lookup requires no allocator, indirection table, or CPU synchronization. Every autogenic founder, user-injected founder, and inherited offspring begins with exactly one occupied cell at its organism-relative origin. All later tissue geometry is produced by cell-cycle progression, division, asymmetric daughter state, adhesion, contractility, electrophysiology, and mechanics. Camera motion and zoom never allocate, merge, or rescale cells.
+Every occupied organism slot owns a fixed-capacity block of `24` cell slots. Ownership is `cellID / 24`, so cell lookup requires no allocator, indirection table, or CPU synchronization. Autogenic and user-injected founders begin with one occupied cell. Inherited offspring instead receive the exact viable membrane-connected component that separated from the parent, including acquired ATP, stress, phase, differentiated state, regulatory activities, and membrane vertices. Camera motion and zoom never allocate, merge, or rescale cells.
 
-Each `CellState` is a `224 B` GPU record:
+Each `CellState` is a `256 B` GPU record:
 
 ```text
 position.xy, velocity.xy
@@ -339,6 +341,9 @@ membrane = (polygon area, polygon perimeter, shape index, transmitted junction f
 signaling = (calcium-like activity, ERK-like activity, refractory state, neighbor signal input)
 signalCausality = (mechanics-to-Ca* effect, Ca*-to-ERK* effect,
                    ERK*-to-traction magnitude, signaling ATP cost)
+tissueGeometry = (vertex-derived outward normal.xy, exposed-perimeter fraction,
+                  physical detachment score)
+tissueForce = (local traction/contact force.xy, contact damage, signed trophic transfer)
 ```
 
 For cell `i`, `evolveOrganismCells` evaluates all occupied cells belonging to the same organism. Pair forces are calculated from the same previous-state positions, symmetric radii, and minimum pair adhesion. Reversing the ordered pair reverses its direction without changing magnitude, so the center-level contact force is equal and opposite. `evolveCellMembranes` then advances a separate twelve-vertex polygon for every occupied cell. This is a deformable-particle tissue model coupled to a lattice wave equation, not a continuum finite-element model.
@@ -360,7 +365,7 @@ Local membrane integrity continuously changes the edge and bending stiffness. Co
 
 ### Evolvable developmental regulation
 
-Each organism owns a `64 B` developmental header, sixteen `32 B` node slots, and forty-eight `32 B` directed-edge slots. Founders begin with eight active sensor-coupled nodes and fourteen active edges. A node stores its bias, response rate, sensor weight, actuator weight, sensor index, eight-bit actuator mask, activity flag, and monotonic innovation ID. An edge stores its weight, strain-dependent plastic term, source, target, activity flag, and monotonic innovation ID. Inactive slots have zero effect but can be activated by structural mutation.
+Each organism owns a `96 B` developmental header, sixteen `32 B` node slots, and forty-eight `32 B` directed-edge slots. Founders begin with eight active sensor-coupled nodes and fourteen active edges. The header also carries heritable gains for mechanics-to-Ca*, junction transmission, Ca*-to-ERK*, refractory recovery, signaling ATP cost, traction, detachment threshold, and propagule investment. A node stores its bias, response rate, sensor weight, actuator weight, sensor index, eight-bit actuator mask, activity flag, and monotonic innovation ID. An edge stores its weight, strain-dependent plastic term, source, target, activity flag, and monotonic innovation ID. Inactive slots have zero effect but can be activated by structural mutation.
 
 The eight cell-local inputs are:
 
@@ -385,7 +390,7 @@ z_k(t+1)=\mathrm{clip}\left[(1-r_k)z_k(t)+r_k
 
 Active nodes can project into any subset of eight stable actuator channels: proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. These are abstract model controls, not named genes or measured protein concentrations. Because every cell evaluates the same inherited graph from different local inputs, differentiated dynamical states can arise without a cell-type table. This local mechanochemical organization is motivated by experimental evidence that shape, contractility, compression, and tissue stress can influence fate patterning and signaling-centre formation [16-19], but the coefficients remain dimensionless and uncalibrated.
 
-At organism reproduction, active node parameters, edge weights, edge plasticity, and actuator biases receive bounded numerical mutation. Structural mutation selects one operation: duplicate a node, silence a node, add an edge, remove an edge, or reconnect an edge. New and reconnected structures receive globally monotonic innovation IDs; each genome stores active counts, a topology hash, cumulative mutation distance, last branch distance, and structural-mutation count. This borrows the historical-marking principle from augmenting-topology neuroevolution [27], but Numi Automata does not use NEAT crossover, explicit fitness sharing, or prescribed species protection. The offspring inherits mutated developmental rules but none of the parent's acquired geometry, ATP, stress, phase, or differentiated state.
+At cellular-component separation, active node parameters, edge weights, edge plasticity, actuator biases, and all eight mechanochemical coefficients receive bounded numerical mutation. Structural mutation selects one operation: duplicate a node, silence a node, add an edge, remove an edge, or reconnect an edge. New and reconnected structures receive globally monotonic innovation IDs; each genome stores active counts, a topology hash, cumulative mutation distance, last branch distance, and structural-mutation count. This borrows the historical-marking principle from augmenting-topology neuroevolution [27], but Numi Automata does not use NEAT crossover, explicit fitness sharing, or prescribed species protection. The offspring inherits mutated rules while physically retaining the acquired state and geometry of the transferred cells.
 
 This differs from target-shape optimization: no morphology image or terminal body geometry is supplied to the network. Recent differentiable morphogenesis work demonstrates that local genetic networks can be optimized for prescribed cluster-level outcomes [20]; Numi Automata instead mutates local rules under ecological reproduction and measures whatever viable structures result.
 
@@ -430,16 +435,16 @@ The phase update combines an inherited intrinsic frequency, ATP modulation, volt
 
 Every cell also carries calcium-like activity `c_i`, ERK-like activity `e_i`, and a refractory state `h_i`, each bounded to `[0,1]`. The asterisks used in the UI, Ca* and ERK*, identify dimensionless active-state variables. They are not concentrations, molecule counts, or claims that the reduced equations reproduce a named biochemical pathway.
 
-Cells first compute contact-weighted neighbor means `cbar_i` and `ebar_i` over occupied cells within the interaction radius. With adhesion `a_i`, apoptosis activation `x_i`, integrity `m_i`, resonant response `q_i`, strain `epsilon_i`, transmitted junction force `j_i`, and intervention gain `g`, the update explicitly separates the no-mechanical-edge calcium result from the factual result:
+Cells first compute contact-weighted neighbor means `cbar_i` and `ebar_i` over occupied cells within the interaction radius. Let the inherited pathway coefficients be `g_J` for junction transmission, `g_MC` for mechanics-to-Ca*, `g_CE` for Ca*-to-ERK*, and `g_R` for refractory recovery. With adhesion `a_i`, apoptosis activation `x_i`, integrity `m_i`, resonant response `q_i`, strain `epsilon_i`, transmitted junction force `j_i`, and intervention gain `g`, the update explicitly separates the no-mechanical-edge calcium result from the factual result:
 
 ```math
 c_i^{(0)}=\mathrm{clip}_{[0,1]}\left[c_i
-+0.018(0.30+0.54a_i)(\bar c_i-c_i)_+(1-h_i)
++0.018g_J(0.30+0.54a_i)(\bar c_i-c_i)_+(1-h_i)
 +0.012x_i(0.10+0.16m_i)-c_i(0.009+0.014h_i)\right],
 ```
 
 ```math
-M_i=\mathrm{clip}_{[0,1]}\left(0.72|q_i|+0.30\epsilon_i
+M_i=g_{MC}\,\mathrm{clip}_{[0,1]}\left(0.72|q_i|+0.30\epsilon_i
 +0.18\,\mathrm{clip}_{[0,1]}(8j_i)\right)(1-h_i)^2g,
 ```
 
@@ -457,25 +462,31 @@ e_i^{(0)}=\mathrm{clip}_{[0,1]}\left[e_i
 
 ```math
 e_i'=\mathrm{clip}_{[0,1]}\left[e_i^{(0)}
-+0.020\,\mathrm{smoothstep}(0.08,0.46,c_i')(1-h_i)(1-e_i)\right],
++0.020g_{CE}\,\mathrm{smoothstep}(0.08,0.46,c_i')(1-h_i)(1-e_i)\right],
 ```
 
 ```math
-h_i'=\mathrm{clip}_{[0,1]}\left[h_i+0.0075e_i'-0.0038h_i\right].
+h_i'=\mathrm{clip}_{[0,1]}\left[h_i+0.0075e_i'-0.0038g_Rh_i\right].
 ```
 
-The refractory variable suppresses repeated mechanical entry and contact propagation, so a sustained load cannot produce an unconstrained signal plateau. ERK-like activity produces an evolved motility-dependent traction term opposite the local ERK gradient:
+The refractory variable suppresses repeated mechanical entry and contact propagation, so a sustained load cannot produce an unconstrained signal plateau. Each cell samples resource-A, resource-B, detrital, and hazard gradients at its own world position. These gradients combine with the local ERK wave direction and developmental polarity into a normalized direction `d_i`. With vertex-derived exposed fraction `b_i`, motility output `z_i^motility`, and inherited traction gain `g_T`, the external traction retained for tissue motion is:
 
 ```math
-\mathbf{T}_i=-\widehat{\nabla e_i}\,e_i' z_i^{motility}
-\left(0.000035+0.000085k_i^{contractile}\right).
+\mathbf{T}_i=\widehat{\mathbf d_i}\,b_i z_i^{motility} A_i\,
+(0.20+0.80e_i')g_T
+\left(0.000045+0.000105k_i^{contractile}\right)
+(0.46+0.54z_i^{adhesion})
++\widehat{\mathbf n_i}\,b_i k_i^{contractile}g_T
+\left(0.000014+0.000026z_i^{adhesion}\right).
 ```
+
+The inherited propagule-investment coefficient also creates a boundary-normal drive proportional to exposure, motility, ATP sufficiency, and `1 - adhesion`. The same program reduces the centering tether before separation. This supplies an evolvable physical route to budding; it does not allocate identity or bypass the later connected-component test.
 
 Signal maintenance is charged directly to cellular active work:
 
 ```math
-W_i^{signal}=0.000020c_i'+0.000024e_i'
-+0.000080\left[(c_i'-c_i^{(0)})+(e_i'-e_i^{(0)})\right].
+W_i^{signal}=g_W\left(0.000020c_i'+0.000024e_i'
++0.000080\left[(c_i'-c_i^{(0)})+(e_i'-e_i^{(0)})\right]\right).
 ```
 
 The model stores `c_i'-c_i^(0)`, `e_i'-e_i^(0)`, `|T_i|`, and `W_i^signal` per cell. These are one-update equation terms evaluated from the same pre-update state. Contact propagation can therefore form moving multicellular fronts, while refractory suppression, ATP cost, inherited adhesion, evolved motility, cell geometry, and environmental strain determine whether a front persists or terminates. This mechanochemical direction is motivated by observed mechanically initiated calcium waves and ERK-mediated collective migration [11-12, 22, 30], while the implementation remains a deliberately reduced artificial-life model.
@@ -511,7 +522,7 @@ u_{t+1}=0.9975\left(u_t+v_{t+1}\right).
 
 Rock obstacles lower `k` and `gamma`; the outer lattice band adds absorption. Local displacement gradients define strain, while velocity magnitude defines wave speed. Both enter cell work and dissipation. Strain also drives membrane excitation and the reaction field, and organisms can evolve attraction or avoidance to vibration gradients. This implements a closed mechanochemical loop motivated by experimentally observed epithelial signaling and deformation waves [11-14], without claiming a calibrated tissue material model.
 
-Cell-cycle progression is energy-gated, multiplied by the proliferation program, and inhibited by contact density according to the adhesive program. A cell with completed cycle, sufficient organism energy, and an empty slot divides along an axis calculated from oscillator phase, radial position, morphogen polarity, strain, proliferation, and contractile state. Parent and daughter split ATP and biomass, separate mechanically, reset cycle phase, and receive opposite regulatory and morphogen perturbations. The resulting asymmetry is then stabilized or erased by each daughter's local network inputs. When all `24` slots are occupied, late-cycle cells enter a quiescent range instead of remaining falsely marked as dividing.
+Cell-cycle progression is gated by the cell's own ATP, multiplied by the proliferation program, and inhibited by contact density according to the adhesive program. A cell with a completed cycle and an empty tissue slot divides along an axis calculated from oscillator phase, radial position, morphogen polarity, strain, proliferation, and contractile state. Parent and daughter split ATP and biomass, separate mechanically, reset cycle phase, and receive opposite regulatory and morphogen perturbations. The resulting asymmetry is then stabilized or erased by each daughter's local network inputs. When all `24` slots are occupied, late-cycle cells enter a quiescent range instead of remaining falsely marked as dividing.
 
 For direct causal accounting, the cycle update is decomposed into an unconstrained drive `G_i`, a contact brake `C_i`, and the remaining crowding term:
 
@@ -533,6 +544,15 @@ Here `chi_i` is bounded contact inhibition, `z_i^P` is the proliferation output,
 
 Two contact-averaged morphogen variables combine with radial tissue position and regulatory activity to alter adhesion, contractility, and resource-uptake phenotype. The model therefore supports spatial differentiation without assigning fixed cell classes. These variables are dimensionless regulatory signals; they are not calibrated concentrations of named proteins.
 
+An edge is classified as exposed only when its midpoint lies outside every other occupied cell membrane in the same tissue. For exposed edge set `E`, edge length `l_e`, endpoints `a_e,b_e`, midpoint `q_e`, and linearly parameterized segment `p_e(t)=a_e+t(b_e-a_e)`, the tissue boundary centroid and covariance are measured from the polygon segments:
+
+```math
+\mu_B=\frac{\sum_{e\in E}l_eq_e}{\sum_{e\in E}l_e},\qquad
+C_B=\frac{\sum_{e\in E}l_e\int_0^1(p_e(t)-\mu_B)(p_e(t)-\mu_B)^Tdt}{\sum_{e\in E}l_e}.
+```
+
+The segment integral is evaluated analytically from each pair of membrane vertices. The principal axis is the eigenvector of the larger eigenvalue of `C_B`. Projecting both vertices of every exposed edge onto both covariance axes gives the polygon's positive and negative extents; their asymmetry defines geometric polarity, and `(L_major-L_minor)/(L_major+L_minor)` defines elongation. Collision support, visual bounds, exposed membrane length, detachment, and morphology measurements therefore come from cell polygons rather than an agent envelope.
+
 After every cell update, one thread per organism reduces its tissue to:
 
 ```text
@@ -550,9 +570,13 @@ After every cell update, one thread per organism reduces its tissue to:
 (mean Ca* activity, ERK* activity, refractory state, neighbor signal input)
 (mean mechanics-to-Ca* effect, Ca*-to-ERK* effect,
  ERK*-to-traction magnitude, signaling ATP cost)
+(principal axis.xy, major extent, minor extent)
+(geometric polarity.xy, elongation, exposed membrane length)
+(net local cellular force.xy, tissue torque, mean cell-force magnitude)
+(contact load, trophic gain, trophic loss, maximum detachment score)
 ```
 
-The next organism update consumes this `192 B` aggregate. Cellular regulatory state, ATP, integrity, phase coherence, resonance, mechanochemical signaling, polygon mechanics, strain, contractility, and net power modify movement, maintenance, damage, reproduction, body proportions, appendage reach, and surface condition. Early organisms are rendered at reduced scale according to measured cell occupancy; morphology expands as tissue develops. Complete tissue loss terminates an established organism. This closes the observable causal path from chemistry through cell-local regulation and electromechanics to organism morphology and ecological behavior.
+The next organism update consumes this `256 B` aggregate. With local external cell force `T_i`, recentered cell position `r_i`, tissue mass `m`, and moment of inertia `I`, motion follows `F=sum_i T_i`, `tau=sum_i r_i x T_i`, damped translation, and damped angular integration. There is no independent cruise-speed target, pursuit impulse, separation impulse, or agent-level chemotaxis. Complete tissue loss terminates an established organism. This closes the causal path from local chemistry through cell signaling, membrane geometry, force, organism motion, contact, feeding, and reproduction.
 
 ### Causal diagnostics and intervention
 
@@ -562,7 +586,7 @@ The ECG toolbar control performs one explicit model intervention by setting `g_m
 
 ## Persistent agents
 
-Each `128 B` `AgentState` occupies one reusable GPU storage slot and stores:
+Each `144 B` `AgentState` occupies one reusable GPU storage slot and stores:
 
 ```swift
 position:   float2
@@ -582,9 +606,10 @@ birthStep: uint
 mutationDistance: float
 lastMutationDistance: float
 lineageFlags: uint
+tissueKinematics: float4 // orientation, angular velocity, contact load, propagule refractory state
 ```
 
-`birthID` is the permanent identity; slot index is not. `behavior.xy` stores the last local pursuit direction, `behavior.z` stores attack contact, and `behavior.w` stores threat intensity. It is simulated state used to visualize action; it is not a renderer-generated animation.
+`birthID` is the permanent identity; slot index is not. `behavior.xy` stores measured tissue-force direction, `behavior.z` stores trophic gain, and `behavior.w` stores physical contact and trophic loss. These are simulation outputs used to visualize action; they are not renderer-generated animation.
 
 ### Trait semantics
 
@@ -592,14 +617,14 @@ The twelve inherited values are continuous parameters rather than species labels
 
 | Trait | Primary use in the current kernels |
 |---|---|
-| `geneA.x` | Resource uptake rate and energy conversion |
-| `geneA.y` | Membrane production, catalyst production, and spinor coin coupling |
-| `geneA.z` | Colonization pressure, turning response, separation, and birth probability |
-| `geneA.w` | Toxin/attack resistance and resource conversion modifier |
-| `geneB.x` | Energy reserve and local colonization pressure |
+| `geneA.x` | Reaction-field conversion and founder Ca*-to-ERK* bias |
+| `geneA.y` | Membrane production, adhesion bias, junction gain, and detachment threshold |
+| `geneA.z` | Contractility, founder mechanics-to-Ca* bias, and traction gain |
+| `geneA.w` | Toxin/attack resistance, repair, and refractory-recovery bias |
+| `geneB.x` | Reaction-field energy reserve and inherited signaling-cost bias |
 | `geneB.y` | Inherited mutation amplitude |
-| `geneB.z` | Cruise speed and offspring displacement |
-| `geneB.w` | Inherited heading/lineage coordinate |
+| `geneB.z` | Reaction-field transport and propagule-investment bias |
+| `geneB.w` | Founder orientation and lineage color coordinate |
 | `geneC.x` | Resource-A utilization |
 | `geneC.y` | Resource-B utilization |
 | `geneC.z` | Detritus utilization |
@@ -607,54 +632,45 @@ The twelve inherited values are continuous parameters rather than species labels
 
 ### Movement
 
-Agents sample resource and hazard gradients from the same textures rendered to the observer. Desired heading combines
+There is no agent steering controller. Every occupied cell samples resource and hazard gradients at its own membrane position. Its exposed boundary, local ERK* state, developmental polarity, motility output, ATP, and inherited traction gain determine a local external force. Cross-organism membrane contact adds a physical impulse. Reduction yields
 
 ```text
-inherited heading
-+ resource-A and resource-B gradients
-- toxin and rock gradients
-+ short-range separation
-+ prey direction when predation conditions are satisfied
-+ escape direction from stronger predators
-+ attraction to or avoidance of extracellular vibration gradients
-+ boundary avoidance
+F = sum(cell traction + cell contact impulse)
+tau = sum((cell position - tissue centroid) x cell force)
 ```
 
-Turning and speed use exponential smoothing. The base speed is
+The next update integrates translation and rotation with measured tissue mass and moment of inertia:
 
 ```math
-v_0 = \frac{0.000020 + 0.000050\,g_{B,z}}{\text{worldScale}}.
+\mathbf v' = 0.91\mathbf v+\frac{\mu}{m}\,R(\theta)\mathbf F,
+\qquad
+\omega'=\mathrm{clip}\left(0.90\omega+0.42\frac{\tau}{I},-0.018,0.018\right).
 ```
 
-The `worldScale` division preserves physical motion when the backing world expands.
+`R(theta)` maps cell-local force into world coordinates. The cell-to-world length scale is divided by `worldScale`, preserving physical motion when the backing world expands.
 
 ### Energy, death, and reproduction
 
-Energy increases through resource uptake and conditional predation. It decreases through basal maintenance, locomotion, crowding, toxin exposure, rock collision, and incoming predation. A slot is released when energy approaches zero, biomass reaches its lower bound, or age exceeds `180000` simulation steps.
+ATP changes only in cells through membrane-exposure-weighted uptake, maintenance, active work, dissipation, damage, repair, and contact-mediated trophic transfer. Agent energy and biomass are low-pass observations of mean cell ATP and occupied cell fraction; they no longer feed steering, feeding, damage, or reproduction. A slot is released after complete tissue loss or at the hard `180000`-step age bound.
 
-Reproduction requires
+For cross-organism contact, a `16,384`-bucket GPU linked-list hash limits candidate search to nearby spatial bins. Narrow phase projects the actual twelve membrane vertices onto the cell-cell axis. Repulsion begins on support overlap. Specialized exposed cells apply membrane damage according to predation investment, secretion, motility, ATP, lineage difference, and the contacted cell's local support integrity, adhesion, and defense investment. Trophic transfer is exactly zero until the contacted support integrity and whole-cell membrane integrity are both below their breach ranges. Damage is then localized to vertices facing the incoming impulse.
+
+Reproduction requires a physically disconnected membrane-connected component:
 
 ```text
-parent.energy >= 1.06
-parent.age >= 720 steps
-at least 5 occupied cells
-mean cell ATP >= 0.34
-mean membrane integrity >= 0.58
-tissue phase coherence >= 0.18
-net cellular power per cell > -0.00042
+parent tissue >= 6 occupied cells
+remaining parent tissue >= 4 cells
+propagule component size in [1, 6]
+mean propagule ATP >= 0.48
+mean propagule membrane integrity >= 0.58
+cell detachment score > inherited detachment threshold
+no membrane-support connection from the component to the remaining tissue
 an unoccupied target slot
-a stochastic birth draw below the inherited birth probability
 ```
 
-The birth probability per eligible step is:
+Connectivity is recomputed in private thread state from membrane support distances; no species label, birth timer, energy threshold, or stochastic birth draw can create an offspring. Most mutations are small. A `3.2%` branch increases parameter displacement and guarantees a structural-graph mutation attempt. The child receives mutated copies of all twelve organism traits, the sparse developmental graph, all eight mechanochemical gains, and all eight resonant tuning parameters.
 
-```math
-p_b=0.00100+0.00080\,g_{A,z}+0.0020\,g_{B,y}.
-```
-
-Most mutations are small. A `3.2%` branch increases parameter displacement and guarantees a structural-graph mutation attempt. The child receives mutated copies of all twelve organism traits, the sparse developmental graph, and all eight mechanosensory tuning parameters; it starts beside the parent and costs the parent `0.35` energy units.
-
-Every founder and offspring atomically acquires a monotonic `birthID`; inherited offspring also store `parentBirthID`. The agent record retains birth step, generation, topology and genome hashes, branch mutation distance, and cumulative mutation distance. Each offspring starts as one cell with newly initialized ATP, oscillator phase, regulatory activity, resonator state, and membrane polygon. Reproduction therefore propagates developmental rules and organism traits, not acquired anatomy or instantaneous tissue state.
+Every founder and separated propagule atomically acquires a monotonic `birthID`; inherited offspring also store `parentBirthID`. Identity allocation occurs only after component separation and viability checks. The exact component cells move into the child slot with their ATP, biomass, phase, voltage, Ca*/ERK* state, refractory state, differentiated regulatory activity, resonator state, and membrane vertices. Source cell slots are cleared. Reproduction therefore propagates both mutated inherited control parameters and the acquired physical state of the reproducing tissue.
 
 ## Selection, diversification, and measurement
 
@@ -662,12 +678,12 @@ Every founder and offspring atomically acquires a monotonic `birthID`; inherited
 
 There is no function of the form `fitness(agent) -> scalar` controlling survival or reproduction. Differential fitness is implicit in local state transitions:
 
-- Trait vectors change resource uptake, maintenance cost, movement, defense, and predation.
+- Trait vectors and inherited pathway gains change cell uptake, signaling, traction, defense, and membrane attack.
 - Regulatory topology and weights change how cells convert local state into growth, fate, repair, and force.
 - The environment varies spatially in resources, toxin, and permeability.
-- Agents consume shared resources and impose crowding and predation costs.
-- Energy and biomass determine persistence.
-- Only energy-qualified agents reproduce.
+- Cells consume local resources and exchange force, damage, ATP, and biomass through physical contact.
+- Cellular ATP, integrity, and tissue continuity determine persistence.
+- Only viable physically separated cell components acquire descendant identity.
 - Offspring inherit correlated traits with mutation.
 
 This implements the three operational elements of natural selection: phenotypic variation, differential survival/reproduction, and heritable parent-offspring correlation [2].
@@ -740,12 +756,17 @@ flowchart LR
     W0[world state] --> R
     R --> W1[swap world texture references]
     W1 --> N[nucleateAutogenicFounder]
-    N -->|resource-scoped barrier| A[evolveAgents]
-    A -->|resource-scoped barrier| S[spawnAgents]
-    S --> CM[evolveOrganismCells]
+    N -->|resource-scoped barrier| A[evolveAgents from prior tissue force]
+    A --> CM[evolveOrganismCells]
     M0[mechanical field] --> CM
     CM -->|atomic contraction impulses| MF[mechanical forcing]
-    CM --> CR[divideAndReduceOrganismCells]
+    CM --> MM[evolveCellMembranes]
+    MM --> HC[clearCellSpatialHash]
+    HC --> HB[buildCellSpatialHash]
+    HB --> HX[resolveCrossOrganismCellContacts]
+    HX --> HA[applyCellContactEffects]
+    HA --> CR[divideAndReduceOrganismCells]
+    CR --> SP[separateCellularPropagules]
     CR -->|cellular feedback on next step| A
     MF --> MW[evolveMechanicalField]
     M0 --> MW
@@ -757,7 +778,7 @@ flowchart LR
     Q --> Q1[swap spinor texture references]
     W1 --> F[scale-specific field fragment]
     Q1 --> F
-    S --> I[384-instance organism draw]
+    SP --> I[384-instance organism draw]
     CR --> VC[compactVisibleCells]
     VC --> CI[GPU-indirect living-cell draw]
     F --> H[RG11B10Float linear scene]
@@ -769,7 +790,7 @@ flowchart LR
     H --> C[hue-preserving exposure and tone map]
     BY --> C
     C --> D[BGRA8 sRGB drawable]
-    S --> O[3-slot compact observation ring]
+    SP --> O[3-slot compact observation ring]
 ```
 
 ### Kernels and render stages
@@ -782,10 +803,14 @@ flowchart LR
 | Reaction update | `193²` | `reactWorld` |
 | Founder scan | `193²` | `nucleateAutogenicFounder` |
 | Agent dynamics | `384` | `evolveAgents` |
-| Agent reproduction | `384` | `spawnAgents` |
 | Cell energetics and electromechanics | `9,216` | `evolveOrganismCells` |
 | Deformable membrane mechanics | `9,216 x 12 vertices` | `evolveCellMembranes` |
+| Cell-contact hash clear | `36,864` fixed-point elements / `16,384` heads | `clearCellSpatialHash` |
+| Cell-contact hash insertion | `9,216` | `buildCellSpatialHash` |
+| Cross-organism narrow phase | `9,216`, bounded hash traversal | `resolveCrossOrganismCellContacts` |
+| Local contact application | `9,216` | `applyCellContactEffects` |
 | Cell division and tissue reduction | `384` | `divideAndReduceOrganismCells` |
+| Physical propagule separation | `384` | `separateCellularPropagules` |
 | Mechanical wave update | `193²` | `evolveMechanicalField` |
 | Spinor update | `1024²` | `evolveQuantumField` |
 | Measurement | `193²` / `1024²` | `measureWorld`, `measureQuantumField` |
@@ -803,7 +828,7 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 
 - **Private simulation textures.** Reaction and spinor texture pairs use `MTLStorageMode.private`; only compact observation and reduction buffers are CPU-visible.
 - **True ping-pong state.** The renderer swaps `MTLTexture` references after each update instead of blitting entire state textures back into fixed roles.
-- **Scoped barriers.** Founder allocation, movement, and reproduction share one compute encoder with `memoryBarrier(resources:)` only at the two read-after-write boundaries.
+- **Scoped barriers.** Cell contact uses barriers only between hash clear, insertion, narrow-phase accumulation, local application, reduction, and propagule transfer. Each barrier names only resources read by the next dependent pass.
 - **Consume-and-zero forcing.** Cells accumulate contraction impulses into a private signed fixed-point buffer. `evolveMechanicalField` uses relaxed atomic exchange to consume and clear each vector element in the same pass, eliminating a separate `193²` clear dispatch per simulation step.
 - **Power-of-two addressing.** The `1024²` spinor lattice uses integer masks instead of modulus for periodic neighbors.
 - **Modulo-free reaction neighbors.** The non-power-of-two `193²` reaction lattice precomputes left, right, up, and down coordinates once per site; cardinal and diagonal tables reuse them instead of executing twelve signed modulo operations per site and step.
@@ -865,10 +890,13 @@ The rows below are release-build command-buffer timestamp traces at the default 
 | Mechanochemical signaling before reaction-neighbor optimization | `300` | `13.462 ms` | `15.113 ms` | `13.039 ms` | `1.554 ms` |
 | Mechanochemical signaling + sparse/modulo-free reaction neighbors, `900x` spinor view | `300` | `8.628 ms` | `14.345 ms` | `9.018 ms` | `2.322 ms` |
 | Same graph, `36x` cell view with GPU compaction and indirect polygon draw | `300` | `10.658 ms` | `14.563 ms` | `9.010 ms` | `2.104 ms` |
+| Cell-owned geometry, locomotion, contact, hunting, and propagule separation | `300` | `5.391 ms` | `10.094 ms` | `5.902 ms` | `6.573 ms` |
 
 Relative to the immediately preceding trace, median GPU time decreased by `33.6%`, p95 by `8.8%`, and mean by `28.2%`. The comparison includes the additional causal aggregate and graphics code, so the lower timings are not obtained by removing the new observability.
 
 The sparse/modulo-free reaction-neighbor trace reduces median GPU time by `35.9%`, p95 by `5.1%`, and mean by `30.8%` relative to the immediately preceding mechanochemical trace. Both use the same fresh release build procedure, default `2x` state, `100` discarded warm-up buffers, and the first `300` subsequent command buffers. The workload is still a developing simulation rather than a fixed replay, so this is an engineering comparison, not a hardware-normalized benchmark. The `900x` row omits organism and cell submission by scale; the separate `36x` row executes visible-cell compaction and the indirect twelve-triangle polygon draw.
+
+The final row is the current release graph at spinor scale and default `2x` state. It includes exposed-segment covariance, cell-force and torque reduction, the `16,384`-bucket cross-organism cell hash, membrane-support narrow phase, localized contact effects, and connected-component propagule separation. It uses the same `100`-buffer warm-up and `300`-buffer measurement interval. Population trajectories and drawable state remain uncontrolled, so the row establishes frame-budget behavior for this implementation rather than a direct speedup claim over an earlier row.
 
 The earlier sixteen-node row establishes that the sparse-graph, polygon-mechanics, and lineage passes remained below the `16.667 ms` command-buffer budget at that stage. The new final row establishes the same p95 condition after adding contact-propagated Ca*/ERK* dynamics, direct mechanochemical terms, signal-driven graphics, and GPU-compacted cell submission. Values across implementation stages are not interpreted as one controlled time series because drawable state and population trajectories differ.
 

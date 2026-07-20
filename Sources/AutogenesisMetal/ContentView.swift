@@ -303,6 +303,9 @@ struct ContentView: View {
                 observerMetric("Ca* → ERK* ×1k", value: causalRate(store.snapshot.meanCalciumERKEffect), tint: .pink, values: store.history.map(\.meanCalciumERKEffect))
                 observerMetric("ERK* → traction ×10k", value: scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000), tint: .mint, values: store.history.map(\.meanERKTractionEffect))
                 observerMetric("Signal ATP cost ×10k", value: scaledRate(store.snapshot.cellularSignalingCost, by: 10_000), tint: .orange, values: store.history.map(\.cellularSignalingCost))
+                observerMetric("Cell force |F| ×10k", value: scaledRate(store.snapshot.meanCellGeneratedForce, by: 10_000), tint: .green, values: store.history.map(\.meanCellGeneratedForce))
+                observerMetric("Contact load ×1k", value: scaledRate(store.snapshot.cellularContactLoad, by: 1_000), tint: .red, values: store.history.map(\.cellularContactLoad))
+                observerMetric("Trophic gain / loss ×10k", value: "\(scaledRate(store.snapshot.cellularTrophicGain, by: 10_000)) / \(scaledRate(store.snapshot.cellularTrophicLoss, by: 10_000))", tint: .yellow, values: store.history.map(\.cellularTrophicGain))
                 observerMetric("Contact Δcycle ×1k", value: causalRate(store.snapshot.meanContactSuppression), tint: .mint, values: store.history.map(\.meanContactSuppression))
                 observerMetric("Lag r(strain,Vₘ)", value: strainVoltageCorrelationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
             } else if store.observationZoom >= 18 {
@@ -310,9 +313,14 @@ struct ContentView: View {
                 observerMetric("Cells / tissues", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
                 observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
                 observerMetric("Membrane A / P", value: membraneGeometryLabel, tint: .blue, values: store.history.map(\.meanMembraneShapeIndex))
+                observerMetric("Tissue e / exposed P", value: "\(decimal(store.snapshot.meanTissueElongation)) / \(decimal(store.snapshot.meanExposedMembraneLength))", tint: .cyan, values: store.history.map(\.meanTissueElongation))
+                observerMetric("Cell |F| / tissue |τ| ×10k", value: "\(scaledRate(store.snapshot.meanCellGeneratedForce, by: 10_000)) / \(scaledRate(store.snapshot.meanTissueTorque, by: 10_000))", tint: .green, values: store.history.map(\.meanCellGeneratedForce))
                 observerMetric("Resonance f₀ / ζ", value: resonanceTuningLabel, tint: .pink, values: store.history.map(\.meanResonanceFrequency))
                 observerMetric("Response / junction F", value: resonanceResponseLabel, tint: .orange, values: store.history.map(\.meanResonanceAmplitude))
                 observerMetric("Ca* / ERK* / refractory", value: signalStateLabel, tint: .pink, values: store.history.map(\.meanCalciumActivity))
+                observerMetric("Inherited gₘ꜀ / g꜀ₑ", value: "\(decimal(store.snapshot.meanMechanicsCalciumGain)) / \(decimal(store.snapshot.meanCalciumERKGain))", tint: .cyan, values: store.history.map(\.meanMechanicsCalciumGain))
+                observerMetric("Inherited gⱼ / r", value: "\(decimal(store.snapshot.meanJunctionTransmissionGain)) / \(decimal(store.snapshot.meanRefractoryRecoveryGain))", tint: .mint, values: store.history.map(\.meanJunctionTransmissionGain))
+                observerMetric("Detach θ / investment", value: "\(decimal(store.snapshot.meanDetachmentThreshold)) / \(decimal(store.snapshot.meanPropaguleInvestment))", tint: .yellow, values: store.history.map(\.meanDetachmentScore))
                 observerMetric("ATP / Vₘ", value: "\(decimal(store.snapshot.meanCellATP)) / \(signedDecimal(store.snapshot.meanMembraneVoltage))", tint: .yellow, values: store.history.map(\.meanCellATP))
             } else if store.observationZoom >= 6 {
                 if store.displayMode == .causality {
@@ -579,9 +587,9 @@ struct ContentView: View {
         if zoom >= 512 { return "Two-component coined quantum walk" }
         if zoom >= 160 { return "Probability density, phase, and probability current" }
         if zoom >= 64 { return "Molecular reaction and spinor coupling" }
-        if zoom >= 18 { return "Deformable cell membranes, regulation, and resonant mechanics" }
-        if zoom >= 6 { return "One-cell ontogeny and energy-limited organisms" }
-        return "Spatial, trophic, and vibrational ecological niches"
+        if zoom >= 18 { return "Cell-derived geometry and mechanochemical control" }
+        if zoom >= 6 { return "Membrane-connected tissues and physical locomotion" }
+        return "Contact-mediated trophic and vibrational niches"
     }
 
     private var worldSummary: String {
@@ -601,12 +609,12 @@ struct ContentView: View {
             return "The 193² lattice stores resource A, biomass B, energy E, membrane M, resource B, detritus, toxin, catalyst, and a coupled displacement/velocity field. Spinor order and mechanical activity both enter local energy and catalyst conversion."
         }
         if zoom >= 18 {
-            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Every cell boundary is a 12-vertex deformable polygon with area pressure, cortical edge elasticity, bending resistance, contractility, local damage, and contact force. Mechanically gated Ca*-like activity propagates through contacts, excites an ERK*-like refractory response, consumes ATP, and modifies traction. A heritable 16-node/48-edge sparse graph reads eight local inputs and drives eight actuator channels. Mean Ca*/ERK* is \(signalStateLabel)."
+            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Exposed polygon edges determine tissue covariance axes, elongation, polarity, and boundary length. Each cell samples its own chemical and hazard gradients; inherited Ca* entry, junction transmission, Ca*→ERK* gain, refractory recovery, signaling cost, and traction gain determine the force and torque transmitted to organism motion. Mean Ca*/ERK* is \(signalStateLabel)."
         }
         if zoom >= 6 {
             return life == 0
                 ? "No agent slot is occupied. Nucleation remains gated by the measured chemistry thresholds, not by elapsed time."
-                : "Every organism began as one cell and now owns up to 24 persistent cells. Tissue regulatory state, ATP, integrity, phase coherence, strain, and net power determine its developed proportions, contractile anatomy, locomotion, maintenance, damage response, and reproductive competence."
+                : "Each organism is a membrane-connected component of up to 24 persistent cells. Translation and rotation are integrated from summed cell traction and contact force. Cross-organism feeding requires polygon contact, local membrane failure, and only then ATP and biomass transfer. A new permanent identity is assigned only after a viable cellular component physically disconnects."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
         return "\(life)/384 organism slots are occupied; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are currently resolved; occupied-field fraction is \(occupied). The clade count requires sustained divergence and is not labeled a species count. Organisms modify shared chemical and mechanical media without a global fitness function."
@@ -614,15 +622,15 @@ struct ContentView: View {
 
     private var scaleRelation: String {
         if store.displayMode == .causality, store.observationZoom < 64 {
-            return "Mechanical strain drives the inherited resonator, membrane voltage, and mechanogated Ca*-like influx. Contact-weighted Ca* and ERK* states propagate between cells; Ca* excites ERK* subject to a refractory variable; ERK* adds traction opposite its local gradient, and all signaling enters the ATP ledger. The intervention sets both direct mechanics→voltage and mechanics→Ca* gains to zero while leaving neighbor propagation and downstream dynamics active."
+            return "Mechanical strain drives the inherited resonator, membrane voltage, and mechanogated Ca*-like influx. Inherited gains scale Ca* and ERK* contact propagation, refractory recovery, signaling cost, and traction. Exposed cells combine local substrate gradients, ERK* wave direction, and developmental polarity into external force; the tissue reduction converts summed force and torque into organism motion. The intervention sets direct mechanics→voltage and mechanics→Ca* gains to zero while leaving neighbor propagation and downstream dynamics active."
         }
         return switch activeObservationStop {
         case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
         case 2: "Reaction fields supply cellular free energy. Cell contraction drives the displacement/velocity field; returning mechanical activity modifies catalyst, stored energy, membrane production, and mechanosensitive voltage."
-        case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Twelve membrane vertices integrate area, perimeter, bending, pressure, adhesion, and contact forces. A damped inherited resonator converts strain-rate input into voltage and regulatory drive."
-        case 4: "Reproduction requires E ≥ 1.06, age ≥ 720 steps, at least five developed cells, membrane integrity, phase coherence, and a bounded power deficit. Offspring receive monotonic birth IDs, parent IDs, mutated node and edge parameters, structural graph mutations, innovation IDs, and mutated resonance tuning, but begin as one cell."
-        default: "Resources, hazards, predation, crowding, mechanical waves, and frequency-dependent cellular response generate spatially varying differential survival and reproduction without a global fitness function."
+        case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Exposed membrane edges define geometry; cell-local chemical gradients and ERK* state generate external traction; a GPU spatial hash resolves cross-tissue polygon contacts and localized membrane damage."
+        case 4: "A propagule is a membrane-connected cellular component that has disconnected from its parent tissue. ATP maintenance, membrane integrity, component size, and inherited detachment threshold are evaluated before a permanent birth ID is assigned. The exact cells, membranes, and acquired regulatory states transfer with a mutated inherited genome."
+        default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
         }
     }
 
