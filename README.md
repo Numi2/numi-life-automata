@@ -120,7 +120,7 @@ The interface uses one camera over one persistent simulation. The scale controls
 | Cell-program interaction state | `9,216 x 16 B` | Signed ATP transfer, rejection load, recognition compatibility, net energetic contribution | GPU private | Cold structure-of-arrays output kept outside the `256 B` hot cell record |
 | Dynamic owner lists | `384` atomic heads + `9,216` links | `UInt32` | GPU private | Rebuilt per-component traversal without contiguous cell blocks |
 | Connectivity state | Parents, counts, five-channel viability sums, root owners, primary roots, and up to sixteen source-to-descendant program mappings per root | Atomic `UInt32` / `Int32` | GPU private | Union-find labeling, recognition-gated fusion, viable fission, exact bounded program mapping, and owner reassignment |
-| Membrane vertices | `9,216 x 12 x 32 B` | Position, velocity, and local mechanics | GPU private | Deformable cell polygons with edge, bending, pressure, integrity, and contact state |
+| Membrane vertices | `9,216 x 12 x 32 B` | Position, velocity, and local mechanics | GPU private | Deformable cell membranes with edge, bending, pressure, integrity, and contact state; bounded quadratic interpolation converts each physical edge into four raster segments without changing the simulated geometry |
 | Cell spatial hash | `16,384` heads + `9,216` links | Atomic `UInt32` heads and `UInt32` links | GPU private | Broad-phase lookup for cross-organism membrane contacts |
 | Cell contact effects | `9,216 x 4` atomic integers | Fixed-point force, damage, and trophic flux | GPU private | Order-independent narrow-phase accumulation before cell-local application |
 | Cellular aggregates | `384 x 288 B` | Eighteen `float4` vectors | GPU private | Physiology, signaling, geometry, force, trophic flux, detachment, inherited-program composition, ATP exchange, rejection, compatibility, and net contribution |
@@ -977,6 +977,18 @@ These are single-device engineering traces, not cross-device benchmarks. The Xco
 - Xcode command-line tools with Swift `6.2` package support or newer.
 
 ### Run
+
+For normal macOS installation, run once:
+
+```bash
+./Scripts/install-macos-app.sh
+```
+
+This installs `Numi Automata.app` in `~/Applications`, registers it with macOS, and opens it. After installation, launch **Numi Automata** from Spotlight or Finder like any other application. The red window-close button and `Command-Q` both terminate the simulation completely; macOS also prevents accidental duplicate instances.
+
+To rebuild and replace the installed app after pulling new code, run the same installer again. Pass `--no-open` when installation should not launch the app.
+
+For direct SwiftPM development runs:
 
 ```bash
 git clone https://github.com/Numi2/numi-life-automata.git

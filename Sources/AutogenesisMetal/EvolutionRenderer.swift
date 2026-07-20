@@ -379,6 +379,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let regulatoryNodeCapacity = 16
     private static let regulatoryEdgeCapacity = 48
     private static let membraneVertexCount = 12
+    private static let membraneRenderSubdivision = 4
     private static let cellSpatialHashBucketCount = 16_384
     private static let lineageEventCapacity = 4_096
     private static let agentObservationRingSize = 3
@@ -914,7 +915,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         visibleCellIndices.label = "GPU-compacted visible cell indices"
         cellDrawArguments.label = "Indirect living-cell draw arguments"
         let drawArguments = cellDrawArguments.contents().bindMemory(to: UInt32.self, capacity: 4)
-        drawArguments[0] = UInt32(Self.membraneVertexCount * 3)
+        drawArguments[0] = UInt32(
+            Self.membraneVertexCount * Self.membraneRenderSubdivision * 3
+        )
         drawArguments[1] = 0
         drawArguments[2] = 0
         drawArguments[3] = 0
@@ -2727,7 +2730,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private static func makeLibrary(device: MTLDevice) throws -> MTLLibrary {
-        guard let url = Bundle.module.url(
+        let packagedResourceBundle = Bundle.main.resourceURL
+            .map { $0.appendingPathComponent("NumiAutomata_NumiAutomata.bundle", isDirectory: true) }
+            .flatMap(Bundle.init(url:))
+
+        guard let url = packagedResourceBundle?.url(
+            forResource: "Replicator",
+            withExtension: "metal",
+            subdirectory: "Shaders"
+        ) ?? Bundle.module.url(
             forResource: "Replicator",
             withExtension: "metal",
             subdirectory: "Shaders"

@@ -45,6 +45,8 @@ constant float referenceTissueCellCount = 24.0;
 constant uint regulatoryNodeCapacity = 16u;
 constant uint regulatoryEdgeCapacity = 48u;
 constant uint membraneVertexCount = 12u;
+constant uint membraneRenderSubdivision = 4u;
+constant uint membraneRenderSegmentCount = membraneVertexCount * membraneRenderSubdivision;
 constant uint lineageEventCapacity = 4096u;
 constant uint cellSpatialHashBucketCount = 16384u;
 constant uint cellSpatialHashMask = cellSpatialHashBucketCount - 1u;
@@ -3722,8 +3724,13 @@ kernel void evolveCellMembranes(
         float stiffness = mix(0.006, 0.026, saturate(cell.physiology.w * localIntegrity[vertexIndex]));
         float2 edgeForce = toPrevious / previousLength * (previousLength - restEdge) * stiffness +
             toNext / nextLength * (nextLength - restEdge) * stiffness;
+        float bendingStiffness = mix(
+            0.010,
+            0.030 + cell.regulation.y * 0.022,
+            saturate(localIntegrity[vertexIndex])
+        );
         float2 bendingForce = (positions[previous] + positions[next] - current * 2.0) *
-            (0.012 + cell.regulation.y * 0.018) * localIntegrity[vertexIndex];
+            bendingStiffness;
         float radialLength = max(length(current), 0.0001);
         float2 radialNormal = current / radialLength;
         float2 pressureForce = radialNormal * areaError *
@@ -3770,7 +3777,16 @@ kernel void evolveCellMembranes(
         if (speed > 0.006) { velocity *= 0.006 / speed; }
         float2 position = current + velocity * uniforms.transportScale;
         float radius = length(position);
-        if (radius > 0.21) { position *= 0.21 / radius; velocity *= 0.4; }
+        float neighborRadius = 0.5 * (length(positions[previous]) + length(positions[next]));
+        float radialAllowance = targetRadius * mix(0.18, 0.34, 1.0 - integrity);
+        float maximumRadius = min(
+            targetRadius * 1.48,
+            max(targetRadius * 1.15, neighborRadius + radialAllowance)
+        );
+        if (radius > maximumRadius) {
+            position *= maximumRadius / radius;
+            velocity *= 0.35;
+        }
         MembraneVertex output;
         output.position = position;
         output.velocity = velocity;
@@ -3780,6 +3796,97 @@ kernel void evolveCellMembranes(
         );
         membraneVertices[membraneBase + vertexIndex] = output;
         transmittedForce += length(contactForce);
+    }
+
+    float2 membraneCentroid = float2(0.0);
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        membraneCentroid += membraneVertices[membraneBase + vertexIndex].position;
+    }
+    membraneCentroid /= float(membraneVertexCount);
+    float centroidShiftLength = length(membraneCentroid);
+    float2 transferredShift = membraneCentroid;
+    if (centroidShiftLength > 0.003) {
+        transferredShift *= 0.003 / centroidShiftLength;
+    }
+    cell.position += transferredShift;
+    cell.velocity = mix(
+        cell.velocity,
+        cell.velocity + transferredShift / max(uniforms.transportScale, 1.0),
+        0.16
+    );
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint membraneIndex = membraneBase + vertexIndex;
+        MembraneVertex membranePoint = membraneVertices[membraneIndex];
+        membranePoint.position -= membraneCentroid;
+        positions[vertexIndex] = membranePoint.position;
+        membraneVertices[membraneIndex] = membranePoint;
+    }
+
+    float centeredDoubleArea = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        centeredDoubleArea += positions[vertexIndex].x * positions[next].y -
+            positions[next].x * positions[vertexIndex].y;
+    }
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint previous = (vertexIndex + membraneVertexCount - 1u) % membraneVertexCount;
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        float2 curvatureAverage =
+            (positions[previous] + positions[vertexIndex] * 2.0 + positions[next]) * 0.25;
+        float fairing = mix(0.20, 0.38, saturate(localIntegrity[vertexIndex]));
+        velocities[vertexIndex] = mix(positions[vertexIndex], curvatureAverage, fairing);
+    }
+    float fairedDoubleArea = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        fairedDoubleArea += velocities[vertexIndex].x * velocities[next].y -
+            velocities[next].x * velocities[vertexIndex].y;
+    }
+    float areaPreservingScale = sqrt(
+        max(abs(centeredDoubleArea), 0.000001) / max(abs(fairedDoubleArea), 0.000001)
+    );
+    areaPreservingScale = clamp(areaPreservingScale, 0.92, 1.08);
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint membraneIndex = membraneBase + vertexIndex;
+        MembraneVertex membranePoint = membraneVertices[membraneIndex];
+        membranePoint.position = velocities[vertexIndex] * areaPreservingScale;
+        membraneVertices[membraneIndex] = membranePoint;
+    }
+
+    float preliminaryDoubleArea = 0.0;
+    float preliminaryPerimeter = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        float2 a = membraneVertices[membraneBase + vertexIndex].position;
+        float2 b = membraneVertices[membraneBase + next].position;
+        preliminaryDoubleArea += a.x * b.y - b.x * a.y;
+        preliminaryPerimeter += length(b - a);
+    }
+    float preliminaryAreaRatio = abs(preliminaryDoubleArea) * 0.5 / targetArea;
+    float targetPerimeter = 2.0 * M_PI_F * targetRadius;
+    float collapseRecovery = saturate((0.55 - preliminaryAreaRatio) / 0.35) * 0.58;
+    float stretchRecovery = saturate(
+        (preliminaryPerimeter / max(targetPerimeter, 0.0001) - 1.72) / 0.55
+    ) * 0.42;
+    float inversionRecovery = preliminaryDoubleArea <= 0.0 ? 0.82 : 0.0;
+    float geometryRecovery = max(inversionRecovery, max(collapseRecovery, stretchRecovery));
+    if (geometryRecovery > 0.0) {
+        float2 firstPosition = membraneVertices[membraneBase].position;
+        float referenceAngle = length(firstPosition) > 0.0001
+            ? atan2(firstPosition.y, firstPosition.x)
+            : cell.dynamics.z * 2.0 * M_PI_F;
+        for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+            uint membraneIndex = membraneBase + vertexIndex;
+            MembraneVertex membranePoint = membraneVertices[membraneIndex];
+            float angle = referenceAngle +
+                (float(vertexIndex) / float(membraneVertexCount)) * 2.0 * M_PI_F;
+            float2 regularPosition = float2(cos(angle), sin(angle)) * targetRadius;
+            membranePoint.position = mix(
+                membranePoint.position, regularPosition, geometryRecovery
+            );
+            membranePoint.velocity *= 1.0 - geometryRecovery * 0.72;
+            membraneVertices[membraneIndex] = membranePoint;
+        }
     }
 
     float updatedDoubleArea = 0.0;
@@ -5328,6 +5435,28 @@ struct CellRasterData {
     float radialCoordinate;
 };
 
+inline float2 smoothMembranePosition(
+    device const MembraneVertex* membraneVertices,
+    uint cellIndex,
+    uint renderSample
+) {
+    uint wrappedSample = renderSample % membraneRenderSegmentCount;
+    uint vertexIndex = wrappedSample / membraneRenderSubdivision;
+    uint subdivisionIndex = wrappedSample % membraneRenderSubdivision;
+    uint previous = (vertexIndex + membraneVertexCount - 1u) % membraneVertexCount;
+    uint next = (vertexIndex + 1u) % membraneVertexCount;
+    uint base = cellIndex * membraneVertexCount;
+    float2 previousPosition = membraneVertices[base + previous].position;
+    float2 currentPosition = membraneVertices[base + vertexIndex].position;
+    float2 nextPosition = membraneVertices[base + next].position;
+    float2 curveStart = (previousPosition + currentPosition) * 0.5;
+    float2 curveEnd = (currentPosition + nextPosition) * 0.5;
+    float t = float(subdivisionIndex) / float(membraneRenderSubdivision);
+    float oneMinusT = 1.0 - t;
+    return curveStart * (oneMinusT * oneMinusT) +
+        currentPosition * (2.0 * oneMinusT * t) + curveEnd * (t * t);
+}
+
 vertex CellRasterData cellVertex(
     device const AgentState* agents [[buffer(0)]],
     device const uint* agentOccupancy [[buffer(1)]],
@@ -5359,12 +5488,12 @@ vertex CellRasterData cellVertex(
     float2 cellCenter = cellWorldPosition(agent, cell.position, uniforms);
     uint triangle = vertexID / 3u;
     uint triangleVertex = vertexID % 3u;
-    uint membraneIndex = triangleVertex == 1u
+    uint membraneSample = triangleVertex == 1u
         ? triangle
-        : (triangleVertex == 2u ? (triangle + 1u) % membraneVertexCount : 0u);
+        : (triangleVertex == 2u ? triangle + 1u : 0u);
     float2 membranePosition = triangleVertex == 0u
         ? float2(0.0)
-        : membraneVertices[cellIndex * membraneVertexCount + membraneIndex].position;
+        : smoothMembranePosition(membraneVertices, cellIndex, membraneSample);
     float2 worldPosition = cellCenter +
         heading * membranePosition.x * worldUnit +
         lateral * membranePosition.y * worldUnit;

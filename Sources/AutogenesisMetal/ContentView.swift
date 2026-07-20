@@ -618,7 +618,7 @@ struct ContentView: View {
             return "The 193² lattice stores resource A, biomass B, energy E, membrane M, resource B, detritus, toxin, catalyst, and a coupled displacement/velocity field. Spinor order and mechanical activity both enter local energy and catalyst conversion."
         }
         if zoom >= 18 {
-            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Exposed polygon edges determine tissue covariance axes, elongation, polarity, and boundary length. Each cell samples its own chemical and hazard gradients; inherited Ca* entry, junction transmission, Ca*→ERK* gain, refractory recovery, signaling cost, and traction gain determine the force and torque transmitted to organism motion. Mean Ca*/ERK* is \(signalStateLabel)."
+            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Exposed membrane arcs determine tissue covariance axes, elongation, polarity, and boundary length. Each cell samples its own chemical and hazard gradients; inherited Ca* entry, junction transmission, Ca*→ERK* gain, refractory recovery, signaling cost, and traction gain determine the force and torque transmitted to organism motion. Mean Ca*/ERK* is \(signalStateLabel)."
         }
         if zoom >= 6 {
             return life == 0
