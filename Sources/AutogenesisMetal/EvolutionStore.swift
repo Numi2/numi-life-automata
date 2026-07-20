@@ -19,10 +19,11 @@ enum FieldDisplayMode: UInt32, CaseIterable, Identifiable {
         case .energy: "Resource / energy"
         case .genome: "Trait vectors"
         case .niches: "Resource-use traits"
-        case .development: "Developmental regulation"
+        case .development: "Morphogen development"
         case .causality: "Causal terms"
         }
     }
+
 }
 
 enum EvolutionEventKind: Sendable, Equatable {
@@ -108,6 +109,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanRepairProgram: Double = 0
     var meanDevelopmentalNodeCount: Double = 0
     var meanDevelopmentalEdgeCount: Double = 0
+    var meanMorphogenActivator: Double = 0
+    var meanMorphogenInhibitor: Double = 0
+    var meanDevelopmentalFateMemory: Double = 0
+    var meanJunctionMorphogenTransport: Double = 0
+    var meanMorphogenDifferentiation: Double = 0
+    var meanDevelopmentalPolarityCoherence: Double = 0
+    var meanMorphogenSynthesisRate: Double = 0
+    var meanMorphogenTransportWork: Double = 0
     var meanResonanceFrequency: Double = 0
     var meanResonanceDamping: Double = 0
     var meanResonanceBandwidth: Double = 0
@@ -212,6 +221,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
         meanRepairProgram: Double = 0,
         meanDevelopmentalNodeCount: Double = 0,
         meanDevelopmentalEdgeCount: Double = 0,
+        meanMorphogenActivator: Double = 0,
+        meanMorphogenInhibitor: Double = 0,
+        meanDevelopmentalFateMemory: Double = 0,
+        meanJunctionMorphogenTransport: Double = 0,
+        meanMorphogenDifferentiation: Double = 0,
+        meanDevelopmentalPolarityCoherence: Double = 0,
+        meanMorphogenSynthesisRate: Double = 0,
+        meanMorphogenTransportWork: Double = 0,
         meanResonanceFrequency: Double = 0,
         meanResonanceDamping: Double = 0,
         meanResonanceBandwidth: Double = 0,
@@ -315,6 +332,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.meanRepairProgram = meanRepairProgram
         self.meanDevelopmentalNodeCount = meanDevelopmentalNodeCount
         self.meanDevelopmentalEdgeCount = meanDevelopmentalEdgeCount
+        self.meanMorphogenActivator = meanMorphogenActivator
+        self.meanMorphogenInhibitor = meanMorphogenInhibitor
+        self.meanDevelopmentalFateMemory = meanDevelopmentalFateMemory
+        self.meanJunctionMorphogenTransport = meanJunctionMorphogenTransport
+        self.meanMorphogenDifferentiation = meanMorphogenDifferentiation
+        self.meanDevelopmentalPolarityCoherence = meanDevelopmentalPolarityCoherence
+        self.meanMorphogenSynthesisRate = meanMorphogenSynthesisRate
+        self.meanMorphogenTransportWork = meanMorphogenTransportWork
         self.meanResonanceFrequency = meanResonanceFrequency
         self.meanResonanceDamping = meanResonanceDamping
         self.meanResonanceBandwidth = meanResonanceBandwidth

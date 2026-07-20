@@ -54,6 +54,7 @@ private struct ProcessPathwayView: View {
 
 struct ContentView: View {
     @StateObject private var store = EvolutionStore()
+    @State private var showsInspector = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -63,15 +64,20 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 commandBar
                 Spacer()
-                causalDock
+                compactContextHUD
             }
+            .padding(12)
 
             HStack(spacing: 0) {
                 Spacer()
-                inspectorPanel
+                if showsInspector {
+                    inspectorPanel
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
-            .padding(.top, 58)
-            .padding(.bottom, 112)
+            .padding(.top, 72)
+            .padding(.trailing, 12)
+            .padding(.bottom, 76)
 
             if let error = store.errorMessage {
                 ContentUnavailableView(
@@ -87,93 +93,71 @@ struct ContentView: View {
         .background(Color.black)
         .frame(minWidth: 1060, minHeight: 680)
         .preferredColorScheme(.dark)
+        .animation(.snappy(duration: 0.22), value: showsInspector)
+        .onChange(of: activeObservationStop) { _, index in
+            store.displayMode = observationStops[index].displayMode
+        }
     }
 
     private var commandBar: some View {
-        HStack(spacing: 10) {
-            HStack(spacing: 9) {
+        HStack(spacing: 5) {
+            HStack(spacing: 8) {
                 ZStack {
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: 5)
                         .fill(Color.cyan.opacity(0.16))
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: 5)
                         .stroke(Color.cyan.opacity(0.52), lineWidth: 1)
                     Text("N")
-                        .font(.system(size: 16, weight: .black, design: .rounded))
+                        .font(.system(size: 14, weight: .black, design: .rounded))
                         .foregroundStyle(.cyan)
                 }
-                .frame(width: 32, height: 32)
+                .frame(width: 30, height: 30)
 
                 VStack(alignment: .leading, spacing: 0) {
                     Text("NUMI")
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
                     Text("AUTOMATA")
-                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 7, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 154, alignment: .leading)
+            .frame(width: 112, alignment: .leading)
 
             commandDivider
 
-            controlGroup {
-                numiIconButton(
-                    store.isRunning ? "pause.fill" : "play.fill",
-                    help: store.isRunning ? "Pause evolution" : "Resume evolution",
-                    isSelected: store.isRunning
-                ) {
-                    store.isRunning.toggle()
-                }
+            numiIconButton(
+                store.isRunning ? "pause.fill" : "play.fill",
+                help: store.isRunning ? "Pause evolution" : "Resume evolution",
+                isSelected: store.isRunning,
+                tint: .cyan
+            ) {
+                store.isRunning.toggle()
+            }
 
-                numiIconButton("arrow.counterclockwise", help: "Restart from the spinor") {
-                    store.restart()
-                }
+            numiIconButton("plus", help: "Introduce an external founder", tint: .mint) {
+                store.addColony()
+            }
 
-                numiIconButton("plus", help: "Introduce an external founder", tint: .mint) {
-                    store.addColony()
-                }
+            numiIconButton("arrow.counterclockwise", help: "Restart from the spinor") {
+                store.restart()
+            }
 
-                numiIconButton(
-                    "waveform.path.ecg",
-                    help: store.mechanosensingBlocked
-                        ? "Restore mechanical input to voltage and Ca* gating"
-                        : "Ablate mechanical input to voltage and Ca* gating",
-                    isSelected: store.mechanosensingBlocked,
-                    tint: .red
-                ) {
-                    store.toggleMechanosensingIntervention()
-                }
+            numiIconButton(
+                "waveform.path.ecg",
+                help: store.mechanosensingBlocked
+                    ? "Restore mechanical input to voltage and Ca* gating"
+                    : "Ablate mechanical input to voltage and Ca* gating",
+                isSelected: store.mechanosensingBlocked,
+                tint: .red
+            ) {
+                store.toggleMechanosensingIntervention()
             }
 
             commandDivider
 
-            Menu {
-                ForEach(FieldDisplayMode.allCases) { mode in
-                    Button {
-                        store.displayMode = mode
-                    } label: {
-                        Label(
-                            mode.label,
-                            systemImage: store.displayMode == mode ? "checkmark" : "circle"
-                        )
-                    }
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "eye")
-                    Text(store.displayMode.label)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.secondary)
-                }
-                .font(.system(size: 10, weight: .medium))
-                .padding(.horizontal, 9)
-                .frame(width: 126, height: 32)
-                .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .help("Choose which measured fields are visible")
+            observationScaleRail
+
+            commandDivider
 
             Picker("Speed", selection: $store.stepsPerFrame) {
                 Text("1x").tag(1)
@@ -182,53 +166,74 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 92)
+            .frame(width: 86)
             .help("Evolution speed")
 
-            controlGroup {
-                numiIconButton("minus.magnifyingglass", help: "Zoom out") {
-                    store.zoom(by: 1 / 1.8, around: .init(repeating: 0.5), aspect: 1)
-                }
-                numiIconButton("viewfinder", help: "Return to spinor origin") {
-                    store.resetCamera()
-                }
-                numiIconButton("plus.magnifyingglass", help: "Zoom in") {
-                    store.zoom(by: 1.8, around: .init(repeating: 0.5), aspect: 1)
-                }
+            commandDivider
+
+            numiIconButton("minus.magnifyingglass", help: "Zoom out") {
+                store.zoom(by: 1 / 1.8, around: .init(repeating: 0.5), aspect: 1)
+            }
+            numiIconButton("viewfinder", help: "Reset camera") {
+                store.resetCamera()
+            }
+            numiIconButton("plus.magnifyingglass", help: "Zoom in") {
+                store.zoom(by: 1.8, around: .init(repeating: 0.5), aspect: 1)
             }
 
-            controlGroup {
-                numiIconButton("chevron.left", help: "Previous organism") {
-                    store.followAdjacentOrganism(direction: -1)
+            commandDivider
+
+            numiIconButton("chevron.left", help: "Previous organism") {
+                store.followAdjacentOrganism(direction: -1)
+            }
+            .disabled(store.observableAgentCount < 2)
+            numiIconButton(
+                "scope",
+                help: "Follow a random organism",
+                isSelected: store.followedAgentID != nil,
+                tint: .cyan
+            ) {
+                store.followRandomOrganism()
+            }
+            numiIconButton("chevron.right", help: "Next organism") {
+                store.followAdjacentOrganism(direction: 1)
+            }
+            .disabled(store.observableAgentCount < 2)
+
+            Spacer(minLength: 2)
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 3) {
+                    statusValue("GEN", value: "\(store.snapshot.generation)")
+                    statusValue(
+                        "LIFE",
+                        value: "\(max(store.snapshot.organismCount, store.observableAgentCount))"
+                    )
+                    statusValue("MAG", value: zoomLabel)
                 }
-                .disabled(store.observableAgentCount < 2)
-                numiIconButton(
-                    "scope",
-                    help: "Follow a random organism",
-                    isSelected: store.followedAgentID != nil,
-                    tint: .cyan
-                ) {
-                    store.followRandomOrganism()
-                }
-                numiIconButton("chevron.right", help: "Next organism") {
-                    store.followAdjacentOrganism(direction: 1)
-                }
-                .disabled(store.observableAgentCount < 2)
+                statusValue("LIFE", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))")
             }
 
-            Spacer(minLength: 8)
+            commandDivider
 
-            statusValue("SCALE", value: "0\(activeObservationStop + 1)")
-            statusValue("GEN", value: "\(store.snapshot.generation)")
-            statusValue("AGENTS", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))")
-            statusValue("MAG", value: zoomLabel)
+            numiIconButton(
+                "sidebar.right",
+                help: showsInspector ? "Close scientific inspector" : "Open scientific inspector",
+                isSelected: showsInspector,
+                tint: scaleAccent
+            ) {
+                showsInspector.toggle()
+            }
         }
-        .padding(.horizontal, 14)
-        .frame(height: 58)
-        .background(Color.black.opacity(0.92))
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.white.opacity(0.12)).frame(height: 1)
+        .padding(.horizontal, 8)
+        .frame(height: 48)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.black.opacity(0.70), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
         }
+        .shadow(color: .black.opacity(0.34), radius: 16, y: 6)
     }
 
     private var inspectorPanel: some View {
@@ -264,6 +269,10 @@ struct ContentView: View {
                         }
                     }
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
+
+                    numiIconButton("xmark", help: "Close scientific inspector") {
+                        showsInspector = false
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -332,12 +341,16 @@ struct ContentView: View {
             .padding(.vertical, 16)
         }
         .scrollIndicators(.hidden)
-        .frame(width: 326)
+        .frame(width: 334)
         .frame(maxHeight: .infinity)
-        .background(Color.black.opacity(0.90))
-        .overlay(alignment: .leading) {
-            Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.black.opacity(0.76), in: RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
         }
+        .shadow(color: .black.opacity(0.38), radius: 18, x: -5, y: 7)
     }
 
     @ViewBuilder
@@ -397,6 +410,10 @@ struct ContentView: View {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
                 observerMetric("Cells / tissues", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
                 observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
+                observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
+                observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
+                observerMetric("Junction transport / polarity", value: "\(decimal(store.snapshot.meanJunctionMorphogenTransport)) / \(percent(store.snapshot.meanDevelopmentalPolarityCoherence))", tint: .mint, values: store.history.map(\.meanJunctionMorphogenTransport))
+                observerMetric("Morphogen source / work", value: "\(scientific(store.snapshot.meanMorphogenSynthesisRate)) / \(scientific(store.snapshot.meanMorphogenTransportWork))", tint: .orange, values: store.history.map(\.meanMorphogenSynthesisRate))
                 observerMetric("Membrane A / P", value: membraneGeometryLabel, tint: .blue, values: store.history.map(\.meanMembraneShapeIndex))
                 observerMetric("Tissue e / exposed P", value: "\(decimal(store.snapshot.meanTissueElongation)) / \(decimal(store.snapshot.meanExposedMembraneLength))", tint: .cyan, values: store.history.map(\.meanTissueElongation))
                 observerMetric("Cell |F| / tissue |τ| ×10k", value: "\(scaledRate(store.snapshot.meanCellGeneratedForce, by: 10_000)) / \(scaledRate(store.snapshot.meanTissueTorque, by: 10_000))", tint: .green, values: store.history.map(\.meanCellGeneratedForce))
@@ -427,6 +444,11 @@ struct ContentView: View {
                     observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
                     observerMetric("Cells / tissue", value: "\(store.snapshot.cellCount) / \(decimal(store.snapshot.meanCellsPerOrganism))", tint: .blue, values: store.history.map { Double($0.cellCount) })
                     observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .pink, values: store.history.map(\.meanDevelopmentalEdgeCount))
+                    if store.displayMode == .development {
+                        observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
+                        observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
+                        observerMetric("Transport / polarity", value: "\(decimal(store.snapshot.meanJunctionMorphogenTransport)) / \(percent(store.snapshot.meanDevelopmentalPolarityCoherence))", tint: .mint, values: store.history.map(\.meanJunctionMorphogenTransport))
+                    }
                     observerMetric("Mean |v|", value: speedLabel, tint: .cyan, values: store.history.map(\.meanOrganismSpeed))
                     observerMetric("Elongation / exposed P", value: "\(decimal(store.snapshot.meanTissueElongation)) / \(decimal(store.snapshot.meanExposedMembraneLength))", tint: .orange, values: store.history.map(\.meanTissueElongation))
                     observerMetric("Force / torque ×10k", value: "\(scaledRate(store.snapshot.meanCellGeneratedForce, by: 10_000)) / \(scaledRate(store.snapshot.meanTissueTorque, by: 10_000))", tint: .green, values: store.history.map(\.meanCellGeneratedForce))
@@ -595,95 +617,71 @@ struct ContentView: View {
         }
     }
 
-    private var causalDock: some View {
-        HStack(spacing: 18) {
-            VStack(alignment: .leading, spacing: 3) {
-                sectionLabel("OBSERVATION SCALE")
+    private var compactContextHUD: some View {
+        HStack(spacing: 12) {
+            Image(systemName: observationStops[activeObservationStop].symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(scaleAccent)
+                .frame(width: 30, height: 30)
+                .background(scaleAccent.opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 1) {
                 Text(scaleName)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                Text(zoomLabel)
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                Text("\(zoomLabel) · stage 0\(activeObservationStop + 1)")
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
                     .foregroundStyle(scaleAccent)
             }
-            .frame(width: 132, alignment: .leading)
 
-            observationScaleRail
-                .frame(maxWidth: 520)
+            commandDivider
 
-            Spacer(minLength: 0)
-
-            if (store.displayMode == .causality && store.observationZoom < 64) ||
-                activeObservationStop == 2 {
-                VStack(alignment: .leading, spacing: 6) {
-                    sectionLabel(legendTitle.uppercased())
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.fixed(96), alignment: .leading),
-                            GridItem(.fixed(96), alignment: .leading)
-                        ],
-                        alignment: .leading,
-                        spacing: 5
-                    ) {
-                        ForEach(legendItems.prefix(4), id: \.label) { item in
-                            HStack(spacing: 4) {
-                                Circle().fill(item.color).frame(width: 6, height: 6)
-                                Text(item.label)
-                                    .font(.system(size: 9, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    ForEach(legendItems.prefix(4), id: \.label) { item in
+                        HStack(spacing: 4) {
+                            Circle().fill(item.color).frame(width: 6, height: 6)
+                            Text(item.label)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
                     }
                 }
-                .frame(width: 204, alignment: .leading)
-            } else {
-                ViewThatFits(in: .horizontal) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        sectionLabel(legendTitle.uppercased())
-                        HStack(spacing: 10) {
-                            ForEach(legendItems.prefix(4), id: \.label) { item in
-                                HStack(spacing: 4) {
-                                    Circle().fill(item.color).frame(width: 6, height: 6)
-                                    Text(item.label)
-                                        .font(.system(size: 9, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                    sectionLabel(legendTitle.uppercased())
-                }
+                Text(legendTitle)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.leading, 18)
-        .padding(.trailing, 344)
-        .frame(maxWidth: .infinity, minHeight: 112, maxHeight: 112)
-        .background(Color.black.opacity(0.92))
-        .overlay(alignment: .top) {
-            Rectangle().fill(Color.white.opacity(0.12)).frame(height: 1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.black.opacity(0.66), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
         }
+        .shadow(color: .black.opacity(0.30), radius: 12, y: 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var observationScaleRail: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 1) {
             ForEach(Array(observationStops.enumerated()), id: \.element.id) { index, stop in
                 Button {
                     if (index == 3 || index == 4), store.followedAgentID == nil {
                         store.followRandomOrganism()
                     }
+                    store.displayMode = stop.displayMode
                     store.zoom(to: stop.magnification, aspect: 1)
                 } label: {
-                    VStack(spacing: 5) {
-                        Image(systemName: stop.symbol)
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(height: 16)
-                        Text(stop.label)
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
-                    }
+                    Image(systemName: stop.symbol)
+                        .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(index == activeObservationStop ? scaleAccent : Color.secondary)
-                    .frame(width: 64, height: 54)
+                    .frame(width: 28, height: 32)
                     .background(
-                        index == activeObservationStop ? scaleAccent.opacity(0.11) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 6)
+                        index == activeObservationStop ? scaleAccent.opacity(0.15) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 5)
                     )
                     .overlay(alignment: .bottom) {
                         Rectangle()
@@ -693,13 +691,6 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Jump to \(stop.label.lowercased()) scale")
-
-                if index < observationStops.count - 1 {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(Color.white.opacity(0.22))
-                        .frame(width: 14)
-                }
             }
         }
     }
@@ -799,12 +790,6 @@ struct ContentView: View {
         .help(help)
     }
 
-    private func controlGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 1, content: content)
-            .padding(1)
-            .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 6))
-    }
-
     private var commandDivider: some View {
         Rectangle()
             .fill(Color.white.opacity(0.12))
@@ -843,7 +828,11 @@ struct ContentView: View {
                 ? "Mechanistic reaction-source terms"
                 : "Catalyst-mediated reaction flux and membrane assembly"
         }
-        if zoom >= 18 { return "Cell-derived geometry and mechanochemical control" }
+        if zoom >= 18 {
+            return store.displayMode == .development
+                ? "Junction-coupled morphogen development"
+                : "Cell-derived geometry and mechanochemical control"
+        }
         if zoom >= 6 { return "Membrane-connected tissues and physical locomotion" }
         return "Contact-mediated trophic and vibrational niches"
     }
@@ -865,6 +854,9 @@ struct ContentView: View {
             return "The 193² reaction lattice stores substrate A, biomass, energy E, membrane precursor M, substrate B, detritus, toxin, and catalyst C. The canvas maps concentrations to species glyphs and maps the exact local source terms to moving flux pulses; glyphs are field markers, not atom-resolved particles. Spinor order and mechanical activity produce C, C gates E production, E and C gate M assembly, and catalyst accelerates detrital recycling."
         }
         if zoom >= 18 {
+            if store.displayMode == .development {
+                return "Morphogen A and B are synthesized and degraded using inherited kinetic constants, then diffuse only through recent persistent cell junctions. Their receptor-weighted imbalance updates continuous fate memory and tissue polarity, which alter division axes, membrane allocation, traction, feeding, and defense. Mean A/B is \(decimal(store.snapshot.meanMorphogenActivator))/\(decimal(store.snapshot.meanMorphogenInhibitor)); differentiation is \(decimal(store.snapshot.meanMorphogenDifferentiation))."
+            }
             return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Exposed membrane arcs determine tissue covariance axes, elongation, polarity, and boundary length. Each cell samples its own chemical and hazard gradients; inherited Ca* entry, junction transmission, Ca*→ERK* gain, refractory recovery, signaling cost, and traction gain determine the force and torque transmitted to organism motion. Mean Ca*/ERK* is \(signalStateLabel)."
         }
         if zoom >= 6 {
@@ -884,7 +876,7 @@ struct ContentView: View {
         case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
         case 2: "Local chemical affinity is sqrt(A·B) times permeability and toxin inhibition. Quantum order and mechanical activity add catalyst; catalyst then gates stored-energy production. Quantum order, catalyst, and E set the membrane target, while catalyst-dependent mineralization returns detritus to both substrates. Cells consume these fields for ATP and return mechanical work and detritus, closing the cross-scale loop."
-        case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Exposed membrane edges define geometry; cell-local chemical gradients and ERK* state generate external traction; a GPU spatial hash resolves cross-tissue polygon contacts and localized membrane damage."
+        case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Inherited morphogen source, decay, receptor, and diffusivity parameters operate across persistent junctions; their local imbalance updates fate memory and polarity. Exposed membrane edges define geometry, and cell-local gradients, ERK* state, and developmental polarity generate external traction."
         case 4: "GPU union-find labels membrane-connected cells independently of storage position. Cross-owner fusion additionally requires intact membranes, low stress, low predatory investment, reciprocal ligand-receptor compatibility, and inherited fusion investment. Fission allocates one descendant program per transmitted source only after ATP, integrity, and inherited detachment criteria pass. Permanent cell IDs and acquired states persist through both ownership changes."
         default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
         }
@@ -975,12 +967,30 @@ struct ContentView: View {
 
     private var observationStops: [ObservationStop] {
         [
-            ObservationStop(label: "Spinor", symbol: "atom", magnification: 900),
-            ObservationStop(label: "Wave", symbol: "waveform.path", magnification: 240),
-            ObservationStop(label: "Molecule", symbol: "scope", magnification: 96),
-            ObservationStop(label: "Cell", symbol: "circle.hexagonpath.fill", magnification: 36),
-            ObservationStop(label: "Organism", symbol: "microbe.fill", magnification: 10),
-            ObservationStop(label: "Ecology", symbol: "circle.hexagongrid.fill", magnification: 1)
+            ObservationStop(
+                label: "Spinor", symbol: "atom", magnification: 900,
+                displayMode: .ecology
+            ),
+            ObservationStop(
+                label: "Wave", symbol: "waveform.path", magnification: 240,
+                displayMode: .ecology
+            ),
+            ObservationStop(
+                label: "Molecule", symbol: "scope", magnification: 96,
+                displayMode: .energy
+            ),
+            ObservationStop(
+                label: "Cell", symbol: "circle.hexagonpath.fill", magnification: 36,
+                displayMode: .development
+            ),
+            ObservationStop(
+                label: "Organism", symbol: "microbe.fill", magnification: 10,
+                displayMode: .genome
+            ),
+            ObservationStop(
+                label: "Ecology", symbol: "circle.hexagongrid.fill", magnification: 1,
+                displayMode: .ecology
+            )
         ]
     }
 
@@ -1030,6 +1040,12 @@ struct ContentView: View {
             }
         }
         if store.observationZoom >= 18 {
+            if store.displayMode == .development {
+                return [
+                    ("Morphogen A", .cyan), ("Morphogen B", .pink),
+                    ("Fate", .mint), ("Polarity", .white), ("Junction flux", .blue)
+                ]
+            }
             return [("Ca*", .cyan), ("ERK*", .pink), ("Traction", .mint), ("ATP", .orange), ("Vₘ", .red), ("Membrane", .blue)]
         }
         if store.displayMode == .ecology, store.observationZoom < 6 {
@@ -1057,6 +1073,10 @@ struct ContentView: View {
     private var legendTitle: String {
         if store.displayMode == .causality, store.observationZoom < 64 {
             return "One-edge-zero causal terms"
+        }
+        if store.displayMode == .development, store.observationZoom >= 18,
+           store.observationZoom < 64 {
+            return "Junction-coupled development"
         }
         return store.observationZoom >= 512 ? "Spinor components" :
             store.observationZoom >= 160 ? "Quantum observables" :
@@ -1225,6 +1245,7 @@ private struct ObservationStop: Identifiable {
     let label: String
     let symbol: String
     let magnification: Double
+    let displayMode: FieldDisplayMode
 
     var id: String { label }
 }

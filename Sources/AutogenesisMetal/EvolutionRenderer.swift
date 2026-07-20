@@ -30,6 +30,7 @@ private struct SimulationUniforms {
 }
 
 private struct HeadlessReadbackBuffers {
+    let agentState: MTLBuffer
     let agentOccupancy: MTLBuffer
     let cellAggregates: MTLBuffer
     let programSlots: MTLBuffer
@@ -74,7 +75,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 2,
+            schemaVersion: 3,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -89,6 +90,7 @@ extension EvolutionRenderer {
         var fusions: UInt64 = 0
         var latestSample: ExperimentSample?
         var interventionSample: ExperimentSample?
+        var developmentalSamples: [ExperimentSample] = []
 
         while totalSteps < configuration.steps {
             let remaining = configuration.steps - totalSteps
@@ -171,6 +173,9 @@ extension EvolutionRenderer {
                     fissions: &fissions,
                     fusions: &fusions
                 )
+                if let latestSample {
+                    developmentalSamples.append(latestSample)
+                }
                 if interventionBoundary {
                     interventionSample = latestSample
                 }
@@ -214,6 +219,10 @@ extension EvolutionRenderer {
                         fissions: &fissions,
                         fusions: &fusions
                     )
+                    if let latestSample,
+                       developmentalSamples.last?.step != latestSample.step {
+                        developmentalSamples.append(latestSample)
+                    }
                     report = latestSample?.invariantReport ?? report
                 }
                 let elapsed = CFAbsoluteTimeGetCurrent() - startTime
@@ -227,6 +236,11 @@ extension EvolutionRenderer {
                     fissions: fissions,
                     fusions: fusions,
                     invariantReport: report,
+                    developmentalQualification: developmentalQualification(
+                        samples: developmentalSamples,
+                        fissions: fissions,
+                        invariantReport: report
+                    ),
                     finalSample: latestSample,
                     outputPath: journal.outputURL.path
                 )
@@ -251,6 +265,11 @@ extension EvolutionRenderer {
             fissions: fissions,
             fusions: fusions,
             invariantReport: finalReport,
+            developmentalQualification: developmentalQualification(
+                samples: developmentalSamples,
+                fissions: fissions,
+                invariantReport: finalReport
+            ),
             finalSample: latestSample,
             outputPath: journal.outputURL.path
         )
@@ -273,6 +292,7 @@ extension EvolutionRenderer {
             return buffer
         }
         return try HeadlessReadbackBuffers(
+            agentState: sharedCopy(of: agentState, label: "Experiment agent state"),
             agentOccupancy: sharedCopy(of: agentOccupancy, label: "Experiment agent occupancy"),
             cellAggregates: sharedCopy(of: cellAggregates, label: "Experiment tissue aggregates"),
             programSlots: sharedCopy(of: programSlots, label: "Experiment program slots"),
@@ -299,6 +319,7 @@ extension EvolutionRenderer {
         )
         if full {
             let copies: [(MTLBuffer, MTLBuffer)] = [
+                (agentState, readback.agentState),
                 (agentOccupancy, readback.agentOccupancy),
                 (cellAggregates, readback.cellAggregates),
                 (programSlots, readback.programSlots),
@@ -349,6 +370,39 @@ extension EvolutionRenderer {
             maximumContactMomentumResidual: values[10],
             maximumEnergyResidual: Double(values[16]) / Self.energyAuditScale
         )
+    }
+
+    private func developmentalQualification(
+        samples: [ExperimentSample],
+        fissions: UInt64,
+        invariantReport: ExperimentInvariantReport
+    ) -> DevelopmentalQualification {
+        var consecutiveViableEndpointObservations = 0
+        for sample in samples.reversed() {
+            guard sample.livingOrganisms > 0,
+                  sample.livingCells > 0,
+                  sample.meanCellATP > 0.08,
+                  sample.meanCellIntegrity > 0.20 else { break }
+            consecutiveViableEndpointObservations += 1
+        }
+        let input = DevelopmentalQualificationInput(
+            observationCount: samples.count,
+            consecutiveViableEndpointObservations: consecutiveViableEndpointObservations,
+            maximumCellsPerOrganism: samples.map(\.meanCellsPerOrganism).max() ?? 0,
+            maximumActiveJunctions: samples.map(\.activeJunctions).max() ?? 0,
+            maximumMorphogenTransport:
+                samples.map(\.meanJunctionMorphogenTransport).max() ?? 0,
+            maximumMorphogenDifferentiation:
+                samples.map(\.meanMorphogenDifferentiation).max() ?? 0,
+            maximumLivingGeneration: samples.map(\.maximumLivingGeneration).max() ?? 0,
+            fissions: fissions,
+            invariantFlags: invariantReport.flags,
+            maximumAbsoluteEnergyResidual: max(
+                samples.map { abs($0.energyResidual) }.max() ?? 0,
+                invariantReport.maximumEnergyResidual
+            )
+        )
+        return DevelopmentalQualification.evaluate(input)
     }
 
     private func consumeHeadlessSample(
@@ -432,17 +486,25 @@ extension EvolutionRenderer {
             to: UInt32.self,
             capacity: Self.maxAgentCount
         )
+        let agents = readback.agentState.contents().bindMemory(
+            to: AgentState.self,
+            capacity: Self.maxAgentCount
+        )
         let aggregates = readback.cellAggregates.contents().bindMemory(
             to: CellAggregate.self,
             capacity: Self.maxAgentCount
         )
         let living = (0..<Self.maxAgentCount).filter { occupancy[$0] == 1 }
+        let maximumLivingGeneration = living.map { agents[$0].generation }.max() ?? 0
         let livingCellCount = living.reduce(0) {
             $0 + max(Int(aggregates[$1].physiology.x.rounded()), 0)
         }
         let inverseOrganisms = 1.0 / Double(max(living.count, 1))
         let inverseCells = 1.0 / Double(max(livingCellCount, 1))
         let meanCells = Double(livingCellCount) * inverseOrganisms
+        let largestTissueCellCount = living.reduce(into: 0) { largest, index in
+            largest = max(largest, max(Int(aggregates[index].physiology.x.rounded()), 0))
+        }
         let meanRadius = living.reduce(0.0) {
             $0 + Double(max(aggregates[$1].morphology.z, 0))
         } * inverseOrganisms
@@ -495,6 +557,8 @@ extension EvolutionRenderer {
             stepsPerSecond: Double(totalSteps) / max(elapsed, 0.000_001),
             livingOrganisms: living.count,
             livingCells: livingCellCount,
+            maximumLivingGeneration: maximumLivingGeneration,
+            largestTissueCellCount: largestTissueCellCount,
             births: births,
             deaths: deaths,
             fissions: fissions,
@@ -509,6 +573,18 @@ extension EvolutionRenderer {
             trophicGain: trophicGain,
             trophicLoss: trophicLoss,
             energyResidual: Double(audit[9]) / Self.energyAuditScale,
+            cellularEnergyHarvest: living.reduce(0.0) {
+                $0 + Double(max(aggregates[$1].energetics.x, 0))
+            },
+            cellularMaintenance: living.reduce(0.0) {
+                $0 + Double(max(aggregates[$1].energetics.y, 0))
+            },
+            cellularActiveWork: living.reduce(0.0) {
+                $0 + Double(max(aggregates[$1].energetics.z, 0))
+            },
+            cellularDissipation: living.reduce(0.0) {
+                $0 + Double(max(aggregates[$1].energetics.w, 0))
+            },
             meanCellsPerOrganism: meanCells,
             meanTissueRadius: meanRadius,
             meanShapeIndex: meanShape,
@@ -523,6 +599,22 @@ extension EvolutionRenderer {
             dividingCellFraction: cellWeightedMean { $0.morphology.w },
             meanCellTraction: cellWeightedMean { $0.tissueMotion.w },
             meanFrequencyMatch: cellWeightedMean { $0.environment.w },
+            meanMorphogenActivator: cellWeightedMean { $0.development.x },
+            meanMorphogenInhibitor: cellWeightedMean { $0.development.y },
+            meanDevelopmentalFateMemory: cellWeightedMean { $0.development.z },
+            meanJunctionMorphogenTransport: cellWeightedMean { $0.development.w },
+            meanMorphogenDifferentiation: cellWeightedMean {
+                $0.developmentCausality.x
+            },
+            meanDevelopmentalPolarityCoherence: cellWeightedMean {
+                $0.developmentCausality.y
+            },
+            meanMorphogenSynthesisRate: cellWeightedMean {
+                $0.developmentCausality.z
+            },
+            meanMorphogenTransportWork: cellWeightedMean {
+                $0.developmentCausality.w
+            },
             invariantReport: invariant
         )
         try journal.append("sample", sample)
@@ -599,6 +691,7 @@ private struct CellState {
     var tissueGeometry: SIMD4<Float>
     var tissueForce: SIMD4<Float>
     var environment: SIMD4<Float>
+    var development: SIMD4<Float>
 }
 
 private struct CellIdentity {
@@ -662,6 +755,8 @@ private struct CellAggregate {
     var inheritance: SIMD4<Float>
     var programEcology: SIMD4<Float>
     var environment: SIMD4<Float>
+    var development: SIMD4<Float>
+    var developmentCausality: SIMD4<Float>
 }
 
 private struct DevelopmentalGenome {
@@ -671,6 +766,8 @@ private struct DevelopmentalGenome {
     var actuatorBiasB: SIMD4<Float>
     var mechanochemistryA: SIMD4<Float>
     var mechanochemistryB: SIMD4<Float>
+    var morphogenKinetics: SIMD4<Float>
+    var morphogenTransport: SIMD4<Float>
 }
 
 private struct RegulatoryNode {
@@ -1094,17 +1191,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     init(view: MTKView) throws {
         precondition(MemoryLayout<AgentState>.stride == 192, "AgentState Metal ABI drift")
         precondition(MemoryLayout<AgentObservationRecord>.stride == 96, "AgentObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellState>.stride == 272, "CellState Metal ABI drift")
+        precondition(MemoryLayout<CellState>.stride == 288, "CellState Metal ABI drift")
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
         precondition(MemoryLayout<HeritableProgram>.stride == 96, "HeritableProgram Metal ABI drift")
         precondition(MemoryLayout<ProgramSlotState>.stride == 16, "ProgramSlotState Metal ABI drift")
         precondition(MemoryLayout<CellJunctionState>.stride == 32, "CellJunctionState Metal ABI drift")
-        precondition(MemoryLayout<CellAggregate>.stride == 304, "CellAggregate Metal ABI drift")
-        precondition(MemoryLayout<DevelopmentalGenome>.stride == 96, "DevelopmentalGenome Metal ABI drift")
+        precondition(MemoryLayout<CellAggregate>.stride == 336, "CellAggregate Metal ABI drift")
+        precondition(MemoryLayout<DevelopmentalGenome>.stride == 128, "DevelopmentalGenome Metal ABI drift")
         precondition(MemoryLayout<RegulatoryNode>.stride == 32, "RegulatoryNode Metal ABI drift")
         precondition(MemoryLayout<RegulatoryEdge>.stride == 32, "RegulatoryEdge Metal ABI drift")
         precondition(MemoryLayout<ResonanceGenome>.stride == 32, "ResonanceGenome Metal ABI drift")
-        precondition(MemoryLayout<ProgramMetricRecord>.stride == 128, "ProgramMetricRecord Metal ABI drift")
+        precondition(MemoryLayout<ProgramMetricRecord>.stride == 160, "ProgramMetricRecord Metal ABI drift")
         precondition(MemoryLayout<MembraneVertex>.stride == 32, "MembraneVertex Metal ABI drift")
         precondition(MemoryLayout<LineageEventRecord>.stride == 64, "LineageEventRecord Metal ABI drift")
         guard let device = view.device ?? MTLCreateSystemDefaultDevice() else {
@@ -2162,6 +2259,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(identityCounters, offset: 0, index: 19)
         encoder.setBuffer(cellEnergyExchange, offset: 0, index: 20)
         encoder.setBuffer(energyAudit, offset: 0, index: 21)
+        encoder.setBuffer(cellJunctions, offset: 0, index: 22)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
         encoder.setTexture(environmentState, index: 2)
@@ -2264,6 +2362,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellParentIDs, offset: 0, index: 13)
         encoder.setBuffer(programInteractions, offset: 0, index: 14)
         encoder.setBuffer(programSlots, offset: 0, index: 15)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 16)
         dispatchAgents(encoder, pipeline: divideAndReduceCellPipeline)
         encoder.memoryBarrier(resources: [
             agentState, cellState, cellOccupancy, cellIdentities, cellAggregates,
@@ -2511,9 +2610,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellComponentProgramTargets, offset: 0, index: 9)
         encoder.setBuffer(programSlots, offset: 0, index: 10)
         encoder.setBuffer(identityCounters, offset: 0, index: 11)
+        encoder.setBuffer(cellJunctions, offset: 0, index: 12)
+        encoder.setBuffer(ownerCellHeads, offset: 0, index: 13)
+        encoder.setBuffer(ownerCellNext, offset: 0, index: 14)
         dispatchCells(encoder, pipeline: reassignCellComponentsPipeline)
         encoder.memoryBarrier(resources: [
-            cellState, cellOccupancy, cellIdentities, programSlots, identityCounters
+            cellState, cellOccupancy, cellIdentities, programSlots, identityCounters,
+            cellJunctions
         ])
     }
 
@@ -3172,6 +3275,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 let weight = Double(max(cellular[index].physiology.x, 0))
                 total += SIMD4<Double>(cellular[index].regulation) * weight
             } / Double(max(cellCount, 1))
+        let meanDevelopment: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].development) * weight
+            } / Double(max(cellCount, 1))
+        let meanDevelopmentCausality: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].developmentCausality) * weight
+            } / Double(max(cellCount, 1))
         let meanCausalEffects: SIMD4<Double> = livingIndices.isEmpty
             ? .zero
             : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
@@ -3364,6 +3479,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 meanRepairProgram: meanDevelopmentalRegulation.w,
                 meanDevelopmentalNodeCount: meanDevelopmentalNodeCount,
                 meanDevelopmentalEdgeCount: meanDevelopmentalEdgeCount,
+                meanMorphogenActivator: meanDevelopment.x,
+                meanMorphogenInhibitor: meanDevelopment.y,
+                meanDevelopmentalFateMemory: meanDevelopment.z,
+                meanJunctionMorphogenTransport: meanDevelopment.w,
+                meanMorphogenDifferentiation: meanDevelopmentCausality.x,
+                meanDevelopmentalPolarityCoherence: meanDevelopmentCausality.y,
+                meanMorphogenSynthesisRate: meanDevelopmentCausality.z,
+                meanMorphogenTransportWork: meanDevelopmentCausality.w,
                 meanResonanceFrequency: meanResonanceFrequency,
                 meanResonanceDamping: meanResonanceDamping,
                 meanResonanceBandwidth: meanResonanceBandwidth,

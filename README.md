@@ -56,11 +56,11 @@ This follows the general artificial-life program of studying life-like processes
 
 ## Observed scales
 
-The interface uses one camera over one persistent simulation. The scale controls change observation and rendering; they do not create separate canvases or resample agent identity.
+The interface uses one camera over one persistent simulation. Each scale control selects both magnification and its scientifically matched renderer: reaction energetics at molecular scale, junction-coupled development at cell scale, inherited tissue morphology at organism scale, and environmental state at ecology scale. There is no separate view-mode dropdown. The scientific inspector is an optional floating overlay, so opening it never resizes or duplicates the world canvas. Scale changes do not resample agent identity.
 
 ![Numi Automata spinor-scale interface](Docs/Media/numi-automata-overview.png)
 
-<div align="center"><sub>Production interface at the 900x spinor scale. The right inspector reports equations, cross-scale coupling, reductions, and threshold events from live GPU state.</sub></div>
+<div align="center"><sub>Spinor-scale interface. The optional inspector reports equations, cross-scale coupling, reductions, and threshold events from live GPU state without partitioning the canvas.</sub></div>
 
 <table>
   <tr>
@@ -112,13 +112,13 @@ The interface uses one camera over one persistent simulation. The scale controls
 | Checkpoint texture | `193 x 193 x 1` | `RGBA16Float` | GPU private | Pre-perturbation biomass reference |
 | Agent state ping-pong buffers | `2 x 384 x 192 B` | Swift/Metal ABI-matched struct | GPU private | Position, tissue-derived velocity/orientation, recognition coordinates, social-control coefficients, permanent identity, lineage metadata, and propagule refractory state |
 | Agent occupancy | `384` atomic integers | `UInt32` | GPU private | Stable slot allocation and death |
-| Cell state ping-pong buffers | `2 x 9,216 x 272 B` | Swift/Metal ABI-matched struct | GPU private | Metabolism, electrophysiology, mechanochemical signaling, vertex-derived exposure, traction, contact damage, trophic transfer, substrate forcing, barrier load, environmental frequency, and frequency match |
+| Cell state ping-pong buffers | `2 x 9,216 x 288 B` | Swift/Metal ABI-matched struct | GPU private | Metabolism, electrophysiology, mechanochemical signaling, junction-mediated morphogens, persistent developmental polarity and fate memory, vertex-derived exposure, traction, contact damage, trophic transfer, and environmental forcing |
 | Cell occupancy | `9,216` atomic integers | `UInt32` | GPU private | Lock-free allocation from one global persistent-cell pool |
 | Hot cell identity | `9,216 x 32 B` | Owner, inherited-program index and generation, permanent cell ID, component root | GPU private | Generation validation prevents a recycled slot from changing a living cell's control law |
 | Cell-parent genealogy | `9,216 x 4 B` | Parent permanent cell ID | GPU private | Cold lineage state written only at founder creation and division |
 | Heritable program payloads | `4,096 x 96 B` | Three trait vectors, ligand/receptor coordinates, four social-control coefficients, genome hash, parent genome hash, originating birth ID, lineage generation | GPU private | Recyclable payload storage independent of reusable organism slots |
 | Program-slot state | `4,096 x 16 B` | Occupancy, living-cell reference count, slot generation, lineage hash | GPU private | Lock-free reclamation after the final living-cell reference is released |
-| Cell-program interaction state | `9,216 x 16 B` | Signed ATP transfer, rejection load, recognition compatibility, net energetic contribution | GPU private | Cold structure-of-arrays output kept outside the `272 B` hot cell record |
+| Cell-program interaction state | `9,216 x 16 B` | Signed ATP transfer, rejection load, recognition compatibility, net energetic contribution | GPU private | Cold structure-of-arrays output kept outside the `288 B` hot cell record |
 | Dynamic owner lists | `384` atomic heads + `9,216` links | `UInt32` | GPU private | Rebuilt per-component traversal without contiguous cell blocks |
 | Segmented component lists | `9,216` atomic heads + `9,216` links | `UInt32` | GPU private | Root-indexed traversal for fusion and fission reductions without repeated whole-pool scans |
 | Connectivity state | Parents, counts, five-channel viability sums, root owners, primary roots, and up to sixteen source-to-descendant program mappings per root | Atomic `UInt32` / `Int32` | GPU private | Union-find labeling, recognition-gated fusion, viable fission, exact bounded program mapping, and owner reassignment |
@@ -129,8 +129,8 @@ The interface uses one camera over one persistent simulation. The scale controls
 | Cellular energy exchange | `193 x 193 x 8` atomic integers | Available A/B/detritus, claimed A/B/detritus, returned detritus, exported heat | GPU private | Exact resource claims and one-step texture settlement without CPU synchronization |
 | Energy audit | `10` atomic signed integers | Input, ATP harvest, storage, work, frequency work, maintenance, heat, detritus, ATP sharing, residual | GPU private | Global per-step conservation diagnostic copied through the metric ring |
 | Invariant audit | `20` persistent counters + `4,112` scratch integers | Atomic `UInt32` / `Int32` | GPU private | First-failure step and reductions for contact momentum, energy drift, program generations/references, junction validity, membrane validity, and component ownership |
-| Cellular aggregates | `384 x 304 B` | Nineteen `float4` vectors | GPU private | Physiology, signaling, geometry, force, trophic flux, detachment, inherited-program composition, ATP exchange, rejection, compatibility, net contribution, and local environmental forcing |
-| Developmental headers | `4,096 x 96 B` | Topology, mutation distances, actuator biases, and mechanochemical coefficients | GPU private | Program-indexed bounded sparse graph metadata plus eight inherited pathway parameters |
+| Cellular aggregates | `384 x 336 B` | Twenty-one `float4` vectors | GPU private | Physiology, signaling, geometry, force, trophic flux, detachment, inherited-program composition, ATP exchange, rejection, compatibility, environmental forcing, morphogen state, and developmental causality |
+| Developmental headers | `4,096 x 128 B` | Topology, mutation distances, actuator biases, mechanochemical coefficients, and morphogen kinetics | GPU private | Program-indexed bounded sparse graph metadata plus inherited mechanochemical and developmental parameters |
 | Regulatory nodes | `4,096 x 16 x 32 B` | Parametric node records | GPU private | Program-indexed bias, rate, sensor coupling, actuator mask, and permanent innovation ID |
 | Regulatory edges | `4,096 x 48 x 32 B` | Sparse directed edge records | GPU private | Program-indexed weight, strain plasticity, endpoints, activity, and permanent innovation ID |
 | Cell regulatory activity | `9,216 x 16 x 4 B` | `Float` | GPU private | Cell-local dynamical state for inherited graphs |
@@ -341,7 +341,7 @@ A candidate must be no lower than its four cardinal neighbors. It then claims sl
 
 All cells occupy one `9,216`-record GPU pool. A hot `32 B` identity record stores current physical component owner, inherited-program index and generation, monotonic permanent cell ID, current union-find root, and ABI padding. Parent-cell ID is retained in a separate `4 B` cold genealogy buffer because it is written only at founder creation or division and is not needed by per-frame topology, dynamics, contact, or rendering. Storage index has no biological meaning. Physical ownership and inherited-program identity are independent: component fusion can move a cell into another organism frame without changing its program. During reproductive fission, every distinct source program physically present in the propagule is mapped to its own independently mutated descendant program. Each frame, atomic owner heads and links are rebuilt from live identity records. Autogenic and user-injected founders claim one arbitrary free cell; division claims any free cell in the global pool. Organism size is therefore limited only by total hardware capacity and ecological dynamics, not by a per-organism slot partition. Camera motion and zoom never allocate, merge, or rescale cells.
 
-Each `CellState` is a `272 B` GPU record:
+Each `CellState` is a `288 B` GPU record:
 
 ```text
 position.xy, velocity.xy
@@ -363,6 +363,7 @@ tissueGeometry = (vertex-derived outward normal.xy, exposed-perimeter fraction,
                   physical detachment score)
 tissueForce = (local traction/contact force.xy, contact damage, signed trophic transfer)
 environment = (substrate forcing, barrier load, environmental frequency, frequency match)
+development = (persistent polarity.xy, continuous fate memory, junction morphogen transport)
 ```
 
 For cell `i`, `evolveOrganismCells` evaluates all occupied cells belonging to the same physical component. Its traits, sparse developmental graph, mechanochemical gains, and resonant tuning are read through the cell's own inherited-program index. Pair forces are calculated from the same previous-state positions, symmetric radii, and minimum pair adhesion. Reversing the ordered pair reverses its direction without changing magnitude, so the center-level contact force is equal and opposite. `evolveCellMembranes` then advances a separate twelve-vertex polygon for every occupied cell. This is a deformable-particle tissue model coupled to a lattice wave equation, not a continuum finite-element model.
@@ -386,7 +387,7 @@ Local membrane integrity continuously changes the edge and bending stiffness. Co
 
 Each recyclable `96 B` heritable-program payload stores three four-component trait vectors, two ligand coordinates, two receptor coordinates, four social-control coefficients, and immutable provenance hashes. A separate `16 B` slot record stores occupancy, a living-cell reference count, a monotonically advancing slot generation, and the current lineage hash. Every cell stores both slot index and generation; all dynamics, topology, metrics, and rendering reads validate that pair. The last living-cell release returns the slot to the free pool, while the compact lineage-event ring retains immutable birth, death, fusion, genome-hash, topology-hash, and morphology records. Reuse therefore cannot redirect a living cell to an unrelated control law and does not require retaining dead developmental payloads indefinitely.
 
-Each live program references a separate `96 B` developmental header, sixteen `32 B` node slots, forty-eight `32 B` directed-edge slots, and one `32 B` resonance record. Founders begin with eight active sensor-coupled nodes and fourteen active edges. The header also carries heritable gains for mechanics-to-Ca*, junction transmission, Ca*-to-ERK*, refractory recovery, signaling ATP cost, traction, detachment threshold, and propagule investment. A node stores its bias, response rate, sensor weight, actuator weight, sensor index, eight-bit actuator mask, activity flag, and monotonic innovation ID. An edge stores its weight, strain-dependent plastic term, source, target, activity flag, and monotonic innovation ID. Inactive slots have zero effect but can be activated by structural mutation.
+Each live program references a separate `128 B` developmental header, sixteen `32 B` node slots, forty-eight `32 B` directed-edge slots, and one `32 B` resonance record. Founders begin with eight active sensor-coupled nodes and fourteen active edges. The header carries heritable gains for mechanics-to-Ca*, junction transmission, Ca*-to-ERK*, refractory recovery, signaling ATP cost, traction, detachment threshold, and propagule investment. It also stores independent basal production, first-order decay, receptor sensitivity, and junction diffusivity coefficients for two dimensionless morphogens. A node stores its bias, response rate, sensor weight, actuator weight, sensor index, eight-bit actuator mask, activity flag, and monotonic innovation ID. An edge stores its weight, strain-dependent plastic term, source, target, activity flag, and monotonic innovation ID. Inactive slots have zero effect but can be activated by structural mutation.
 
 The eight cell-local inputs are:
 
@@ -411,7 +412,7 @@ z_k(t+1)=\mathrm{clip}\left[(1-r_k)z_k(t)+r_k
 
 Active nodes can project into any subset of eight stable actuator channels: proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. These are abstract model controls, not named genes or measured protein concentrations. Because every cell evaluates the same inherited graph from different local inputs, differentiated dynamical states can arise without a cell-type table. This local mechanochemical organization is motivated by experimental evidence that shape, contractility, compression, and tissue stress can influence fate patterning and signaling-centre formation [16-19], but the coefficients remain dimensionless and uncalibrated.
 
-At cellular-component separation, the GPU traverses the root's segmented cell list and constructs an exact list of distinct source program indices. It independently claims one generation-tagged recyclable slot per source program and mutates each source into one descendant; a partial allocation is rolled back if any claim fails. Active node parameters, edge weights, edge plasticity, actuator biases, all eight mechanochemical coefficients, all resonance parameters, ligand/receptor coordinates, and all social-control coefficients receive bounded mutation. Structural mutation selects one operation: duplicate a node, silence a node, add an edge, remove an edge, or reconnect an edge. New and reconnected structures receive globally monotonic innovation IDs; each program stores active counts, a topology hash, cumulative mutation distance, last branch distance, and structural-mutation count. Reassignment retains the mapped descendant before releasing the source reference for each transmitted cell. The implementation supports at most sixteen distinct programs in one propagule; a component above that explicit hardware bound does not reproduce and is removed as a non-transmitted fragment rather than being collapsed to one program. This borrows the historical-marking principle from augmenting-topology neuroevolution [27], but Numi Automata does not use NEAT crossover, explicit fitness sharing, or prescribed species protection. The offspring inherits a mutated set of rules while its component's persistent cells retain their acquired state and membrane geometry in the global pool.
+At cellular-component separation, the GPU traverses the root's segmented cell list and constructs an exact list of distinct source program indices. It independently claims one generation-tagged recyclable slot per source program and mutates each source into one descendant; a partial allocation is rolled back if any claim fails. Active node parameters, edge weights, edge plasticity, actuator biases, all mechanochemical and morphogen coefficients, all resonance parameters, ligand/receptor coordinates, and all social-control coefficients receive bounded mutation. Structural mutation selects one operation: duplicate a node, silence a node, add an edge, remove an edge, or reconnect an edge. New and reconnected structures receive globally monotonic innovation IDs; each program stores active counts, a topology hash, cumulative mutation distance, last branch distance, and structural-mutation count. Reassignment retains the mapped descendant before releasing the source reference for each transmitted cell. The implementation supports at most sixteen distinct programs in one propagule; a component above that explicit hardware bound does not reproduce and is removed as a non-transmitted fragment rather than being collapsed to one program. This borrows the historical-marking principle from augmenting-topology neuroevolution [27], but Numi Automata does not use NEAT crossover, explicit fitness sharing, or prescribed species protection. The offspring inherits a mutated set of rules while its component's persistent cells retain their acquired state and membrane geometry in the global pool.
 
 This differs from target-shape optimization: no morphology image or terminal body geometry is supplied to the network. Recent differentiable morphogenesis work demonstrates that local genetic networks can be optimized for prescribed cluster-level outcomes [20]; Numi Automata instead mutates local rules under ecological reproduction and measures whatever viable structures result.
 
@@ -431,7 +432,7 @@ W_i^{freq}=\left(v_i^2+\omega_i^2x_i^2\right)
 \left(0.00042+0.075f_i\right)\left(0.58+0.82g_i\right),
 ```
 
-where `x_i` and `v_i` are resonator displacement and velocity, `f_i` is inherited natural frequency, and `g_i` is inherited response gain. When ATP is insufficient, all planned expenses are scaled by the same factor before state integration. Maintenance returns `34%` of its energy to detritus and exports `66%` as heat; stress dissipation, rejection, conversion loss, and ATP overflow become heat. Biomass loss and cell death return `72%` to detritus and `28%` to heat. The next `reactWorld` dispatch subtracts the exact claimed substrate and adds returned detritus to the persistent ecology textures.
+where `x_i` and `v_i` are resonator displacement and velocity, `f_i` is inherited natural frequency, and `g_i` is inherited response gain. Stored ATP defines a continuous metabolic-readiness variable. Falling readiness suppresses contraction, construction, morphogen synthesis, oscillatory work, and non-nutrient guidance before expenses are integrated; quiescent basal maintenance can fall to `20%` of active demand, while starvation increases resource-gradient weighting. If planned expenses still exceed available ATP, every expense is scaled by the same factor. Maintenance returns `34%` of its energy to detritus and exports `66%` as heat; stress dissipation, rejection, conversion loss, and ATP overflow become heat. During biomass catabolism, up to `52%` of released biomass energy returns to ATP as readiness falls; the remaining exported fraction is split `64%` to detritus and `36%` to heat. Terminal cell loss remains split `72%` to detritus and `28%` to heat. The next `reactWorld` dispatch subtracts exact substrate claims and adds returned detritus to the persistent ecology textures.
 
 The GPU accumulates a signed ten-channel global audit. With cellular storage `S_i=A_i+0.18B_i`, active work `W_i`, exported heat `Q_i`, detrital energy `E_i^{det}`, and signed ATP-sharing flux `X_i`, each cell contributes
 
@@ -439,7 +440,7 @@ The GPU accumulates a signed ten-channel global audit. With cellular storage `S_
 r_i=E_i^{sub}+X_i-\left(\Delta S_i+W_i+Q_i+E_i^{det}\right).
 ```
 
-Pairwise trophic transfer separately contributes its measured storage change and conversion heat. Summed ATP sharing is internal transfer before clipping. The observer reports `sum r_i`; departures from zero expose fixed-point rounding, clipping, or an accounting defect rather than being hidden in an organism-level energy proxy. ATP still regulates contractile amplitude, biomass accumulation, membrane repair, and cell-cycle progression. Low ATP and environmental load raise stress; persistent high stress raises apoptosis activation and can release the global cell record.
+Pairwise trophic transfer separately contributes its measured storage change and conversion heat. Summed ATP sharing is internal transfer before clipping. The observer reports `sum r_i`; departures from zero expose fixed-point rounding, clipping, or an accounting defect rather than being hidden in an organism-level energy proxy. ATP still regulates contractile amplitude, biomass accumulation, membrane repair, and cell-cycle progression. The membrane ATP setpoint falls continuously from `0.38` in active cells toward `0.18` in quiescent cells, reducing permeability turnover without eliminating zero-ATP failure. Low ATP and environmental load raise stress; persistent high stress raises apoptosis activation and can release the global cell record.
 
 ### Inherited recognition, cooperation, and rejection
 
@@ -580,7 +581,7 @@ u_{t+1}=0.9975\left(u_t+v_{t+1}\right).
 
 Rock obstacles lower `k` and `gamma`; the outer lattice band adds absorption. Local displacement gradients define strain, while velocity magnitude defines wave speed. Both enter cell work and dissipation. Strain also drives membrane excitation and the reaction field, and organisms can evolve attraction or avoidance to vibration gradients. This implements a closed mechanochemical loop motivated by experimentally observed epithelial signaling and deformation waves [11-14], without claiming a calibrated tissue material model.
 
-Cell-cycle progression is gated by the cell's own ATP, multiplied by the proliferation program, and inhibited by contact density according to the adhesive program. A cell with a completed cycle atomically claims any unoccupied global cell record and divides along an axis calculated from oscillator phase, radial position, morphogen polarity, strain, proliferation, and contractile state. Parent and daughter split ATP and biomass, separate mechanically, reset cycle phase, and receive opposite regulatory and morphogen perturbations. The daughter receives a new permanent cell ID and records the parent's cell ID. The resulting asymmetry is then stabilized or erased by each daughter's local network inputs. Division stops only when the complete `9,216`-cell hardware pool is occupied.
+Cell-cycle progression is gated by the cell's own ATP, multiplied by the proliferation program, and inhibited by contact density according to the adhesive program. A cell with a completed cycle atomically claims any unoccupied global cell record and divides along an axis dominated by its persistent developmental polarity, with smaller contributions from oscillator phase, measured tissue position, strain, proliferation, and contractile state. Parent and daughter split ATP and biomass, separate mechanically, reset cycle phase, and receive mean-preserving opposite perturbations to morphogens, fate memory, regulatory state, and polarity angle. The daughter receives a new permanent cell ID and records the parent's cell ID. The resulting asymmetry is then stabilized, amplified, or erased by inherited local kinetics and subsequent junction transport. Division stops only when the complete `9,216`-cell hardware pool is occupied.
 
 For direct causal accounting, the cycle update is decomposed into an unconstrained drive `G_i`, a contact brake `C_i`, and the remaining crowding term:
 
@@ -600,7 +601,20 @@ Here `chi_i` is bounded contact inhibition, `z_i^P` is the proliferation output,
 \Delta M_i^{repair}=0.00022\,z_i^R A_i.
 ```
 
-Two contact-averaged morphogen variables combine with radial tissue position and regulatory activity to alter adhesion, contractility, and resource-uptake phenotype. The model therefore supports spatial differentiation without assigning fixed cell classes. These variables are dimensionless regulatory signals; they are not calibrated concentrations of named proteins.
+Two morphogen variables obey a reduced reaction-diffusion update on the persistent cell-junction graph. A same-owner neighbor contributes only when its generation-valid junction fingerprint was refreshed within two steps. For morphogen pair `m_i=(a_i,b_i)`, inherited diffusivity `D`, and junction conductance `g_ij`, the transport term is
+
+```math
+J_{ij}=g_{ij}D(m_j-m_i), \qquad J_{ji}=-J_{ij}.
+```
+
+`g_ij` increases with junction strength, maturation, and both membranes' integrity and decreases with junction load. Activator production includes bounded autocatalysis and inhibitor suppression; inhibitor production responds to activator abundance. Both species have independently inherited basal production and first-order decay. The integrated update is
+
+```math
+m_i(t+1)=\mathrm{clip}\left[m_i(t)+P_i(m_i,z_i)-K_i m_i+
+0.010\sum_{j\in N_i}J_{ij},0,1\right].
+```
+
+The receptor-weighted imbalance updates a slowly changing continuous fate memory. The direction of the local imbalance updates a persistent polarity vector. Fate memory modulates, but does not discretely assign, membrane investment in attack, support, sensing, and traction; polarity enters both traction and division. Morphogen synthesis and transport are included in cellular active work and therefore lower ATP. No radial morphogen target, named cell type, target image, or terminal body plan is supplied. These variables are dimensionless regulatory signals, not calibrated concentrations of named proteins.
 
 An edge is classified as exposed only when its midpoint lies outside every other occupied cell membrane in the same tissue. For exposed edge set `E`, edge length `l_e`, endpoints `a_e,b_e`, midpoint `q_e`, and linearly parameterized segment `p_e(t)=a_e+t(b_e-a_e)`, the tissue boundary centroid and covariance are measured from the polygon segments:
 
@@ -639,7 +653,7 @@ After every cell update, one thread per organism reduces its tissue to:
 (mean substrate forcing, barrier load, environmental frequency, frequency match)
 ```
 
-The next organism update consumes this `304 B` aggregate. With local external cell force `T_i`, recentered cell position `r_i`, tissue mass `m`, and moment of inertia `I`, motion follows `F=sum_i T_i`, `tau=sum_i r_i x T_i`, damped translation, and damped angular integration. The final vectors report inherited-program composition, measured interaction outcomes, and environmental forcing. There is no independent cruise-speed target, pursuit impulse, separation impulse, or agent-level chemotaxis. Complete tissue loss terminates an established organism. This closes the causal path from local chemistry through cell signaling, membrane geometry, force, organism motion, contact, feeding, fusion, and reproduction.
+The next organism update consumes this `336 B` aggregate. With local external cell force `T_i`, recentered cell position `r_i`, tissue mass `m`, and moment of inertia `I`, motion follows `F=sum_i T_i`, `tau=sum_i r_i x T_i`, damped translation, and damped angular integration. The final vectors report inherited-program composition, measured interaction outcomes, environmental forcing, and junction-coupled developmental state. There is no independent cruise-speed target, pursuit impulse, separation impulse, or agent-level chemotaxis. Complete tissue loss terminates an established organism. This closes the causal path from local chemistry through cell signaling, membrane geometry, force, organism motion, contact, feeding, fusion, and reproduction.
 
 ### Causal diagnostics and intervention
 
@@ -1084,7 +1098,9 @@ The executable can also be invoked directly after a build:
 
 `--batch` controls command-buffer submission granularity, not the equations. `--quantum-stride 3` reproduces the default ratio of three biological updates per quantum update. Rendering, visible-cell compaction, bloom, and drawable presentation are omitted. Reaction chemistry, agents, cells, membranes, spatial hashes, contact, connectivity, fission/fusion, tissue reduction, mechanical waves, perturbation cadence, and quantum feedback use the same encoder functions as the interactive application.
 
-The JSONL stream contains a header, exact lineage events, periodic samples, and a terminal summary. Birth records with a physical parent component are classified additionally as fissions. Samples contain living organisms and cells, trophic gain/loss, active and recycled program slots, membrane-derived morphology, junction count/load, the signed energy residual, cell-weighted ATP, integrity, stress, voltage, Ca*, ERK*, division, traction, frequency match, and all invariant counters. `--intervention-step` plus `--post-mechanosensing-gain` defines a scheduled model intervention and forces an exact readback at its boundary. The runner refuses to overwrite an unread lineage-ring interval: reduce `--sample-every` if more than `4,096` events occur between samples.
+The JSONL stream contains a header, exact lineage events, periodic samples, and a terminal summary. Birth records with a physical parent component are classified additionally as fissions. Samples contain living organisms and cells, maximum living generation, largest tissue size, trophic gain/loss, active and recycled program slots, membrane-derived morphology, junction count/load, the signed energy residual, cell-weighted ATP, integrity, stress, voltage, Ca*, ERK*, division, traction, frequency match, morphogen A/B, fate memory, junction transport, morphogen differentiation, polarity coherence, synthesis rate, transport work, and all invariant counters. `--intervention-step` plus `--post-mechanosensing-gain` defines a scheduled model intervention and forces an exact readback at its boundary. The runner refuses to overwrite an unread lineage-ring interval: reduce `--sample-every` if more than `4,096` events occur between samples.
+
+The terminal summary includes a mechanistic developmental qualification. It passes only when the run has at least three samples, remains viable for the final three samples, reaches at least two cells per organism, forms at least one persistent junction with measured morphogen transport above `1e-8`, reaches mean morphogen differentiation of `0.015`, records physical fission with a living descendant generation, retains zero invariant flags, and keeps the maximum absolute energy residual at or below `0.001`. Failure is reported as a failed qualification, not hidden by an aggregate fitness score. These thresholds are model diagnostics for comparing seeded runs; they are not biological viability criteria.
 
 Strict invariant enforcement is enabled by default. The GPU records the first exact step that violates any of these conditions:
 
@@ -1092,7 +1108,7 @@ Strict invariant enforcement is enabled by default. The GPU records the first ex
 - Absolute cellular energy residual does not exceed `256 / 1,048,576` model-energy units per audited step.
 - Every living cell references an occupied program slot with the same generation.
 - Each program slot's living-cell reference count equals an independent GPU recount.
-- Every persistent junction has live endpoints, a matching permanent-ID fingerprint, and age within the stale horizon.
+- Every persistent junction has live same-owner endpoints and a matching permanent-ID fingerprint; entries older than the `180`-step horizon are atomically expired during the audit.
 - Every living membrane has finite state, positive orientation and area, bounded integrity, and bounded perimeter.
 - Every living cell has a live owner and component root, and all cells assigned to one organism resolve to exactly one membrane-connectivity root after component reassignment.
 
@@ -1147,9 +1163,9 @@ It performs:
 
 1. Standalone Metal compilation of `Replicator.metal` with `xcrun metal`.
 2. Swift build of the `NumiAutomata` executable.
-3. Ten Swift tests covering Pareto dominance, collapse/noise rejection, diversification, novelty, preservation of different successful strategies, lineage distance, persistent-clade criteria, differenced lag alignment, zero-variance rejection, and paired-effect estimation.
+3. Fourteen Swift tests covering Pareto dominance, collapse/noise rejection, diversification, novelty, preservation of different successful strategies, lineage distance, persistent-clade criteria, differenced lag alignment, zero-variance rejection, paired-effect estimation, and conjunctive developmental qualification.
 
-The current suite contains ten passing tests.
+The current suite contains fourteen passing tests.
 
 ### Project layout
 
@@ -1157,6 +1173,7 @@ The current suite contains ten passing tests.
 Sources/AutogenesisCore/
   AdaptiveComplexity.swift        Pareto, novelty, and measurement evaluator
   CausalAnalysis.swift            Lagged association and paired-effect statistics
+  DevelopmentalQualification.swift Mechanistic long-run qualification gate
 
 Sources/AutogenesisMetal/
   AutogenesisMetalApp.swift       SwiftUI application entry point
@@ -1170,6 +1187,7 @@ Sources/AutogenesisMetal/
 
 Tests/AutogenesisCoreTests/
   AdaptiveComplexityTests.swift   Evaluator invariants
+  DevelopmentalQualificationTests.swift Qualification-gate invariants
 
 Docs/
   AUTOGENESIS_ARCHITECTURE.md     Runtime contract and state persistence

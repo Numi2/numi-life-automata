@@ -1,3 +1,4 @@
+import AutogenesisCore
 import Foundation
 import MetalKit
 import Darwin
@@ -213,6 +214,8 @@ struct ExperimentSample: Codable {
     let stepsPerSecond: Double
     let livingOrganisms: Int
     let livingCells: Int
+    let maximumLivingGeneration: UInt32
+    let largestTissueCellCount: Int
     let births: UInt64
     let deaths: UInt64
     let fissions: UInt64
@@ -225,6 +228,10 @@ struct ExperimentSample: Codable {
     let trophicGain: Double
     let trophicLoss: Double
     let energyResidual: Double
+    let cellularEnergyHarvest: Double
+    let cellularMaintenance: Double
+    let cellularActiveWork: Double
+    let cellularDissipation: Double
     let meanCellsPerOrganism: Double
     let meanTissueRadius: Double
     let meanShapeIndex: Double
@@ -239,6 +246,14 @@ struct ExperimentSample: Codable {
     let dividingCellFraction: Double
     let meanCellTraction: Double
     let meanFrequencyMatch: Double
+    let meanMorphogenActivator: Double
+    let meanMorphogenInhibitor: Double
+    let meanDevelopmentalFateMemory: Double
+    let meanJunctionMorphogenTransport: Double
+    let meanMorphogenDifferentiation: Double
+    let meanDevelopmentalPolarityCoherence: Double
+    let meanMorphogenSynthesisRate: Double
+    let meanMorphogenTransportWork: Double
     let invariantReport: ExperimentInvariantReport
 }
 
@@ -252,6 +267,7 @@ struct ExperimentSummary: Codable {
     let fissions: UInt64
     let fusions: UInt64
     let invariantReport: ExperimentInvariantReport
+    let developmentalQualification: DevelopmentalQualification
     let finalSample: ExperimentSample?
     let outputPath: String
 }
@@ -330,6 +346,7 @@ enum HeadlessExperimentCLI {
         let summary = result.summary
         print(
             "experiment_complete=\(summary.completed ? 1 : 0) " +
+            "development_qualified=\(summary.developmentalQualification.passed ? 1 : 0) " +
             "steps=\(summary.step) steps_per_second=" +
             String(format: "%.1f", summary.meanStepsPerSecond) +
             " output=\(summary.outputPath)"
