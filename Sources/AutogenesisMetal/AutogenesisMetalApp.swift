@@ -25,12 +25,19 @@ enum NumiAutomataEntrypoint {
     @MainActor
     static func main() {
         let arguments = CommandLine.arguments.dropFirst()
-        guard arguments.first == "experiment" else {
+        guard let command = arguments.first else {
             NumiAutomataApp.main()
             return
         }
         do {
-            try HeadlessExperimentCLI.run(arguments: arguments.dropFirst())
+            switch command {
+            case "experiment":
+                try HeadlessExperimentCLI.run(arguments: arguments.dropFirst())
+            case "causal-experiment":
+                try PairedCausalExperimentCLI.run(arguments: arguments.dropFirst())
+            default:
+                NumiAutomataApp.main()
+            }
         } catch {
             fputs("numi-experiment: \(error.localizedDescription)\n", stderr)
             exit(EXIT_FAILURE)

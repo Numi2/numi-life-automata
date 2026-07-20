@@ -637,9 +637,21 @@ The next organism update consumes this `304 B` aggregate. With local external ce
 
 ### Causal diagnostics and intervention
 
-The **Causal terms** view renders direct terms retained from the update equations; it does not infer them from color or population covariance. At mechanochemical scale, cyan fronts encode the factual-minus-edge-zero mechanics-to-Ca* effect, magenta conduits encode the Ca*-to-ERK* effect, green directional structures encode ERK*-dependent traction, and orange interiors encode signaling ATP cost. The prior mechanics-to-voltage, unconstrained cycle-drive, contact-suppression, and repair terms remain in the aggregate and organism rendering. The inspector reports cell-count-weighted means and labels active-state values separately from direct edge terms.
+Numi Automata reports three distinct evidence classes.
 
-The ECG toolbar control performs one explicit model intervention by setting `g_mech` from `1` to `0`, or restoring it to `1`. This removes both mechanics-to-voltage and mechanics-to-Ca* update edges without stopping the mechanical field or resonator. The next asynchronous metric sample records the single-trajectory changes in mean voltage, Ca*, ERK*, and dividing fraction. This is an ablation response, not a paired counterfactual: the simulator does not clone the complete world into simultaneous treated and control branches. Separately, the UI computes one-sample-lag Pearson correlations from metric history. Those correlations are labeled observational and are never presented as intervention effects. This separation follows the structural-dynamical distinction between an explicit update mechanism and observations collected from its trajectory [24].
+**Structural update contrasts.** The **Causal terms** view renders direct terms retained from the update equations; it does not infer them from color or population covariance. At mechanochemical scale, cyan fronts encode the factual-minus-edge-zero mechanics-to-Ca* effect, magenta conduits encode the Ca*-to-ERK* effect, green directional structures encode ERK*-dependent traction, and orange interiors encode signaling ATP cost. The prior mechanics-to-voltage, unconstrained cycle-drive, contact-suppression, and repair terms remain in the aggregate and organism rendering. These are exact one-update contrasts inside the specified model, conditional on the complete pre-update state. They are not estimates of biological effects outside the simulation.
+
+**Observational trajectory association.** The UI predeclares one metric-sample lag and computes Pearson association between first differences:
+
+```text
+delta X[t] = X[t] - X[t-1]
+r_delta(1) = corr(delta X[t], delta Y[t+1])
+n_eff = min(n, n (1 - rho_X(1) rho_Y(1)) / (1 + rho_X(1) rho_Y(1)))
+```
+
+First differencing reduces correlation caused only by shared slow drift. The displayed 95% interval applies the Fisher transformation using `n_eff`; `n_eff` is bounded by the nominal pair count. This effective-count equation is an AR(1)-style approximation, not a general correction for nonlinear dependence or long-memory dynamics. It is not proof of direction or causation. The fixed lag avoids selecting whichever lag appears strongest after observation. At least eight aligned difference pairs are required [32].
+
+**Paired model intervention.** The ECG toolbar control remains a single evolving-trajectory ablation and is reported only as a response. For an actual model-level treatment contrast, `causal-experiment` runs a control and treatment from the same seed. Both execute identical equations with mechanics input gain `1` through the intervention step; the treatment then sets mechanics-to-voltage and mechanics-to-Ca* gain to `0`, while the control retains `1`. The runner requires exact equality of the recorded pre-intervention outcome vector, excludes any pair with a GPU invariant flag, and computes treatment-minus-control within each seed. Across at least four distinct replicate seeds derived from one master seed by SplitMix64, it reports the paired mean difference, difference standard deviation, standard error, and two-sided 95% paired-*t* interval [24, 33]. Common seeds reduce variation unrelated to treatment. The 14 endpoint intervals are marginal and have no multiple-comparison adjustment; they are not simultaneous familywise confidence statements. The estimand is explicitly the average effect in this pseudorandom seeded-model distribution at the configured endpoint, not an empirical effect in living tissue.
 
 ## Persistent agents
 
@@ -1063,7 +1075,7 @@ The executable can also be invoked directly after a build:
 
 `--batch` controls command-buffer submission granularity, not the equations. `--quantum-stride 3` reproduces the default ratio of three biological updates per quantum update. Rendering, visible-cell compaction, bloom, and drawable presentation are omitted. Reaction chemistry, agents, cells, membranes, spatial hashes, contact, connectivity, fission/fusion, tissue reduction, mechanical waves, perturbation cadence, and quantum feedback use the same encoder functions as the interactive application.
 
-The JSONL stream contains a header, exact lineage events, periodic samples, and a terminal summary. Birth records with a physical parent component are classified additionally as fissions. Samples contain living organisms and cells, trophic gain/loss, active and recycled program slots, membrane-derived morphology, junction count/load, the signed energy residual, and all invariant counters. The runner refuses to overwrite an unread lineage-ring interval: reduce `--sample-every` if more than `4,096` events occur between samples.
+The JSONL stream contains a header, exact lineage events, periodic samples, and a terminal summary. Birth records with a physical parent component are classified additionally as fissions. Samples contain living organisms and cells, trophic gain/loss, active and recycled program slots, membrane-derived morphology, junction count/load, the signed energy residual, cell-weighted ATP, integrity, stress, voltage, Ca*, ERK*, division, traction, frequency match, and all invariant counters. `--intervention-step` plus `--post-mechanosensing-gain` defines a scheduled model intervention and forces an exact readback at its boundary. The runner refuses to overwrite an unread lineage-ring interval: reduce `--sample-every` if more than `4,096` events occur between samples.
 
 Strict invariant enforcement is enabled by default. The GPU records the first exact step that violates any of these conditions:
 
@@ -1076,6 +1088,21 @@ Strict invariant enforcement is enabled by default. The GPU records the first ex
 - Every living cell has a live owner and component root, and all cells assigned to one organism resolve to exactly one membrane-connectivity root after component reassignment.
 
 `--audit-every N` changes the invariant sampling interval; `--no-strict` records violations without terminating. In strict mode the exact first failing step is retained on the GPU, while CPU failure delivery occurs at the next command-buffer boundary.
+
+### Paired causal GPU experiments
+
+Run replicated control/treatment pairs without rendering:
+
+```bash
+./Scripts/run-causal-experiment.sh \
+  --pairs 8 \
+  --seed 1 \
+  --steps 12000 \
+  --intervention-step 6000 \
+  --output Experiments/mechanosensing-paired.jsonl
+```
+
+Each derived seed is run twice. The control remains at `g_mech = 1`; treatment changes to `g_mech = 0` only after step `6000`. The JSONL journal contains one design header, one record per seed pair, and one summary containing fourteen named paired endpoint estimates with units and 95% intervals. Count, physiology, signaling, traction, frequency-match, morphology, and trophic outcomes are retained separately. The run is complete only when every pair matches at the observed baseline, every pair has zero invariant flags, and every endpoint estimate is defined.
 
 ### Controls
 
@@ -1110,18 +1137,20 @@ It performs:
 
 1. Standalone Metal compilation of `Replicator.metal` with `xcrun metal`.
 2. Swift build of the `NumiAutomata` executable.
-3. Seven Swift tests covering Pareto dominance, collapse/noise rejection, diversification, novelty, preservation of different successful strategies, lineage distance, and persistent-clade criteria.
+3. Ten Swift tests covering Pareto dominance, collapse/noise rejection, diversification, novelty, preservation of different successful strategies, lineage distance, persistent-clade criteria, differenced lag alignment, zero-variance rejection, and paired-effect estimation.
 
-The current suite contains seven passing tests.
+The current suite contains ten passing tests.
 
 ### Project layout
 
 ```text
 Sources/AutogenesisCore/
   AdaptiveComplexity.swift        Pareto, novelty, and measurement evaluator
+  CausalAnalysis.swift            Lagged association and paired-effect statistics
 
 Sources/AutogenesisMetal/
   AutogenesisMetalApp.swift       SwiftUI application entry point
+  CausalExperiment.swift          Paired seeded intervention design and estimates
   ContentView.swift               Numi observation interface
   EvolutionStore.swift            Camera, events, snapshots, and controls
   EvolutionRenderer.swift         Metal resources and command graph
@@ -1137,6 +1166,7 @@ Docs/
   Media/                          Real application captures used in this README
 
 Scripts/
+  run-causal-experiment.sh        Release-build paired intervention launcher
   run-gpu-experiment.sh           Release-build headless experiment launcher
 ```
 
@@ -1155,10 +1185,10 @@ The current implementation deliberately makes narrower claims than the project o
 9. **Reduced cell biology.** Cells implement ATP bookkeeping, excitable voltage, dimensionless Ca*/ERK* propagation with refractory suppression, phase oscillation, an abstract sparse regulatory graph, twelve-vertex deformable membranes, force transmission, contact inhibition, division, and apoptosis. The signaling states are phenomenological and omit named channel and pathway kinetics. Cells also omit chromatin, independently simulated organelles, three-dimensional geometry, and calibrated molecular kinetics.
 10. **Reduced biomechanics.** Polygon forces are dimensionless edge, bending, area, contraction, membrane-support contact, and persistent-junction terms; the extracellular medium is a bounded damped vector wave. Neither is a calibrated viscoelastic constitutive model, finite-element tissue, or measured extracellular matrix. Cross-lineage fusion is a thresholded adhesion rule, not a measured fusion pathway. No separate organism envelope participates in physics or rendering.
 11. **Conserved but uncalibrated energy units.** Substrate claims, ATP and biomass storage, work, heat, and detrital return are closed by an explicit global residual, but the energy unit is dimensionless. It does not represent joules, ATP molecule counts, temperature, or measured thermodynamic free energy.
-12. **Model-internal causal scope.** The mechanics-to-Ca* and Ca*-to-ERK* values are local factual-minus-single-edge-zero update differences; ERK*-traction and signaling cost are direct equation terms. The ECG ablation changes the shared mechanical coupling gain, but its before/after event is a single evolving trajectory, not a randomized controlled experiment or simultaneous paired world.
+12. **Model-internal causal scope.** The mechanics-to-Ca* and Ca*-to-ERK* values are local factual-minus-single-edge-zero update differences; ERK*-traction and signaling cost are direct equation terms. The interactive ECG response remains one uncontrolled trajectory. The headless paired estimator identifies an intervention effect only within the implemented equations and pseudorandom seeded initialization distribution. Its fourteen endpoint intervals are marginal per-outcome intervals without familywise or false-discovery correction, and generated seeds are not samples from a measured biological population.
 13. **Approximate program richness.** Mixed-program fraction is counted exactly relative to the component's dominant program. Richness is the population count of a 32-bit hashed fingerprint and is therefore a collision-prone lower bound, not an exact count or a species estimate.
 
-These limits define concrete research directions: dynamically extensible genome storage, three-dimensional membranes, calibrated reaction systems, paired treated/control world branches, long-run clade statistics, and cross-device performance characterization.
+These limits define concrete research directions: dynamically extensible genome storage, three-dimensional membranes, calibrated reaction systems, factorial and time-varying interventions, long-run clade statistics, and cross-device performance characterization.
 
 ## References
 
@@ -1193,6 +1223,8 @@ These limits define concrete research directions: dynamically extensible genome 
 29. M. K. M. Kim, M. J. Burns, M. E. Serjeant, and C. A. Séguin, “The mechano-response of murine annulus fibrosus cells to cyclic tensile strain is frequency dependent,” *JOR Spine*, 3(4), e1114, 2020. [doi:10.1002/jsp2.1114](https://doi.org/10.1002/jsp2.1114)
 30. M. Okada et al., “Mechanochemical mechanism underlying intercellular Ca2+ wave propagation and collective cell migration,” *Nature Communications*, 16, 2025. [doi:10.1038/s41467-025-65474-9](https://doi.org/10.1038/s41467-025-65474-9)
 31. Apple, “Indirect buffers,” *Metal Best Practices Guide*. [developer.apple.com](https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/IndirectBuffers.html)
+32. B. J. Pyper and R. M. Peterman, “Comparison of methods to account for autocorrelation in correlation analyses of fish data,” *Canadian Journal of Fisheries and Aquatic Sciences*, 55(9), 2127-2140, 1998. [doi:10.1139/f98-104](https://doi.org/10.1139/f98-104)
+33. J. P. C. Kleijnen, “Analyzing Simulation Experiments with Common Random Numbers,” *Management Science*, 34(1), 65-74, 1988. [doi:10.1287/mnsc.34.1.65](https://doi.org/10.1287/mnsc.34.1.65)
 
 ---
 

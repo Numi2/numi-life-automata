@@ -42,12 +42,14 @@ private struct HeadlessReadbackBuffers {
 extension EvolutionRenderer {
     func runHeadlessExperiment(
         configuration: HeadlessExperimentConfiguration,
-        journal: ExperimentJournal
-    ) throws -> ExperimentSummary {
+        journal: ExperimentJournal,
+        reportProgress: Bool = true
+    ) throws -> HeadlessExperimentResult {
         var runSettings = settings
         runSettings.isRunning = true
         runSettings.resetToken = UInt64(configuration.seed)
         runSettings.stepsPerFrame = 1
+        runSettings.mechanosensingGain = configuration.mechanosensing.baselineGain
         totalSteps = 0
         quantumStep = 0
         generation = 0
@@ -72,7 +74,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 1,
+            schemaVersion: 2,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -86,12 +88,21 @@ extension EvolutionRenderer {
         var fissions: UInt64 = 0
         var fusions: UInt64 = 0
         var latestSample: ExperimentSample?
+        var interventionSample: ExperimentSample?
 
         while totalSteps < configuration.steps {
             let remaining = configuration.steps - totalSteps
             let untilSample = nextSample > totalSteps ? nextSample - totalSteps : 1
+            let untilIntervention: UInt64
+            if let interventionStep = configuration.mechanosensing.interventionStep,
+               interventionStep > totalSteps {
+                untilIntervention = interventionStep - totalSteps
+            } else {
+                untilIntervention = .max
+            }
             let encodedStepCount = Int(min(
-                UInt64(configuration.batchSize), min(remaining, untilSample)
+                UInt64(configuration.batchSize),
+                min(remaining, min(untilSample, untilIntervention))
             ))
             guard let commandBuffer = commandQueue.makeCommandBuffer() else {
                 throw EvolutionRendererError.resourceAllocation("headless simulation batch")
@@ -101,9 +112,12 @@ extension EvolutionRenderer {
             for _ in 0..<encodedStepCount {
                 let completedStep = totalSteps + 1
                 let sampleBoundary = completedStep == nextSample ||
-                    completedStep == configuration.steps
+                    completedStep == configuration.steps ||
+                    completedStep == configuration.mechanosensing.interventionStep
                 let audit = completedStep.isMultiple(of: configuration.auditInterval) ||
                     sampleBoundary
+                runSettings.mechanosensingGain = configuration.mechanosensing
+                    .gain(forCompletedStep: completedStep)
                 encodeSimulationStep(
                     into: commandBuffer,
                     settings: runSettings,
@@ -127,7 +141,11 @@ extension EvolutionRenderer {
                 }
             }
 
-            let fullReadback = totalSteps == nextSample || totalSteps == configuration.steps
+            let periodicSampleBoundary = totalSteps == nextSample
+            let interventionBoundary = totalSteps ==
+                configuration.mechanosensing.interventionStep
+            let fullReadback = periodicSampleBoundary ||
+                interventionBoundary || totalSteps == configuration.steps
             if fullReadback {
                 encodeHeadlessReadback(readback, into: commandBuffer, full: true)
             } else if auditedInBatch && configuration.strictInvariants {
@@ -153,18 +171,25 @@ extension EvolutionRenderer {
                     fissions: &fissions,
                     fusions: &fusions
                 )
+                if interventionBoundary {
+                    interventionSample = latestSample
+                }
                 batchReport = latestSample?.invariantReport ?? batchReport
-                print(
-                    "experiment_step=\(totalSteps) organisms=" +
-                    "\(latestSample?.livingOrganisms ?? 0) cells=" +
-                    "\(latestSample?.livingCells ?? 0) steps_per_second=" +
-                    String(format: "%.1f", latestSample?.stepsPerSecond ?? 0) +
-                    " invariants=0x\(String(batchReport?.flags ?? 0, radix: 16))"
-                )
-                nextSample = min(
-                    configuration.steps,
-                    totalSteps &+ configuration.sampleInterval
-                )
+                if reportProgress {
+                    print(
+                        "experiment_step=\(totalSteps) organisms=" +
+                        "\(latestSample?.livingOrganisms ?? 0) cells=" +
+                        "\(latestSample?.livingCells ?? 0) steps_per_second=" +
+                        String(format: "%.1f", latestSample?.stepsPerSecond ?? 0) +
+                        " invariants=0x\(String(batchReport?.flags ?? 0, radix: 16))"
+                    )
+                }
+                if periodicSampleBoundary {
+                    nextSample = min(
+                        configuration.steps,
+                        totalSteps &+ configuration.sampleInterval
+                    )
+                }
             }
 
             if configuration.strictInvariants,
@@ -202,6 +227,7 @@ extension EvolutionRenderer {
                     fissions: fissions,
                     fusions: fusions,
                     invariantReport: report,
+                    finalSample: latestSample,
                     outputPath: journal.outputURL.path
                 )
                 try journal.append("summary", summary)
@@ -225,10 +251,14 @@ extension EvolutionRenderer {
             fissions: fissions,
             fusions: fusions,
             invariantReport: finalReport,
+            finalSample: latestSample,
             outputPath: journal.outputURL.path
         )
         try journal.append("summary", summary)
-        return summary
+        return HeadlessExperimentResult(
+            summary: summary,
+            interventionSample: interventionSample
+        )
     }
 
     private func makeHeadlessReadbackBuffers() throws -> HeadlessReadbackBuffers {
@@ -411,6 +441,7 @@ extension EvolutionRenderer {
             $0 + max(Int(aggregates[$1].physiology.x.rounded()), 0)
         }
         let inverseOrganisms = 1.0 / Double(max(living.count, 1))
+        let inverseCells = 1.0 / Double(max(livingCellCount, 1))
         let meanCells = Double(livingCellCount) * inverseOrganisms
         let meanRadius = living.reduce(0.0) {
             $0 + Double(max(aggregates[$1].morphology.z, 0))
@@ -429,6 +460,13 @@ extension EvolutionRenderer {
         }
         let trophicLoss = living.reduce(0.0) {
             $0 + Double(max(aggregates[$1].trophic.z, 0))
+        }
+        func cellWeightedMean(_ value: (CellAggregate) -> Float) -> Double {
+            living.reduce(0.0) { total, index in
+                let aggregate = aggregates[index]
+                let cellCount = Double(max(aggregate.physiology.x, 0))
+                return total + Double(value(aggregate)) * cellCount
+            } * inverseCells
         }
 
         let slots = readback.programSlots.contents().bindMemory(
@@ -476,6 +514,15 @@ extension EvolutionRenderer {
             meanShapeIndex: meanShape,
             meanElongation: meanElongation,
             meanExposedMembraneLength: meanExposedMembrane,
+            meanCellATP: cellWeightedMean { $0.physiology.y },
+            meanCellIntegrity: cellWeightedMean { $0.physiology.z },
+            meanCellStress: cellWeightedMean { $0.physiology.w },
+            meanMembraneVoltage: cellWeightedMean { $0.dynamics.x },
+            meanCalciumActivity: cellWeightedMean { $0.signaling.x },
+            meanERKActivity: cellWeightedMean { $0.signaling.y },
+            dividingCellFraction: cellWeightedMean { $0.morphology.w },
+            meanCellTraction: cellWeightedMean { $0.tissueMotion.w },
+            meanFrequencyMatch: cellWeightedMean { $0.environment.w },
             invariantReport: invariant
         )
         try journal.append("sample", sample)

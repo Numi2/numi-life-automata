@@ -132,6 +132,48 @@ import Testing
     #expect(persistent.meanMorphologyDistance > 0.5)
 }
 
+@Test func laggedAssociationUsesDifferencedFixedLagPairs() {
+    let increments = (0..<40).map { index in
+        [0.8, -0.3, 0.5, 0.1, -0.6, 0.4][index % 6]
+    }
+    var cause = [0.0]
+    for increment in increments {
+        cause.append(cause.last! + increment)
+    }
+    var effectDifferences = [0.0]
+    effectDifferences.append(contentsOf: increments.dropLast())
+    var effect = [0.0]
+    for difference in effectDifferences {
+        effect.append(effect.last! + difference)
+    }
+
+    let estimate = CausalAnalysis.laggedDifferenceAssociation(
+        cause: cause,
+        effect: Array(effect.prefix(cause.count))
+    )
+    #expect(estimate != nil)
+    #expect((estimate?.correlation ?? 0) > 0.999)
+    #expect(estimate?.lag == 1)
+    #expect(estimate?.usesFirstDifferences == true)
+    #expect((estimate?.effectiveSampleCount ?? 0) <= Double(estimate?.nominalSampleCount ?? 0))
+}
+
+@Test func laggedAssociationRejectsZeroVariance() {
+    let values = Array(repeating: 0.5, count: 20)
+    #expect(CausalAnalysis.laggedDifferenceAssociation(cause: values, effect: values) == nil)
+}
+
+@Test func pairedEffectUsesWithinSeedDifferences() {
+    let estimate = CausalAnalysis.pairedEffect(
+        control: [1, 2, 3, 4],
+        treatment: [2, 4, 4, 7]
+    )
+    #expect(estimate?.pairCount == 4)
+    #expect(abs((estimate?.meanDifference ?? 0) - 1.75) < 1e-12)
+    #expect((estimate?.confidenceLower ?? 0) < 1.75)
+    #expect((estimate?.confidenceUpper ?? 0) > 1.75)
+}
+
 private func sampleMetrics(
     occupied: Double,
     activity: Double,

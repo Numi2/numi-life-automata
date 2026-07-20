@@ -1,3 +1,4 @@
+import AutogenesisCore
 import SwiftUI
 
 struct ContentView: View {
@@ -321,7 +322,9 @@ struct ContentView: View {
                 observerMetric("Contact load ×1k", value: scaledRate(store.snapshot.cellularContactLoad, by: 1_000), tint: .red, values: store.history.map(\.cellularContactLoad))
                 observerMetric("Trophic gain / loss ×10k", value: "\(scaledRate(store.snapshot.cellularTrophicGain, by: 10_000)) / \(scaledRate(store.snapshot.cellularTrophicLoss, by: 10_000))", tint: .yellow, values: store.history.map(\.cellularTrophicGain))
                 observerMetric("Contact Δcycle ×1k", value: causalRate(store.snapshot.meanContactSuppression), tint: .mint, values: store.history.map(\.meanContactSuppression))
-                observerMetric("Lag r(strain,Vₘ)", value: strainVoltageCorrelationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
+                observerMetric("Obs Δstrain → ΔVₘ", value: strainVoltageAssociationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
+                observerMetric("Obs ΔCa* → ΔERK*", value: calciumERKAssociationLabel, tint: .purple, values: store.history.map(\.meanCalciumActivity))
+                observerMetric("Obs Δmatch → Δtraction", value: frequencyTractionAssociationLabel, tint: .cyan, values: store.history.map(\.meanFrequencyMatch))
             } else if store.observationZoom >= 18 {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
                 observerMetric("Cells / tissues", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
@@ -350,7 +353,8 @@ struct ContentView: View {
                     observerMetric("Ca* → ERK* ×1k", value: causalRate(store.snapshot.meanCalciumERKEffect), tint: .pink, values: store.history.map(\.meanCalciumERKEffect))
                     observerMetric("ERK* → traction ×10k", value: scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000), tint: .mint, values: store.history.map(\.meanERKTractionEffect))
                     observerMetric("Signal ATP cost ×10k", value: scaledRate(store.snapshot.cellularSignalingCost, by: 10_000), tint: .orange, values: store.history.map(\.cellularSignalingCost))
-                    observerMetric("Lag r(strain,Vₘ)", value: strainVoltageCorrelationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
+                    observerMetric("Obs Δstrain → ΔVₘ", value: strainVoltageAssociationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
+                    observerMetric("Obs ΔCa* → ΔERK*", value: calciumERKAssociationLabel, tint: .purple, values: store.history.map(\.meanCalciumActivity))
                 } else {
                     observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
                     observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .pink, values: store.history.map(\.meanDevelopmentalEdgeCount))
@@ -491,10 +495,12 @@ struct ContentView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
                 Text(value)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
                     .contentTransition(.numericText())
             }
-            .frame(width: 116, alignment: .leading)
+            .frame(width: 148, alignment: .leading)
 
             MetricSparkline(values: values, color: tint)
                 .frame(height: 28)
@@ -622,7 +628,7 @@ struct ContentView: View {
         let life = max(store.snapshot.organismCount, store.observableAgentCount)
         if store.displayMode == .causality, zoom < 64 {
             let edgeState = store.mechanosensingBlocked ? "ablated (gain = 0)" : "active (gain = 1)"
-            return "Mechanics→Ca* and Ca*→ERK* are factual-minus-single-edge-zero update differences. ERK*→traction and signaling ATP cost are direct equation terms. Mean values are \(causalRate(store.snapshot.meanMechanicsCalciumEffect)) ×10⁻³, \(causalRate(store.snapshot.meanCalciumERKEffect)) ×10⁻³, and \(scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000)) ×10⁻⁴ for the first three terms. Ca* and ERK* are dimensionless excitable-state variables, not resolved molecular concentrations. Mechanics gating is \(edgeState); lagged r remains an observational diagnostic."
+            return "Mechanics→Ca* and Ca*→ERK* are factual-minus-single-edge-zero update differences. ERK*→traction and signaling ATP cost are direct equation terms. Mean values are \(causalRate(store.snapshot.meanMechanicsCalciumEffect)) ×10⁻³, \(causalRate(store.snapshot.meanCalciumERKEffect)) ×10⁻³, and \(scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000)) ×10⁻⁴ for the first three terms. Ca* and ERK* are dimensionless excitable-state variables, not resolved molecular concentrations. Mechanics gating is \(edgeState). Observational rows use predeclared one-sample-lag first-difference correlations with autocorrelation-adjusted 95% intervals; they are not causal effects."
         }
         if zoom >= 512 {
             return "ψ = (ψ₀, ψ₁) is stored as four real components on a 1024² periodic lattice. Each update applies a local coin rotation and alternates conditional shifts along x and y. Measured Σρ = \(quantumNormValue)."
@@ -828,45 +834,50 @@ struct ContentView: View {
         String(format: "%+.3f", value * scale)
     }
 
-    private var strainVoltageCorrelationLabel: String {
-        laggedCorrelation(
+    private var strainVoltageAssociationLabel: String {
+        laggedAssociation(
             cause: { $0.meanTissueStrain },
             effect: { $0.meanMembraneVoltage }
         )
     }
 
-    private var atpDivisionCorrelationLabel: String {
-        laggedCorrelation(
-            cause: { $0.meanCellATP },
-            effect: {
-                Double($0.dividingCellCount) / Double(max($0.cellCount, 1))
-            }
+    private var calciumERKAssociationLabel: String {
+        laggedAssociation(
+            cause: { $0.meanCalciumActivity },
+            effect: { $0.meanERKActivity }
         )
     }
 
-    private func laggedCorrelation(
+    private var frequencyTractionAssociationLabel: String {
+        laggedAssociation(
+            cause: { $0.meanFrequencyMatch },
+            effect: { $0.meanCellGeneratedForce }
+        )
+    }
+
+    private func laggedAssociation(
         cause: (EvolutionSnapshot) -> Double,
         effect: (EvolutionSnapshot) -> Double
     ) -> String {
-        guard store.history.count >= 6 else { return "pending" }
-        let causes = store.history.dropLast().map(cause)
-        let effects = store.history.dropFirst().map(effect)
-        let count = Double(causes.count)
-        let meanCause = causes.reduce(0, +) / count
-        let meanEffect = effects.reduce(0, +) / count
-        var covariance = 0.0
-        var causeVariance = 0.0
-        var effectVariance = 0.0
-        for index in causes.indices {
-            let causeDelta = causes[index] - meanCause
-            let effectDelta = effects[index] - meanEffect
-            covariance += causeDelta * effectDelta
-            causeVariance += causeDelta * causeDelta
-            effectVariance += effectDelta * effectDelta
+        guard let estimate = CausalAnalysis.laggedDifferenceAssociation(
+            cause: store.history.map(cause),
+            effect: store.history.map(effect)
+        ) else { return store.history.count < 10 ? "collecting n≥8" : "zero variance" }
+        guard let lower = estimate.confidenceLower,
+              let upper = estimate.confidenceUpper else {
+            return String(
+                format: "rΔ₁ %+.2f · nₑ %.1f",
+                estimate.correlation,
+                estimate.effectiveSampleCount
+            )
         }
-        let scale = sqrt(causeVariance * effectVariance)
-        guard scale > 1e-12 else { return "indeterminate" }
-        return String(format: "%+.2f", min(max(covariance / scale, -1), 1))
+        return String(
+            format: "rΔ₁ %+.2f [%+.2f,%+.2f] nₑ%.1f",
+            estimate.correlation,
+            lower,
+            upper,
+            estimate.effectiveSampleCount
+        )
     }
 
     private var membraneGeometryLabel: String {
