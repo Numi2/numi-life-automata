@@ -34,6 +34,7 @@ enum EvolutionEventKind: Sendable, Equatable {
     case equilibrium
     case intervention
     case observation
+    case fusion
 }
 
 struct EvolutionEvent: Identifiable, Sendable, Equatable {
@@ -121,6 +122,17 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanInheritedTractionGain: Double = 0
     var meanDetachmentThreshold: Double = 0
     var meanPropaguleInvestment: Double = 0
+    var meanCellsPerOrganism: Double = 0
+    var largestTissueCellCount: Int = 0
+    var cellPoolUtilization: Double = 0
+    var heritableProgramCount: Int = 0
+    var heritableProgramPoolUtilization: Double = 0
+    var meanMixedProgramCellFraction: Double = 0
+    var maximumProgramRichness: Int = 0
+    var meanProgramATPExchange: Double = 0
+    var meanProgramRejection: Double = 0
+    var meanProgramRecognitionCompatibility: Double = -1
+    var meanProgramNetContribution: Double = 0
     var metrics: WorldMetrics = .empty
     var fitness = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
 
@@ -190,6 +202,17 @@ struct EvolutionSnapshot: Sendable, Equatable {
         meanInheritedTractionGain: Double = 0,
         meanDetachmentThreshold: Double = 0,
         meanPropaguleInvestment: Double = 0,
+        meanCellsPerOrganism: Double = 0,
+        largestTissueCellCount: Int = 0,
+        cellPoolUtilization: Double = 0,
+        heritableProgramCount: Int = 0,
+        heritableProgramPoolUtilization: Double = 0,
+        meanMixedProgramCellFraction: Double = 0,
+        maximumProgramRichness: Int = 0,
+        meanProgramATPExchange: Double = 0,
+        meanProgramRejection: Double = 0,
+        meanProgramRecognitionCompatibility: Double = -1,
+        meanProgramNetContribution: Double = 0,
         metrics: WorldMetrics = .empty,
         fitness: FitnessVector = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
     ) {
@@ -258,6 +281,17 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.meanInheritedTractionGain = meanInheritedTractionGain
         self.meanDetachmentThreshold = meanDetachmentThreshold
         self.meanPropaguleInvestment = meanPropaguleInvestment
+        self.meanCellsPerOrganism = meanCellsPerOrganism
+        self.largestTissueCellCount = largestTissueCellCount
+        self.cellPoolUtilization = cellPoolUtilization
+        self.heritableProgramCount = heritableProgramCount
+        self.heritableProgramPoolUtilization = heritableProgramPoolUtilization
+        self.meanMixedProgramCellFraction = meanMixedProgramCellFraction
+        self.maximumProgramRichness = maximumProgramRichness
+        self.meanProgramATPExchange = meanProgramATPExchange
+        self.meanProgramRejection = meanProgramRejection
+        self.meanProgramRecognitionCompatibility = meanProgramRecognitionCompatibility
+        self.meanProgramNetContribution = meanProgramNetContribution
         self.metrics = metrics
         self.fitness = fitness
     }
@@ -298,6 +332,7 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var history: [EvolutionSnapshot] = []
     @Published private(set) var events: [EvolutionEvent] = []
     @Published private(set) var founderCount = 0
+    @Published private(set) var fusionEventCount = 0
     @Published private(set) var followedAgentID: Int?
     @Published private(set) var observableAgentCount = 0
     @Published private(set) var lineageAnalysis = LineageAnalysis.empty
@@ -344,6 +379,7 @@ final class EvolutionStore: ObservableObject {
         events.removeAll(keepingCapacity: true)
         addedColonyCount = 0
         founderCount = 0
+        fusionEventCount = 0
         lineageAnalysis = .empty
         lineageBranches.removeAll(keepingCapacity: true)
         lineageTracker.reset()
@@ -569,6 +605,19 @@ final class EvolutionStore: ObservableObject {
                         record.step,
                         record.energy,
                         record.morphology.x
+                    )
+                )
+            case .fusion:
+                fusionEventCount += 1
+                recordEvent(
+                    generation: Int(record.generation),
+                    kind: .fusion,
+                    title: "Physical fusion: birth ID \(record.birthID) incorporated birth ID \(record.parentBirthID)",
+                    detail: String(
+                        format: "GPU step %u; the surviving connected component retained birth ID %u after direct membrane contact; topology hash %08X.",
+                        record.step,
+                        record.birthID,
+                        record.topologyHash
                     )
                 )
             }

@@ -296,7 +296,16 @@ struct ContentView: View {
                 observerMetric("Spinor norm Σρ", value: quantumNormLabel, tint: .cyan, values: store.history.map(\.quantumNorm))
             } else if store.observationZoom >= 18, store.displayMode == .causality {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
-                observerMetric("Cells / tissues", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Mean / max component", value: "\(decimal(store.snapshot.meanCellsPerOrganism)) / \(store.snapshot.largestTissueCellCount)", tint: .green, values: store.history.map(\.meanCellsPerOrganism))
+                observerMetric("Global cell pool", value: percent(store.snapshot.cellPoolUtilization), tint: .blue, values: store.history.map(\.cellPoolUtilization))
+                observerMetric("Heritable programs", value: "\(store.snapshot.heritableProgramCount) / 4096", tint: .purple, values: store.history.map(\.heritableProgramPoolUtilization))
+                observerMetric("Mixed-program cells", value: percent(store.snapshot.meanMixedProgramCellFraction), tint: .orange, values: store.history.map(\.meanMixedProgramCellFraction))
+                observerMetric("Program richness", value: "\(store.snapshot.maximumProgramRichness)", tint: .pink, values: store.history.map { Double($0.maximumProgramRichness) })
+                observerMetric("Recognition match", value: store.snapshot.meanProgramRecognitionCompatibility >= 0 ? decimal(store.snapshot.meanProgramRecognitionCompatibility) : "n/a", tint: .cyan, values: store.history.map { max($0.meanProgramRecognitionCompatibility, 0) })
+                observerMetric("ATP exchange x1M", value: scaledRate(store.snapshot.meanProgramATPExchange, by: 1_000_000), tint: .mint, values: store.history.map(\.meanProgramATPExchange))
+                observerMetric("Rejection load", value: decimal(store.snapshot.meanProgramRejection), tint: .red, values: store.history.map(\.meanProgramRejection))
+                observerMetric("Program net x1M", value: scaledRate(store.snapshot.meanProgramNetContribution, by: 1_000_000), tint: .yellow, values: store.history.map(\.meanProgramNetContribution))
                 observerMetric("Direct ΔVₘ ×1k", value: causalRate(store.snapshot.meanMechanotransductionEffect), tint: .cyan, values: store.history.map(\.meanMechanotransductionEffect))
                 observerMetric("Ca* / ERK* state", value: signalStateLabel, tint: .pink, values: store.history.map(\.meanCalciumActivity))
                 observerMetric("Mechanics → Ca* ×1k", value: causalRate(store.snapshot.meanMechanicsCalciumEffect), tint: .cyan, values: store.history.map(\.meanMechanicsCalciumEffect))
@@ -614,7 +623,7 @@ struct ContentView: View {
         if zoom >= 6 {
             return life == 0
                 ? "No agent slot is occupied. Nucleation remains gated by the measured chemistry thresholds, not by elapsed time."
-                : "Each organism is a membrane-connected component of up to 24 persistent cells. Translation and rotation are integrated from summed cell traction and contact force. Cross-organism feeding requires polygon contact, local membrane failure, and only then ATP and biomass transfer. A new permanent identity is assigned only after a viable cellular component physically disconnects."
+                : "Each organism is a measured membrane-connected component within one global pool of 9,216 persistent cells. Every cell separately references one of 4,096 append-only heritable programs. Cross-owner fusion requires membrane contact, reciprocal recognition, and bilateral fusion investment; the oldest permanent cell anchors component continuity. During viable fission, every transmitted source program maps to its own independently mutated descendant."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
         return "\(life)/384 organism slots are occupied; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are currently resolved; occupied-field fraction is \(occupied). The clade count requires sustained divergence and is not labeled a species count. Organisms modify shared chemical and mechanical media without a global fitness function."
@@ -629,7 +638,7 @@ struct ContentView: View {
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
         case 2: "Reaction fields supply cellular free energy. Cell contraction drives the displacement/velocity field; returning mechanical activity modifies catalyst, stored energy, membrane production, and mechanosensitive voltage."
         case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Exposed membrane edges define geometry; cell-local chemical gradients and ERK* state generate external traction; a GPU spatial hash resolves cross-tissue polygon contacts and localized membrane damage."
-        case 4: "A propagule is a membrane-connected cellular component that has disconnected from its parent tissue. ATP maintenance, membrane integrity, component size, and inherited detachment threshold are evaluated before a permanent birth ID is assigned. The exact cells, membranes, and acquired regulatory states transfer with a mutated inherited genome."
+        case 4: "GPU union-find labels membrane-connected cells independently of storage position. Cross-owner fusion additionally requires intact membranes, low stress, low predatory investment, reciprocal ligand-receptor compatibility, and inherited fusion investment. Fission allocates one descendant program per transmitted source only after ATP, integrity, and inherited detachment criteria pass. Permanent cell IDs and acquired states persist through both ownership changes."
         default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
         }
     }
@@ -896,6 +905,7 @@ struct ContentView: View {
         case .equilibrium: "equal.circle"
         case .intervention: "plus"
         case .observation: "eye"
+        case .fusion: "link"
         }
     }
 
@@ -908,6 +918,7 @@ struct ContentView: View {
         case .equilibrium: .cyan
         case .intervention: .mint
         case .observation: .secondary
+        case .fusion: .cyan
         }
     }
 }
