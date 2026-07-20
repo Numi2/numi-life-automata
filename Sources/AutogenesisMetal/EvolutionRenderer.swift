@@ -2928,15 +2928,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         encoder.endEncoding()
 
-        let exposure: Float = observationZoom >= 160 ? 1.06 :
-            (observationZoom >= 64 ? 0.98 :
-                (observationZoom >= 18 ? 0.82 :
-                    (observationZoom >= 6 ? 0.92 : 1.16)))
+        let exposure: Float = observationZoom >= 420 ? 1.02 :
+            (observationZoom >= 160 ? 0.82 :
+            (observationZoom >= 64 ? 1.02 :
+                (observationZoom >= 18 ? 0.94 :
+                    (observationZoom >= 6 ? 1.04 : 0.94))))
         let bloomIntensity: Float = observationZoom >= 420 ? 0.0 :
-            (observationZoom >= 160 ? 0.14 :
-                (observationZoom >= 64 ? 0.12 :
-                    (observationZoom >= 18 ? 0.08 :
-                        (observationZoom >= 6 ? 0.16 : 0.24))))
+            (observationZoom >= 160 ? 0.06 :
+                (observationZoom >= 64 ? 0.08 :
+                (observationZoom >= 18 ? 0.10 :
+                    (observationZoom >= 6 ? 0.12 : 0.08))))
         var postUniforms = PostProcessUniforms(
             sourceSize: SIMD2<Float>(Float(sceneColor.width), Float(sceneColor.height)),
             exposure: exposure,

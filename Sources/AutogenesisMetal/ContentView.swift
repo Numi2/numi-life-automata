@@ -706,7 +706,7 @@ struct ContentView: View {
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) {
-                    ForEach(legendItems.prefix(4), id: \.label) { item in
+                    ForEach(legendItems.prefix(6), id: \.label) { item in
                         HStack(spacing: 4) {
                             Circle().fill(item.color).frame(width: 6, height: 6)
                             Text(item.label)
@@ -1026,7 +1026,10 @@ struct ContentView: View {
     private var scaleName: String {
         let zoom = store.observationZoom
         if zoom < 6 { return "Ecological field" }
-        if zoom < 18 { return "Organism morphology" }
+        if zoom < 18 {
+            return store.integratedOrganismCount > 0
+                ? "Integrated organism morphology" : "Developing tissue morphology"
+        }
         if zoom < 64 { return "Cellular tissue" }
         if zoom < 160 { return "Molecular reaction chemistry" }
         if zoom < 512 { return "Wave observables" }
@@ -1052,7 +1055,7 @@ struct ContentView: View {
                 displayMode: .development
             ),
             ObservationStop(
-                label: "Organism", symbol: "microbe.fill", magnification: 10,
+                label: "Morphology", symbol: "microbe.fill", magnification: 10,
                 displayMode: .genome
             ),
             ObservationStop(
@@ -1096,7 +1099,7 @@ struct ContentView: View {
             case .ecology:
                 [("Resource A", .cyan), ("Resource B", .purple), ("Catalyst", .pink), ("Stored E", .yellow), ("Membrane", .mint), ("Toxin", .red)]
             case .energy:
-                [("Resource A", .cyan), ("Resource B", .purple), ("Stored E", .yellow), ("Detritus", .orange)]
+                [("Resource A", .cyan), ("Resource B", .purple), ("Catalyst", .pink), ("Stored E", .yellow), ("Membrane", .mint), ("Detritus", .orange)]
             case .genome:
                 [("Metabolism", .red), ("Membrane", .green), ("Dispersal", .blue), ("Predation", .pink)]
             case .niches:
@@ -1116,11 +1119,15 @@ struct ContentView: View {
             }
             return [("Ca*", .cyan), ("ERK*", .pink), ("Traction", .mint), ("ATP", .orange), ("Vₘ", .red), ("Membrane", .blue)]
         }
-        if store.displayMode == .ecology, store.observationZoom < 6 {
-            return [("Life", .cyan), ("Nutrient", .green), ("Mineral", .yellow), ("Rock", .gray), ("Toxin", .red), ("Hunt", .orange)]
+        if store.observationZoom >= 6 {
+            return [
+                ("Exposed membrane", .white), ("Cell identity", .cyan),
+                ("Nucleus / ERK*", .pink), ("Junction", .mint),
+                ("ATP", .yellow), ("Traction", .green)
+            ]
         }
         if store.displayMode == .ecology {
-            return [("Lineage", .cyan), ("Energy", .yellow), ("Sensor", .white), ("Defense", .mint), ("Jaw", .red), ("Genome", .pink)]
+            return [("Organisms", .cyan), ("Substrate A", .green), ("Substrate B", .yellow), ("Barrier", .gray), ("Toxin", .red), ("Forcing", .pink)]
         }
         switch store.displayMode {
         case .ecology:

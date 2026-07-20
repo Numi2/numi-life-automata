@@ -456,7 +456,19 @@ final class EvolutionStore: ObservableObject {
     private var lifeStageByBirthID: [UInt32: AgentLifeStage] = [:]
     private var lineageTracker = LineageDivergenceTracker()
     private var hasObservedFirstBiologicalUnit = false
+    private var autoFollowInitialObservation = false
     private var pendingMechanosensoryIntervention: (baseline: EvolutionSnapshot, blocked: Bool)?
+
+    init() {
+        guard let rawMagnification = ProcessInfo.processInfo.environment[
+            "NUMI_INITIAL_MAGNIFICATION"
+        ], let magnification = Double(rawMagnification), magnification.isFinite else { return }
+        cameraZoom = min(max(magnification, 0.000_001), 1.0e24)
+        autoFollowInitialObservation = magnification >= 6 && magnification < 64
+        displayMode = magnification >= 64 && magnification < 160 ? .energy :
+            (magnification >= 18 && magnification < 64 ? .development :
+                (magnification >= 6 && magnification < 18 ? .genome : .ecology))
+    }
 
     var rendererSettings: RendererSettings {
         RendererSettings(
@@ -632,6 +644,10 @@ final class EvolutionStore: ObservableObject {
         lifeStageByBirthID = Dictionary(
             uniqueKeysWithValues: agents.map { ($0.birthID, $0.lifeStage) }
         )
+        if autoFollowInitialObservation, followedAgentID == nil, let first = agents.first {
+            autoFollowInitialObservation = false
+            follow(first)
+        }
         if !hasObservedFirstBiologicalUnit, let founder = agents.first {
             hasObservedFirstBiologicalUnit = true
             founderCount = 1
