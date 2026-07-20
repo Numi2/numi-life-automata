@@ -79,14 +79,30 @@ struct ContentView: View {
                 numiIconButton("plus", help: "Introduce an external founder", tint: .mint) {
                     store.addColony()
                 }
+
+                numiIconButton(
+                    "waveform.path.ecg",
+                    help: store.mechanosensingBlocked
+                        ? "Restore mechanical input to voltage and Ca* gating"
+                        : "Ablate mechanical input to voltage and Ca* gating",
+                    isSelected: store.mechanosensingBlocked,
+                    tint: .red
+                ) {
+                    store.toggleMechanosensingIntervention()
+                }
             }
 
             commandDivider
 
             Menu {
-                Picker("View", selection: $store.displayMode) {
-                    ForEach(FieldDisplayMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
+                ForEach(FieldDisplayMode.allCases) { mode in
+                    Button {
+                        store.displayMode = mode
+                    } label: {
+                        Label(
+                            mode.label,
+                            systemImage: store.displayMode == mode ? "checkmark" : "circle"
+                        )
                     }
                 }
             } label: {
@@ -181,13 +197,21 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(store.isRunning ? Color.green : Color.orange)
-                            .frame(width: 6, height: 6)
-                        Text(store.isRunning ? "LIVE" : "HOLD")
-                            .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    VStack(alignment: .trailing, spacing: 3) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(store.mechanosensingBlocked ? Color.red : Color.cyan)
+                                .frame(width: 6, height: 6)
+                            Text(store.mechanosensingBlocked ? "MECH BLOCKED" : "MECH ACTIVE")
+                        }
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(store.isRunning ? Color.green : Color.orange)
+                                .frame(width: 6, height: 6)
+                            Text(store.isRunning ? "LIVE" : "HOLD")
+                        }
                     }
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -219,6 +243,16 @@ struct ContentView: View {
                 inspectorMetrics
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
+
+                if store.observationZoom < 18, !store.lineageBranches.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionLabel("RECORDED LINEAGE TREE")
+                        ForEach(store.lineageBranches.prefix(6)) { branch in
+                            lineageRow(branch)
+                        }
+                    }
+                    Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
+                }
 
                 VStack(alignment: .leading, spacing: 12) {
                     sectionLabel("MEASURED EVENTS")
@@ -260,22 +294,46 @@ struct ContentView: View {
                 observerMetric("∇B × membrane", value: decimal(store.snapshot.metrics.boundaryCoherence), tint: .mint, values: store.history.map(\.metrics.boundaryCoherence))
                 observerMetric("Mean |ΔB|", value: decimal(store.snapshot.metrics.temporalActivity), tint: .orange, values: store.history.map(\.metrics.temporalActivity))
                 observerMetric("Spinor norm Σρ", value: quantumNormLabel, tint: .cyan, values: store.history.map(\.quantumNorm))
+            } else if store.observationZoom >= 18, store.displayMode == .causality {
+                let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
+                observerMetric("Cells / tissues", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Direct ΔVₘ ×1k", value: causalRate(store.snapshot.meanMechanotransductionEffect), tint: .cyan, values: store.history.map(\.meanMechanotransductionEffect))
+                observerMetric("Ca* / ERK* state", value: signalStateLabel, tint: .pink, values: store.history.map(\.meanCalciumActivity))
+                observerMetric("Mechanics → Ca* ×1k", value: causalRate(store.snapshot.meanMechanicsCalciumEffect), tint: .cyan, values: store.history.map(\.meanMechanicsCalciumEffect))
+                observerMetric("Ca* → ERK* ×1k", value: causalRate(store.snapshot.meanCalciumERKEffect), tint: .pink, values: store.history.map(\.meanCalciumERKEffect))
+                observerMetric("ERK* → traction ×10k", value: scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000), tint: .mint, values: store.history.map(\.meanERKTractionEffect))
+                observerMetric("Signal ATP cost ×10k", value: scaledRate(store.snapshot.cellularSignalingCost, by: 10_000), tint: .orange, values: store.history.map(\.cellularSignalingCost))
+                observerMetric("Contact Δcycle ×1k", value: causalRate(store.snapshot.meanContactSuppression), tint: .mint, values: store.history.map(\.meanContactSuppression))
+                observerMetric("Lag r(strain,Vₘ)", value: strainVoltageCorrelationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
             } else if store.observationZoom >= 18 {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
-                observerMetric("Population cells", value: "\(store.snapshot.cellCount) in \(tissueCount) organisms", tint: .cyan, values: store.history.map { Double($0.cellCount) })
-                observerMetric("Mean cellular ATP", value: decimal(store.snapshot.meanCellATP), tint: .yellow, values: store.history.map(\.meanCellATP))
-                observerMetric("Membrane integrity", value: decimal(store.snapshot.meanCellIntegrity), tint: .mint, values: store.history.map(\.meanCellIntegrity))
-                observerMetric("Dividing / stressed", value: "\(store.snapshot.dividingCellCount) / \(decimal(store.snapshot.meanCellStress))", tint: .pink, values: store.history.map { Double($0.dividingCellCount) })
+                observerMetric("Cells / tissues", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
+                observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
+                observerMetric("Membrane A / P", value: membraneGeometryLabel, tint: .blue, values: store.history.map(\.meanMembraneShapeIndex))
+                observerMetric("Resonance f₀ / ζ", value: resonanceTuningLabel, tint: .pink, values: store.history.map(\.meanResonanceFrequency))
+                observerMetric("Response / junction F", value: resonanceResponseLabel, tint: .orange, values: store.history.map(\.meanResonanceAmplitude))
+                observerMetric("Ca* / ERK* / refractory", value: signalStateLabel, tint: .pink, values: store.history.map(\.meanCalciumActivity))
+                observerMetric("ATP / Vₘ", value: "\(decimal(store.snapshot.meanCellATP)) / \(signedDecimal(store.snapshot.meanMembraneVoltage))", tint: .yellow, values: store.history.map(\.meanCellATP))
             } else if store.observationZoom >= 6 {
-                observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
-                observerMetric("Lineage bins", value: "\(lineageEstimate)/32", tint: .pink, values: store.history.map { Double($0.organismLineageCount) })
-                observerMetric("Mean |v|", value: speedLabel, tint: .cyan, values: store.history.map(\.meanOrganismSpeed))
-                observerMetric("Predatory trait", value: "\(store.snapshot.hunterCount) agents", tint: .red, values: store.history.map { Double($0.hunterCount) })
+                if store.displayMode == .causality {
+                    observerMetric("Direct ΔVₘ ×1k", value: causalRate(store.snapshot.meanMechanotransductionEffect), tint: .cyan, values: store.history.map(\.meanMechanotransductionEffect))
+                    observerMetric("Mechanics → Ca* ×1k", value: causalRate(store.snapshot.meanMechanicsCalciumEffect), tint: .cyan, values: store.history.map(\.meanMechanicsCalciumEffect))
+                    observerMetric("Ca* → ERK* ×1k", value: causalRate(store.snapshot.meanCalciumERKEffect), tint: .pink, values: store.history.map(\.meanCalciumERKEffect))
+                    observerMetric("ERK* → traction ×10k", value: scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000), tint: .mint, values: store.history.map(\.meanERKTractionEffect))
+                    observerMetric("Signal ATP cost ×10k", value: scaledRate(store.snapshot.cellularSignalingCost, by: 10_000), tint: .orange, values: store.history.map(\.cellularSignalingCost))
+                    observerMetric("Lag r(strain,Vₘ)", value: strainVoltageCorrelationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
+                } else {
+                    observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
+                    observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .pink, values: store.history.map(\.meanDevelopmentalEdgeCount))
+                    observerMetric("Mean |v|", value: speedLabel, tint: .cyan, values: store.history.map(\.meanOrganismSpeed))
+                    observerMetric("Persistent clades", value: "\(store.snapshot.persistentCladeCount)", tint: .orange, values: store.history.map { Double($0.persistentCladeCount) })
+                }
             } else {
                 observerMetric("Occupied agents", value: "\(max(store.snapshot.organismCount, store.observableAgentCount))/384", tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Mean free R", value: resourceLabel, tint: .cyan, values: store.history.map(\.metrics.resourceDensity))
                 observerMetric("Mean |ΔB|", value: activityLabel, tint: .orange, values: store.history.map(\.metrics.temporalActivity))
                 observerMetric("Predatory trait", value: "\(store.snapshot.hunterCount) agents", tint: .red, values: store.history.map { Double($0.hunterCount) })
+                observerMetric("Persistent clades", value: "\(store.snapshot.persistentCladeCount)", tint: .pink, values: store.history.map { Double($0.persistentCladeCount) })
             }
         }
     }
@@ -297,10 +355,17 @@ struct ContentView: View {
 
             Spacer(minLength: 0)
 
-            ViewThatFits(in: .horizontal) {
+            if store.displayMode == .causality, store.observationZoom < 64 {
                 VStack(alignment: .leading, spacing: 6) {
                     sectionLabel(legendTitle.uppercased())
-                    HStack(spacing: 10) {
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.fixed(96), alignment: .leading),
+                            GridItem(.fixed(96), alignment: .leading)
+                        ],
+                        alignment: .leading,
+                        spacing: 5
+                    ) {
                         ForEach(legendItems.prefix(4), id: \.label) { item in
                             HStack(spacing: 4) {
                                 Circle().fill(item.color).frame(width: 6, height: 6)
@@ -311,7 +376,24 @@ struct ContentView: View {
                         }
                     }
                 }
-                sectionLabel(legendTitle.uppercased())
+                .frame(width: 204, alignment: .leading)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        sectionLabel(legendTitle.uppercased())
+                        HStack(spacing: 10) {
+                            ForEach(legendItems.prefix(4), id: \.label) { item in
+                                HStack(spacing: 4) {
+                                    Circle().fill(item.color).frame(width: 6, height: 6)
+                                    Text(item.label)
+                                        .font(.system(size: 9, weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    sectionLabel(legendTitle.uppercased())
+                }
             }
         }
         .padding(.leading, 18)
@@ -412,6 +494,30 @@ struct ContentView: View {
         }
     }
 
+    private func lineageRow(_ branch: ObservedLineageBranch) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: branch.deathStep == nil ? "point.3.connected.trianglepath.dotted" : "xmark")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(branch.deathStep == nil ? Color.cyan : Color.secondary)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(branch.parentID.map { "birth #\(branch.id) ← #\($0)" } ?? "founder #\(branch.id)")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                Text(String(
+                    format: "step %u · topology %08X · Δ %.3f · f₀ %.2f/1k",
+                    branch.birthStep,
+                    branch.topologyHash,
+                    branch.mutationDistance,
+                    branch.resonanceFrequency * 1_000
+                ))
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+        }
+    }
+
     private func numiIconButton(
         _ symbol: String,
         help: String,
@@ -465,17 +571,26 @@ struct ContentView: View {
 
     private var worldHeadline: String {
         let zoom = store.observationZoom
+        if store.displayMode == .causality, zoom < 64 {
+            return zoom >= 18
+                ? "Counterfactual mechanochemical pathways"
+                : "Causal activity across developed organisms"
+        }
         if zoom >= 512 { return "Two-component coined quantum walk" }
         if zoom >= 160 { return "Probability density, phase, and probability current" }
         if zoom >= 64 { return "Molecular reaction and spinor coupling" }
-        if zoom >= 18 { return "Cell mechanics, metabolism, signaling, and division" }
-        if zoom >= 6 { return "Multicellular organisms with inherited traits" }
-        return "Spatial eco-evolutionary dynamics"
+        if zoom >= 18 { return "Deformable cell membranes, regulation, and resonant mechanics" }
+        if zoom >= 6 { return "One-cell ontogeny and energy-limited organisms" }
+        return "Spatial, trophic, and vibrational ecological niches"
     }
 
     private var worldSummary: String {
         let zoom = store.observationZoom
         let life = max(store.snapshot.organismCount, store.observableAgentCount)
+        if store.displayMode == .causality, zoom < 64 {
+            let edgeState = store.mechanosensingBlocked ? "ablated (gain = 0)" : "active (gain = 1)"
+            return "Mechanics→Ca* and Ca*→ERK* are factual-minus-single-edge-zero update differences. ERK*→traction and signaling ATP cost are direct equation terms. Mean values are \(causalRate(store.snapshot.meanMechanicsCalciumEffect)) ×10⁻³, \(causalRate(store.snapshot.meanCalciumERKEffect)) ×10⁻³, and \(scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000)) ×10⁻⁴ for the first three terms. Ca* and ERK* are dimensionless excitable-state variables, not resolved molecular concentrations. Mechanics gating is \(edgeState); lagged r remains an observational diagnostic."
+        }
         if zoom >= 512 {
             return "ψ = (ψ₀, ψ₁) is stored as four real components on a 1024² periodic lattice. Each update applies a local coin rotation and alternates conditional shifts along x and y. Measured Σρ = \(quantumNormValue)."
         }
@@ -483,28 +598,31 @@ struct ContentView: View {
             return "ρ = |ψ₀|² + |ψ₁|². Component overlap contributes to the catalyst source term; local resource, biomass, membrane, toxin, and inherited trait fields modify the coin angle and phase potential."
         }
         if zoom >= 64 {
-            return "The 193² lattice stores resource A, biomass B, energy E, membrane M, resource B, detritus, toxin, and catalyst. Founder nucleation requires B ≥ 0.055, E ≥ 0.006, M ≥ 0.003, and catalyst ≥ 0.030 at a local score maximum."
+            return "The 193² lattice stores resource A, biomass B, energy E, membrane M, resource B, detritus, toxin, catalyst, and a coupled displacement/velocity field. Spinor order and mechanical activity both enter local energy and catalyst conversion."
         }
         if zoom >= 18 {
-            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Each cell stores local position and velocity, ATP, biomass, cell-cycle phase, membrane integrity, adhesion, contractility, two uptake phenotypes, two morphogens, stress, and apoptosis activation. Contact mechanics, metabolite exchange, contact inhibition, division, and death are evaluated on the GPU."
+            return "\(store.snapshot.cellCount) persistent cells are active across \(life) organisms. Every cell boundary is a 12-vertex deformable polygon with area pressure, cortical edge elasticity, bending resistance, contractility, local damage, and contact force. Mechanically gated Ca*-like activity propagates through contacts, excites an ERK*-like refractory response, consumes ATP, and modifies traction. A heritable 16-node/48-edge sparse graph reads eight local inputs and drives eight actuator channels. Mean Ca*/ERK* is \(signalStateLabel)."
         }
         if zoom >= 6 {
             return life == 0
                 ? "No agent slot is occupied. Nucleation remains gated by the measured chemistry thresholds, not by elapsed time."
-                : "Each organism owns up to 24 persistent cells. Organism energy and survival receive cellular viability and stress feedback; steering combines resource gradients, hazard avoidance, separation, prey pursuit, and threat avoidance."
+                : "Every organism began as one cell and now owns up to 24 persistent cells. Tissue regulatory state, ATP, integrity, phase coherence, strain, and net power determine its developed proportions, contractile anatomy, locomotion, maintenance, damage response, and reproductive competence."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
-        return "\(life)/384 agent slots are occupied; \(lineageEstimate)/32 agent-lineage bins are represented; occupied-cell fraction is \(occupied). Mean free-resource density is \(resourceLabel), and \(store.snapshot.hunterCount) agents exceed the predation-trait threshold."
+        return "\(life)/384 organism slots are occupied; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are currently resolved; occupied-field fraction is \(occupied). The clade count requires sustained divergence and is not labeled a species count. Organisms modify shared chemical and mechanical media without a global fitness function."
     }
 
     private var scaleRelation: String {
-        switch activeObservationStop {
+        if store.displayMode == .causality, store.observationZoom < 64 {
+            return "Mechanical strain drives the inherited resonator, membrane voltage, and mechanogated Ca*-like influx. Contact-weighted Ca* and ERK* states propagate between cells; Ca* excites ERK* subject to a refractory variable; ERK* adds traction opposite its local gradient, and all signaling enters the ATP ledger. The intervention sets both direct mechanics→voltage and mechanics→Ca* gains to zero while leaving neighbor propagation and downstream dynamics active."
+        }
+        return switch activeObservationStop {
         case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
-        case 2: "Reaction fields determine cellular resource uptake and stress; spinor overlap modifies catalyst and energy production in the same persistent environment."
-        case 3: "Cell ATP and membrane integrity alter organism maintenance and damage. Contact inhibition regulates cell-cycle progression; division and apoptosis alter morphology."
-        case 4: "Reproduction requires E ≥ 1.06 and age ≥ 720 steps. Offspring inherit mutated trait vectors and initialize a seven-cell founder tissue."
-        default: "Resources, detritus, toxin, rock permeability, predation, and crowding generate spatially varying differential fitness without a global agent fitness function."
+        case 2: "Reaction fields supply cellular free energy. Cell contraction drives the displacement/velocity field; returning mechanical activity modifies catalyst, stored energy, membrane production, and mechanosensitive voltage."
+        case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Twelve membrane vertices integrate area, perimeter, bending, pressure, adhesion, and contact forces. A damped inherited resonator converts strain-rate input into voltage and regulatory drive."
+        case 4: "Reproduction requires E ≥ 1.06, age ≥ 720 steps, at least five developed cells, membrane integrity, phase coherence, and a bounded power deficit. Offspring receive monotonic birth IDs, parent IDs, mutated node and edge parameters, structural graph mutations, innovation IDs, and mutated resonance tuning, but begin as one cell."
+        default: "Resources, hazards, predation, crowding, mechanical waves, and frequency-dependent cellular response generate spatially varying differential survival and reproduction without a global fitness function."
         }
     }
 
@@ -539,14 +657,6 @@ struct ContentView: View {
     private var speedLabel: String {
         let speed = store.snapshot.meanOrganismSpeed
         return String(format: "%.2e world/step", max(speed, 0))
-    }
-
-    private var lineageEstimate: Int {
-        if store.snapshot.organismLineageCount > 0 {
-            return store.snapshot.organismLineageCount
-        }
-        let entropy = min(max(store.snapshot.metrics.lineageDiversity, 0), 1)
-        return max(1, min(16, Int(pow(16, entropy).rounded())))
     }
 
     private var zoomLabel: String {
@@ -618,6 +728,9 @@ struct ContentView: View {
     }
 
     private var legendItems: [(label: String, color: Color)] {
+        if store.displayMode == .causality, store.observationZoom < 64 {
+            return [("Mechanics→Ca*", .cyan), ("Ca*→ERK*", .pink), ("ERK*→traction", .mint), ("Signal ATP", .orange)]
+        }
         if store.observationZoom >= 512 {
             return [("Spin +", .cyan), ("Spin -", .orange), ("Current", .white), ("Nodes", .purple)]
         }
@@ -628,7 +741,7 @@ struct ContentView: View {
             return [("Membrane", .mint), ("Energy", .yellow), ("Genome", .pink), ("Potential", .cyan)]
         }
         if store.observationZoom >= 18 {
-            return [("Membrane", .mint), ("ATP", .yellow), ("Nucleus", .pink), ("Junction", .cyan), ("Stress", .red), ("Apoptosis", .purple)]
+            return [("Ca*", .cyan), ("ERK*", .pink), ("Traction", .mint), ("ATP", .orange), ("Vₘ", .red), ("Membrane", .blue)]
         }
         if store.displayMode == .ecology, store.observationZoom < 6 {
             return [("Life", .cyan), ("Nutrient", .green), ("Mineral", .yellow), ("Rock", .gray), ("Toxin", .red), ("Hunt", .orange)]
@@ -645,14 +758,21 @@ struct ContentView: View {
             return [("Metabolism", .red), ("Adhesion", .green), ("Division", .blue), ("Lineage", .pink)]
         case .niches:
             return [("Resource A", .red), ("Resource B", .green), ("Scavenging", .blue), ("Predation", .pink)]
+        case .development:
+            return [("Proliferate", .yellow), ("Adhesive", .mint), ("Contractile", .pink), ("Repair", .blue)]
+        case .causality:
+            return [("Mechanics→Ca*", .cyan), ("Ca*→ERK*", .pink), ("ERK*→traction", .mint), ("Signal ATP", .orange)]
         }
     }
 
     private var legendTitle: String {
-        store.observationZoom >= 512 ? "Spinor components" :
+        if store.displayMode == .causality, store.observationZoom < 64 {
+            return "One-edge-zero causal terms"
+        }
+        return store.observationZoom >= 512 ? "Spinor components" :
             store.observationZoom >= 160 ? "Quantum observables" :
             store.observationZoom >= 64 ? "Molecular fields" :
-            store.observationZoom >= 18 ? "Cell state" : store.displayMode.label
+            store.observationZoom >= 18 ? "Electromechanical cell state" : store.displayMode.label
     }
 
     private func percent(_ value: Double) -> String {
@@ -661,6 +781,101 @@ struct ContentView: View {
 
     private func decimal(_ value: Double) -> String {
         String(format: "%.4f", max(value, 0))
+    }
+
+    private func signedDecimal(_ value: Double) -> String {
+        String(format: "%+.3f", value)
+    }
+
+    private func causalRate(_ value: Double) -> String {
+        String(format: "%+.3f", value * 1_000)
+    }
+
+    private func scaledRate(_ value: Double, by scale: Double) -> String {
+        String(format: "%+.3f", value * scale)
+    }
+
+    private var strainVoltageCorrelationLabel: String {
+        laggedCorrelation(
+            cause: { $0.meanTissueStrain },
+            effect: { $0.meanMembraneVoltage }
+        )
+    }
+
+    private var atpDivisionCorrelationLabel: String {
+        laggedCorrelation(
+            cause: { $0.meanCellATP },
+            effect: {
+                Double($0.dividingCellCount) / Double(max($0.cellCount, 1))
+            }
+        )
+    }
+
+    private func laggedCorrelation(
+        cause: (EvolutionSnapshot) -> Double,
+        effect: (EvolutionSnapshot) -> Double
+    ) -> String {
+        guard store.history.count >= 6 else { return "pending" }
+        let causes = store.history.dropLast().map(cause)
+        let effects = store.history.dropFirst().map(effect)
+        let count = Double(causes.count)
+        let meanCause = causes.reduce(0, +) / count
+        let meanEffect = effects.reduce(0, +) / count
+        var covariance = 0.0
+        var causeVariance = 0.0
+        var effectVariance = 0.0
+        for index in causes.indices {
+            let causeDelta = causes[index] - meanCause
+            let effectDelta = effects[index] - meanEffect
+            covariance += causeDelta * effectDelta
+            causeVariance += causeDelta * causeDelta
+            effectVariance += effectDelta * effectDelta
+        }
+        let scale = sqrt(causeVariance * effectVariance)
+        guard scale > 1e-12 else { return "indeterminate" }
+        return String(format: "%+.2f", min(max(covariance / scale, -1), 1))
+    }
+
+    private var membraneGeometryLabel: String {
+        String(
+            format: "%.3f / %.3f (S %.2f)",
+            store.snapshot.meanMembraneArea,
+            store.snapshot.meanMembranePerimeter,
+            store.snapshot.meanMembraneShapeIndex
+        )
+    }
+
+    private var resonanceTuningLabel: String {
+        String(
+            format: "%.2f/1k / %.2f",
+            store.snapshot.meanResonanceFrequency * 1_000,
+            store.snapshot.meanResonanceDamping
+        )
+    }
+
+    private var resonanceResponseLabel: String {
+        String(
+            format: "%.4f / %.2e",
+            store.snapshot.meanResonanceAmplitude,
+            store.snapshot.meanJunctionForce
+        )
+    }
+
+    private var signalStateLabel: String {
+        String(
+            format: "%.3f / %.3f / %.3f",
+            store.snapshot.meanCalciumActivity,
+            store.snapshot.meanERKActivity,
+            store.snapshot.meanSignalRefractory
+        )
+    }
+
+    private var developmentalTopologyLabel: String {
+        String(
+            format: "%.1f / %.1f",
+            store.snapshot.meanDevelopmentalNodeCount,
+            store.snapshot.meanDevelopmentalEdgeCount
+        )
     }
 
     private func eventSymbol(_ kind: EvolutionEventKind) -> String {

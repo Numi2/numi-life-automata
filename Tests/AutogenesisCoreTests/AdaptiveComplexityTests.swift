@@ -83,6 +83,55 @@ import Testing
     #expect(collapsedFitness.diversification < branchingFitness.diversification)
 }
 
+@Test func lineageDistanceUsesMutationLengthToMostRecentCommonParent() {
+    var tracker = LineageDivergenceTracker()
+    tracker.registerBirth(LineageBirthRecord(
+        birthID: 1, parentBirthID: nil, birthStep: 0,
+        mutationDistance: 0, genomeHash: 10, topologyHash: 20
+    ))
+    tracker.registerBirth(LineageBirthRecord(
+        birthID: 2, parentBirthID: 1, birthStep: 100,
+        mutationDistance: 0.12, genomeHash: 11, topologyHash: 20
+    ))
+    tracker.registerBirth(LineageBirthRecord(
+        birthID: 3, parentBirthID: 1, birthStep: 120,
+        mutationDistance: 0.18, genomeHash: 12, topologyHash: 21
+    ))
+
+    #expect(abs(tracker.genealogicalDistance(from: 2, to: 3) - 0.30) < 1e-9)
+}
+
+@Test func persistentCladesRequireAgeAndCombinedDivergence() {
+    var tracker = LineageDivergenceTracker()
+    tracker.registerBirth(LineageBirthRecord(
+        birthID: 1, parentBirthID: nil, birthStep: 0,
+        mutationDistance: 0, genomeHash: 10, topologyHash: 20
+    ))
+    tracker.registerBirth(LineageBirthRecord(
+        birthID: 2, parentBirthID: 1, birthStep: 100,
+        mutationDistance: 0.45, genomeHash: 11, topologyHash: 21
+    ))
+    let samples = [
+        LivingLineageSample(
+            birthID: 1,
+            topologyHash: 20,
+            morphology: MorphologyDescriptor(values: [0.2, 0.2, 0.2, 0.2])
+        ),
+        LivingLineageSample(
+            birthID: 2,
+            topologyHash: 21,
+            morphology: MorphologyDescriptor(values: [0.8, 0.7, 0.8, 0.7])
+        )
+    ]
+
+    let early = tracker.analyze(living: samples, currentStep: 900)
+    let persistent = tracker.analyze(living: samples, currentStep: 2_000)
+
+    #expect(early.persistentCladeCount == 0)
+    #expect(persistent.persistentCladeCount == 2)
+    #expect(persistent.meanMorphologyDistance > 0.5)
+}
+
 private func sampleMetrics(
     occupied: Double,
     activity: Double,

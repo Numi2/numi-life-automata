@@ -8,6 +8,8 @@ enum FieldDisplayMode: UInt32, CaseIterable, Identifiable {
     case energy
     case genome
     case niches
+    case development
+    case causality
 
     var id: UInt32 { rawValue }
 
@@ -17,6 +19,8 @@ enum FieldDisplayMode: UInt32, CaseIterable, Identifiable {
         case .energy: "Resource / energy"
         case .genome: "Trait vectors"
         case .niches: "Resource-use traits"
+        case .development: "Developmental regulation"
+        case .causality: "Causal terms"
         }
     }
 }
@@ -40,6 +44,17 @@ struct EvolutionEvent: Identifiable, Sendable, Equatable {
     let detail: String
 }
 
+struct ObservedLineageBranch: Identifiable, Sendable, Equatable {
+    let id: UInt32
+    let parentID: UInt32?
+    let birthStep: UInt32
+    let generation: UInt32
+    let topologyHash: UInt32
+    let mutationDistance: Float
+    let resonanceFrequency: Float
+    var deathStep: UInt32?
+}
+
 struct EvolutionSnapshot: Sendable, Equatable {
     var generation: Int = 0
     var totalSteps: UInt64 = 0
@@ -55,6 +70,41 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanCellATP: Double = 0
     var meanCellIntegrity: Double = 0
     var meanCellStress: Double = 0
+    var meanMembraneVoltage: Double = 0
+    var meanPhaseCoherence: Double = 0
+    var meanOscillationFrequency: Double = 0
+    var meanTissueStrain: Double = 0
+    var cellularEnergyHarvest: Double = 0
+    var cellularEnergyDemand: Double = 0
+    var cellularEnergyDissipation: Double = 0
+    var meanProliferationProgram: Double = 0
+    var meanAdhesiveProgram: Double = 0
+    var meanContractileProgram: Double = 0
+    var meanRepairProgram: Double = 0
+    var meanDevelopmentalNodeCount: Double = 0
+    var meanDevelopmentalEdgeCount: Double = 0
+    var meanResonanceFrequency: Double = 0
+    var meanResonanceDamping: Double = 0
+    var meanResonanceBandwidth: Double = 0
+    var meanResonanceAmplitude: Double = 0
+    var meanMembraneArea: Double = 0
+    var meanMembranePerimeter: Double = 0
+    var meanMembraneShapeIndex: Double = 0
+    var meanJunctionForce: Double = 0
+    var meanLineageMutationDistance: Double = 0
+    var persistentCladeCount: Int = 0
+    var meanMorphologyDistance: Double = 0
+    var meanMechanotransductionEffect: Double = 0
+    var meanProliferativeDrive: Double = 0
+    var meanContactSuppression: Double = 0
+    var meanRepairEffect: Double = 0
+    var meanCalciumActivity: Double = 0
+    var meanERKActivity: Double = 0
+    var meanSignalRefractory: Double = 0
+    var meanMechanicsCalciumEffect: Double = 0
+    var meanCalciumERKEffect: Double = 0
+    var meanERKTractionEffect: Double = 0
+    var cellularSignalingCost: Double = 0
     var metrics: WorldMetrics = .empty
     var fitness = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
 
@@ -73,6 +123,41 @@ struct EvolutionSnapshot: Sendable, Equatable {
         meanCellATP: Double = 0,
         meanCellIntegrity: Double = 0,
         meanCellStress: Double = 0,
+        meanMembraneVoltage: Double = 0,
+        meanPhaseCoherence: Double = 0,
+        meanOscillationFrequency: Double = 0,
+        meanTissueStrain: Double = 0,
+        cellularEnergyHarvest: Double = 0,
+        cellularEnergyDemand: Double = 0,
+        cellularEnergyDissipation: Double = 0,
+        meanProliferationProgram: Double = 0,
+        meanAdhesiveProgram: Double = 0,
+        meanContractileProgram: Double = 0,
+        meanRepairProgram: Double = 0,
+        meanDevelopmentalNodeCount: Double = 0,
+        meanDevelopmentalEdgeCount: Double = 0,
+        meanResonanceFrequency: Double = 0,
+        meanResonanceDamping: Double = 0,
+        meanResonanceBandwidth: Double = 0,
+        meanResonanceAmplitude: Double = 0,
+        meanMembraneArea: Double = 0,
+        meanMembranePerimeter: Double = 0,
+        meanMembraneShapeIndex: Double = 0,
+        meanJunctionForce: Double = 0,
+        meanLineageMutationDistance: Double = 0,
+        persistentCladeCount: Int = 0,
+        meanMorphologyDistance: Double = 0,
+        meanMechanotransductionEffect: Double = 0,
+        meanProliferativeDrive: Double = 0,
+        meanContactSuppression: Double = 0,
+        meanRepairEffect: Double = 0,
+        meanCalciumActivity: Double = 0,
+        meanERKActivity: Double = 0,
+        meanSignalRefractory: Double = 0,
+        meanMechanicsCalciumEffect: Double = 0,
+        meanCalciumERKEffect: Double = 0,
+        meanERKTractionEffect: Double = 0,
+        cellularSignalingCost: Double = 0,
         metrics: WorldMetrics = .empty,
         fitness: FitnessVector = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
     ) {
@@ -90,6 +175,41 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.meanCellATP = meanCellATP
         self.meanCellIntegrity = meanCellIntegrity
         self.meanCellStress = meanCellStress
+        self.meanMembraneVoltage = meanMembraneVoltage
+        self.meanPhaseCoherence = meanPhaseCoherence
+        self.meanOscillationFrequency = meanOscillationFrequency
+        self.meanTissueStrain = meanTissueStrain
+        self.cellularEnergyHarvest = cellularEnergyHarvest
+        self.cellularEnergyDemand = cellularEnergyDemand
+        self.cellularEnergyDissipation = cellularEnergyDissipation
+        self.meanProliferationProgram = meanProliferationProgram
+        self.meanAdhesiveProgram = meanAdhesiveProgram
+        self.meanContractileProgram = meanContractileProgram
+        self.meanRepairProgram = meanRepairProgram
+        self.meanDevelopmentalNodeCount = meanDevelopmentalNodeCount
+        self.meanDevelopmentalEdgeCount = meanDevelopmentalEdgeCount
+        self.meanResonanceFrequency = meanResonanceFrequency
+        self.meanResonanceDamping = meanResonanceDamping
+        self.meanResonanceBandwidth = meanResonanceBandwidth
+        self.meanResonanceAmplitude = meanResonanceAmplitude
+        self.meanMembraneArea = meanMembraneArea
+        self.meanMembranePerimeter = meanMembranePerimeter
+        self.meanMembraneShapeIndex = meanMembraneShapeIndex
+        self.meanJunctionForce = meanJunctionForce
+        self.meanLineageMutationDistance = meanLineageMutationDistance
+        self.persistentCladeCount = persistentCladeCount
+        self.meanMorphologyDistance = meanMorphologyDistance
+        self.meanMechanotransductionEffect = meanMechanotransductionEffect
+        self.meanProliferativeDrive = meanProliferativeDrive
+        self.meanContactSuppression = meanContactSuppression
+        self.meanRepairEffect = meanRepairEffect
+        self.meanCalciumActivity = meanCalciumActivity
+        self.meanERKActivity = meanERKActivity
+        self.meanSignalRefractory = meanSignalRefractory
+        self.meanMechanicsCalciumEffect = meanMechanicsCalciumEffect
+        self.meanCalciumERKEffect = meanCalciumERKEffect
+        self.meanERKTractionEffect = meanERKTractionEffect
+        self.cellularSignalingCost = cellularSignalingCost
         self.metrics = metrics
         self.fitness = fitness
     }
@@ -101,6 +221,7 @@ struct RendererSettings: Sendable {
     var resourceFlux: Float
     var mutationScale: Float
     var transportScale: Float
+    var mechanosensingGain: Float
     var displayMode: UInt32
     var trackedAgentID: UInt32
     var cameraCenter: SIMD2<Float>
@@ -121,6 +242,7 @@ final class EvolutionStore: ObservableObject {
     @Published var resourceFlux: Double = 1.0
     @Published var mutationScale: Double = 1.0
     @Published var transportScale: Double = 1.0
+    @Published private(set) var mechanosensingBlocked = false
     @Published var displayMode: FieldDisplayMode = .ecology
     @Published private(set) var cameraCenter = spinorOrigin
     @Published private(set) var cameraZoom: Double = 900
@@ -130,6 +252,8 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var founderCount = 0
     @Published private(set) var followedAgentID: Int?
     @Published private(set) var observableAgentCount = 0
+    @Published private(set) var lineageAnalysis = LineageAnalysis.empty
+    @Published private(set) var lineageBranches: [ObservedLineageBranch] = []
     @Published private(set) var worldScale: Double = 1
     @Published private(set) var errorMessage: String?
     private var addColonyPosition = SIMD2<Float>(repeating: 0.5)
@@ -140,7 +264,10 @@ final class EvolutionStore: ObservableObject {
     private var nextEventID: UInt64 = 1
     private var lastRecordedGeneration = 0
     private var observedAgents: [AgentObservation] = []
+    private var followedBirthID: UInt32?
+    private var lineageTracker = LineageDivergenceTracker()
     private var hasObservedFirstOrganism = false
+    private var pendingMechanosensoryIntervention: (baseline: EvolutionSnapshot, blocked: Bool)?
 
     var rendererSettings: RendererSettings {
         RendererSettings(
@@ -149,6 +276,7 @@ final class EvolutionStore: ObservableObject {
             resourceFlux: Float(resourceFlux),
             mutationScale: Float(mutationScale),
             transportScale: Float(transportScale),
+            mechanosensingGain: mechanosensingBlocked ? 0 : 1,
             displayMode: displayMode.rawValue,
             trackedAgentID: followedAgentID.map(UInt32.init) ?? .max,
             cameraCenter: cameraCenter,
@@ -168,11 +296,34 @@ final class EvolutionStore: ObservableObject {
         events.removeAll(keepingCapacity: true)
         addedColonyCount = 0
         founderCount = 0
+        lineageAnalysis = .empty
+        lineageBranches.removeAll(keepingCapacity: true)
+        lineageTracker.reset()
+        followedBirthID = nil
         worldScale = 1
         expansionToken = 0
         lastRecordedGeneration = 0
         hasObservedFirstOrganism = false
+        mechanosensingBlocked = false
+        pendingMechanosensoryIntervention = nil
         resetCamera()
+    }
+
+    func toggleMechanosensingIntervention() {
+        mechanosensingBlocked.toggle()
+        pendingMechanosensoryIntervention = snapshot.generation > 0
+            ? (snapshot, mechanosensingBlocked)
+            : nil
+        recordEvent(
+            generation: snapshot.generation,
+            kind: .intervention,
+            title: mechanosensingBlocked
+                ? "Mechanical sensing input set to zero"
+                : "Mechanical sensing input restored",
+            detail: mechanosensingBlocked
+                ? "The coefficient multiplying mechanical input in the voltage and Ca*-gating equations is now 0."
+                : "The coefficient multiplying mechanical input in the voltage and Ca*-gating equations is now 1."
+        )
     }
 
     func addColony() {
@@ -194,6 +345,7 @@ final class EvolutionStore: ObservableObject {
     }
 
     func zoom(by factor: Double, around anchor: SIMD2<Float>, aspect: Float) {
+        guard factor.isFinite, factor > 0 else { return }
         let oldZoom = cameraZoom
         let newZoom = min(max(oldZoom * factor, 0.000_001), 1.0e24)
         guard newZoom != oldZoom else { return }
@@ -268,21 +420,111 @@ final class EvolutionStore: ObservableObject {
             print("autogenic_founder id=\(founder.id) position=\(founder.position)")
 #endif
         }
-        guard let followedAgentID else { return }
-        if let followed = agents.first(where: { $0.id == followedAgentID }) {
-            if simd_distance_squared(cameraCenter, followed.position) > 1.0e-14 {
-                cameraCenter = followed.position
+        if followedAgentID != nil {
+            let followed = followedBirthID.flatMap { birthID in
+                agents.first(where: { $0.birthID == birthID })
             }
-        } else if let replacement = agents.first {
-            follow(replacement)
-        } else {
-            self.followedAgentID = nil
+            if let followed {
+                if self.followedAgentID != followed.id { self.followedAgentID = followed.id }
+                if simd_distance_squared(cameraCenter, followed.position) > 1.0e-14 {
+                    cameraCenter = followed.position
+                }
+            } else if let replacement = agents.first {
+                follow(replacement)
+            } else {
+                self.followedAgentID = nil
+                followedBirthID = nil
+            }
         }
+
+        let livingSamples = agents.map { agent in
+            LivingLineageSample(
+                birthID: agent.birthID,
+                topologyHash: agent.topologyHash,
+                morphology: MorphologyDescriptor(values: [
+                    Double(agent.morphology.x),
+                    Double(agent.morphology.y / 0.86),
+                    Double((agent.morphology.z - 1) / 2.5),
+                    Double(agent.morphology.w),
+                    Double((agent.dynamics.x - 0.0008) / 0.0082),
+                    Double(agent.dynamics.y * 18),
+                    Double(agent.dynamics.z),
+                    Double(agent.dynamics.w)
+                ])
+            )
+        }
+        lineageAnalysis = lineageTracker.analyze(
+            living: livingSamples,
+            currentStep: snapshot.totalSteps
+        )
+        snapshot.persistentCladeCount = lineageAnalysis.persistentCladeCount
+        snapshot.meanMorphologyDistance = lineageAnalysis.meanMorphologyDistance
     }
 
     private func follow(_ agent: AgentObservation) {
         followedAgentID = agent.id
+        followedBirthID = agent.birthID
         cameraCenter = agent.position
+    }
+
+    func applyLineageEvents(_ records: [RecordedLineageEvent]) {
+        for record in records {
+            switch record.kind {
+            case .birth:
+                let parent = record.parentBirthID == .max ? nil : record.parentBirthID
+                lineageBranches.insert(ObservedLineageBranch(
+                    id: record.birthID,
+                    parentID: parent,
+                    birthStep: record.step,
+                    generation: record.generation,
+                    topologyHash: record.topologyHash,
+                    mutationDistance: record.mutationDistance,
+                    resonanceFrequency: record.resonanceFrequency,
+                    deathStep: nil
+                ), at: 0)
+                if lineageBranches.count > 256 {
+                    lineageBranches.removeLast(lineageBranches.count - 256)
+                }
+                lineageTracker.registerBirth(LineageBirthRecord(
+                    birthID: record.birthID,
+                    parentBirthID: parent,
+                    birthStep: UInt64(record.step),
+                    mutationDistance: Double(record.mutationDistance),
+                    genomeHash: record.genomeHash,
+                    topologyHash: record.topologyHash
+                ))
+                recordEvent(
+                    generation: Int(record.generation),
+                    kind: parent == nil ? .founding : .branching,
+                    title: parent == nil
+                        ? "Founder birth ID \(record.birthID) initialized"
+                        : "Birth ID \(record.birthID) descended from \(parent!)",
+                    detail: String(
+                        format: "GPU step %u; topology hash %08X; branch mutation distance %.4f; inherited resonance %.5f cycles/step.",
+                        record.step,
+                        record.topologyHash,
+                        record.mutationDistance,
+                        record.resonanceFrequency
+                    )
+                )
+            case .death:
+                lineageTracker.registerDeath(birthID: record.birthID, step: UInt64(record.step))
+                if let index = lineageBranches.firstIndex(where: { $0.id == record.birthID }) {
+                    lineageBranches[index].deathStep = record.step
+                }
+                recordEvent(
+                    generation: Int(record.generation),
+                    kind: .disturbance,
+                    title: "Birth ID \(record.birthID) terminated",
+                    detail: String(
+                        format: "GPU step %u; final energy %.4f; occupied-cell fraction %.3f.",
+                        record.step,
+                        record.energy,
+                        record.morphology.x
+                    )
+                )
+            }
+        }
     }
 
     var effectiveZoom: Double {
@@ -294,17 +536,21 @@ final class EvolutionStore: ObservableObject {
     }
 
     func apply(_ newSnapshot: EvolutionSnapshot) {
-        snapshot = newSnapshot
-        guard newSnapshot.generation > lastRecordedGeneration else { return }
+        var analyzedSnapshot = newSnapshot
+        analyzedSnapshot.persistentCladeCount = lineageAnalysis.persistentCladeCount
+        analyzedSnapshot.meanMorphologyDistance = lineageAnalysis.meanMorphologyDistance
+        snapshot = analyzedSnapshot
+        guard analyzedSnapshot.generation > lastRecordedGeneration else { return }
 
         let previous = history.last
-        history.append(newSnapshot)
+        history.append(analyzedSnapshot)
         if history.count > 120 {
             history.removeFirst(history.count - 120)
         }
-        lastRecordedGeneration = newSnapshot.generation
-        observeChange(from: previous, to: newSnapshot)
-        if newSnapshot.metrics.occupiedFraction > 0.72 {
+        lastRecordedGeneration = analyzedSnapshot.generation
+        observeMechanosensoryIntervention(to: analyzedSnapshot)
+        observeChange(from: previous, to: analyzedSnapshot)
+        if analyzedSnapshot.metrics.occupiedFraction > 0.72 {
             expandBackingWorld()
         }
     }
@@ -436,6 +682,29 @@ final class EvolutionStore: ObservableObject {
                 detail: observationDetail(for: current)
             )
         }
+    }
+
+    private func observeMechanosensoryIntervention(to current: EvolutionSnapshot) {
+        guard let pending = pendingMechanosensoryIntervention,
+              current.generation > pending.baseline.generation else { return }
+        let baseline = pending.baseline
+        let baselineDivisionFraction = Double(baseline.dividingCellCount) / Double(max(baseline.cellCount, 1))
+        let currentDivisionFraction = Double(current.dividingCellCount) / Double(max(current.cellCount, 1))
+        recordEvent(
+            generation: current.generation,
+            kind: .intervention,
+            title: pending.blocked
+                ? "Mechanosensory ablation response measured"
+                : "Mechanosensory restoration response measured",
+            detail: String(
+                format: "Single-trajectory response, not a controlled effect estimate: ΔVₘ %+.4f; ΔCa* %+.4f; ΔERK* %+.4f; Δdividing fraction %+.3f.",
+                current.meanMembraneVoltage - baseline.meanMembraneVoltage,
+                current.meanCalciumActivity - baseline.meanCalciumActivity,
+                current.meanERKActivity - baseline.meanERKActivity,
+                currentDivisionFraction - baselineDivisionFraction
+            )
+        )
+        pendingMechanosensoryIntervention = nil
     }
 
     private func recordEvent(

@@ -25,6 +25,7 @@ private struct SimulationUniforms {
     var cameraZoom: Float
     var worldScale: Float
     var viewportAspect: Float
+    var intervention: SIMD4<Float>
 }
 
 private struct PostProcessUniforms {
@@ -46,12 +47,28 @@ private struct AgentState {
     var biomass: Float
     var age: Float
     var generation: UInt32
+    var birthID: UInt32
+    var parentBirthID: UInt32
+    var genomeHash: UInt32
+    var birthStep: UInt32
+    var mutationDistance: Float
+    var lastMutationDistance: Float
+    var lineageFlags: UInt32
+    var reserved: UInt32
 }
 
 private struct AgentObservationRecord {
     var position: SIMD2<Float>
     var generation: UInt32
     var flags: UInt32
+    var birthID: UInt32
+    var parentBirthID: UInt32
+    var genomeHash: UInt32
+    var topologyHash: UInt32
+    var morphology: SIMD4<Float>
+    var dynamics: SIMD4<Float>
+    var mutationDistance: Float
+    var padding: SIMD3<Float>
 }
 
 private struct CellState {
@@ -61,22 +78,126 @@ private struct CellState {
     var phenotype: SIMD4<Float>
     var signals: SIMD4<Float>
     var interaction: SIMD4<Float>
+    var dynamics: SIMD4<Float>
+    var mechanics: SIMD4<Float>
+    var energetics: SIMD4<Float>
+    var regulation: SIMD4<Float>
+    var regulationB: SIMD4<Float>
+    var resonance: SIMD4<Float>
+    var membrane: SIMD4<Float>
+    var signaling: SIMD4<Float>
+    var signalCausality: SIMD4<Float>
 }
 
 private struct CellAggregate {
     var physiology: SIMD4<Float>
     var morphology: SIMD4<Float>
+    var dynamics: SIMD4<Float>
+    var mechanics: SIMD4<Float>
+    var energetics: SIMD4<Float>
+    var regulation: SIMD4<Float>
+    var regulationB: SIMD4<Float>
+    var causality: SIMD4<Float>
+    var resonance: SIMD4<Float>
+    var shape: SIMD4<Float>
+    var signaling: SIMD4<Float>
+    var signalCausality: SIMD4<Float>
+}
+
+private struct DevelopmentalGenome {
+    var topology: SIMD4<UInt32>
+    var mutation: SIMD4<Float>
+    var actuatorBiasA: SIMD4<Float>
+    var actuatorBiasB: SIMD4<Float>
+}
+
+private struct RegulatoryNode {
+    var bias: Float
+    var responseRate: Float
+    var sensorWeight: Float
+    var outputWeight: Float
+    var sensorIndex: UInt32
+    var actuatorMask: UInt32
+    var innovationID: UInt32
+    var flags: UInt32
+}
+
+private struct RegulatoryEdge {
+    var weight: Float
+    var plasticity: Float
+    var delay: Float
+    var reserved: Float
+    var source: UInt32
+    var target: UInt32
+    var innovationID: UInt32
+    var flags: UInt32
+}
+
+private struct ResonanceGenome {
+    var mechanics: SIMD4<Float>
+    var tuning: SIMD4<Float>
+}
+
+private struct MembraneVertex {
+    var position: SIMD2<Float>
+    var velocity: SIMD2<Float>
+    var mechanics: SIMD4<Float>
+}
+
+private struct LineageEventRecord {
+    var sequence: UInt32
+    var kind: UInt32
+    var birthID: UInt32
+    var parentBirthID: UInt32
+    var step: UInt32
+    var generation: UInt32
+    var genomeHash: UInt32
+    var topologyHash: UInt32
+    var mutationDistance: Float
+    var resonanceFrequency: Float
+    var morphologyDistance: Float
+    var energy: Float
+    var morphology: SIMD4<Float>
 }
 
 struct AgentObservation: Sendable, Equatable {
     let id: Int
+    let birthID: UInt32
+    let parentBirthID: UInt32
     let position: SIMD2<Float>
     let generation: UInt32
     let isHunter: Bool
+    let genomeHash: UInt32
+    let topologyHash: UInt32
+    let morphology: SIMD4<Float>
+    let dynamics: SIMD4<Float>
+    let mutationDistance: Float
+}
+
+struct RecordedLineageEvent: Sendable, Equatable {
+    enum Kind: UInt32, Sendable {
+        case birth = 1
+        case death = 2
+    }
+
+    let sequence: UInt32
+    let kind: Kind
+    let birthID: UInt32
+    let parentBirthID: UInt32
+    let step: UInt32
+    let generation: UInt32
+    let genomeHash: UInt32
+    let topologyHash: UInt32
+    let mutationDistance: Float
+    let resonanceFrequency: Float
+    let energy: Float
+    let morphology: SIMD4<Float>
 }
 
 private struct SendableAgentObservationBuffers: @unchecked Sendable {
     let records: MTLBuffer
+    let lineageEvents: MTLBuffer
+    let identityCounters: MTLBuffer
 }
 
 private final class AgentObservationRingState: @unchecked Sendable {
@@ -102,25 +223,79 @@ private final class AgentObservationRingState: @unchecked Sendable {
     }
 }
 
+private final class LineageEventDeliveryState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastSequence: UInt32 = 0
+
+    func consume(
+        records: UnsafePointer<LineageEventRecord>,
+        writeSequence: UInt32,
+        capacity: Int
+    ) -> [RecordedLineageEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard writeSequence > lastSequence else { return [] }
+        let earliest = writeSequence > UInt32(capacity)
+            ? writeSequence - UInt32(capacity) + 1
+            : 1
+        let start = max(lastSequence + 1, earliest)
+        var result: [RecordedLineageEvent] = []
+        result.reserveCapacity(Int(writeSequence - start + 1))
+        for sequence in start...writeSequence {
+            let record = records[Int((sequence - 1) % UInt32(capacity))]
+            guard record.sequence == sequence,
+                  let kind = RecordedLineageEvent.Kind(rawValue: record.kind) else { continue }
+            result.append(RecordedLineageEvent(
+                sequence: sequence,
+                kind: kind,
+                birthID: record.birthID,
+                parentBirthID: record.parentBirthID,
+                step: record.step,
+                generation: record.generation,
+                genomeHash: record.genomeHash,
+                topologyHash: record.topologyHash,
+                mutationDistance: record.mutationDistance,
+                resonanceFrequency: record.resonanceFrequency,
+                energy: record.energy,
+                morphology: record.morphology
+            ))
+        }
+        lastSequence = writeSequence
+        return result
+    }
+
+    func reset() {
+        lock.lock()
+        lastSequence = 0
+        lock.unlock()
+    }
+}
+
 private final class MetricReadbackSlot: @unchecked Sendable {
     let metrics: MTLBuffer
     let quantumNorm: MTLBuffer
     let agentState: MTLBuffer
     let agentOccupancy: MTLBuffer
     let cellAggregates: MTLBuffer
+    let developmentalGenomes: MTLBuffer
+    let resonanceGenomes: MTLBuffer
 
     init(
         metrics: MTLBuffer,
         quantumNorm: MTLBuffer,
         agentState: MTLBuffer,
         agentOccupancy: MTLBuffer,
-        cellAggregates: MTLBuffer
+        cellAggregates: MTLBuffer,
+        developmentalGenomes: MTLBuffer,
+        resonanceGenomes: MTLBuffer
     ) {
         self.metrics = metrics
         self.quantumNorm = quantumNorm
         self.agentState = agentState
         self.agentOccupancy = agentOccupancy
         self.cellAggregates = cellAggregates
+        self.developmentalGenomes = developmentalGenomes
+        self.resonanceGenomes = resonanceGenomes
     }
 }
 
@@ -162,6 +337,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let maxAgentCount = 384
     private static let cellsPerAgent = 24
     private static let maxCellCount = maxAgentCount * cellsPerAgent
+    private static let regulatoryNodeCapacity = 16
+    private static let regulatoryEdgeCapacity = 48
+    private static let membraneVertexCount = 12
+    private static let lineageEventCapacity = 4_096
     private static let agentObservationRingSize = 3
     private static let agentObservationIntervalFrames: UInt64 = 6
     private static let trackedAgentObservationIntervalFrames: UInt64 = 2
@@ -177,6 +356,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let initializeQuantumPipeline: MTLComputePipelineState
     private let expandWorldPipeline: MTLComputePipelineState
     private let expandQuantumPipeline: MTLComputePipelineState
+    private let initializeMechanicalPipeline: MTLComputePipelineState
+    private let expandMechanicalPipeline: MTLComputePipelineState
+    private let evolveMechanicalPipeline: MTLComputePipelineState
     private let reactionPipeline: MTLComputePipelineState
     private let quantumPipeline: MTLComputePipelineState
     private let damagePipeline: MTLComputePipelineState
@@ -191,7 +373,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let expandAgentPipeline: MTLComputePipelineState
     private let collectAgentObservationPipeline: MTLComputePipelineState
     private let evolveCellPipeline: MTLComputePipelineState
+    private let evolveMembranePipeline: MTLComputePipelineState
     private let divideAndReduceCellPipeline: MTLComputePipelineState
+    private let compactCellRenderPipeline: MTLComputePipelineState
     private let renderPipeline: MTLRenderPipelineState
     private let cellularSurfacePipeline: MTLRenderPipelineState
     private let quantumRenderPipeline: MTLRenderPipelineState
@@ -219,6 +403,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var reactionEventState: MTLTexture
     private var environmentState: MTLTexture
     private var reactionEnvironmentState: MTLTexture
+    private var mechanicalState: MTLTexture
+    private var reactionMechanicalState: MTLTexture
     private var quantumState: MTLTexture
     private var reactionQuantumState: MTLTexture
     private var agentState: MTLBuffer
@@ -228,16 +414,31 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var reactionCellState: MTLBuffer
     private let cellOccupancy: MTLBuffer
     private let cellAggregates: MTLBuffer
+    private let developmentalGenomes: MTLBuffer
+    private let regulatoryNodes: MTLBuffer
+    private let regulatoryEdges: MTLBuffer
+    private let regulatoryStates: MTLBuffer
+    private let resonanceGenomes: MTLBuffer
+    private let membraneVertices: MTLBuffer
+    private let visibleCellIndices: MTLBuffer
+    private let cellDrawArguments: MTLBuffer
+    private let identityCounters: MTLBuffer
+    private let lineageEvents: MTLBuffer
+    private let mechanicalForcing: MTLBuffer
     private let agentObservationBuffers: [MTLBuffer]
+    private let lineageEventObservationBuffers: [MTLBuffer]
+    private let identityCounterObservationBuffers: [MTLBuffer]
     private let metricReadbackSlots: [MetricReadbackSlot]
     private let stateLock = NSLock()
     private let agentObservationRingState = AgentObservationRingState(slotCount: agentObservationRingSize)
+    private let lineageEventDeliveryState = LineageEventDeliveryState()
     private var settings = RendererSettings(
         isRunning: true,
         stepsPerFrame: 3,
         resourceFlux: 1,
         mutationScale: 1,
         transportScale: 1,
+        mechanosensingGain: 1,
         displayMode: 0,
         trackedAgentID: .max,
         cameraCenter: SIMD2<Float>(repeating: 0.5),
@@ -261,9 +462,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var latestSnapshot = EvolutionSnapshot()
 
     var onSnapshot: (@Sendable (EvolutionSnapshot) -> Void)?
-    var onAgentObservations: (@Sendable ([AgentObservation]) -> Void)?
+    var onObservationBatch: (@Sendable ([RecordedLineageEvent], [AgentObservation]) -> Void)?
 
     init(view: MTKView) throws {
+        precondition(MemoryLayout<AgentState>.stride == 128, "AgentState Metal ABI drift")
+        precondition(MemoryLayout<AgentObservationRecord>.stride == 96, "AgentObservationRecord Metal ABI drift")
+        precondition(MemoryLayout<CellState>.stride == 224, "CellState Metal ABI drift")
+        precondition(MemoryLayout<CellAggregate>.stride == 192, "CellAggregate Metal ABI drift")
+        precondition(MemoryLayout<DevelopmentalGenome>.stride == 64, "DevelopmentalGenome Metal ABI drift")
+        precondition(MemoryLayout<RegulatoryNode>.stride == 32, "RegulatoryNode Metal ABI drift")
+        precondition(MemoryLayout<RegulatoryEdge>.stride == 32, "RegulatoryEdge Metal ABI drift")
+        precondition(MemoryLayout<ResonanceGenome>.stride == 32, "ResonanceGenome Metal ABI drift")
+        precondition(MemoryLayout<MembraneVertex>.stride == 32, "MembraneVertex Metal ABI drift")
+        precondition(MemoryLayout<LineageEventRecord>.stride == 64, "LineageEventRecord Metal ABI drift")
         guard let device = view.device ?? MTLCreateSystemDefaultDevice() else {
             throw EvolutionRendererError.noMetalDevice
         }
@@ -279,6 +490,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         initializeQuantumPipeline = try Self.computePipeline(named: "initializeQuantumField", library: library, device: device)
         expandWorldPipeline = try Self.computePipeline(named: "expandWorld", library: library, device: device)
         expandQuantumPipeline = try Self.computePipeline(named: "expandQuantumField", library: library, device: device)
+        initializeMechanicalPipeline = try Self.computePipeline(
+            named: "initializeMechanicalField", library: library, device: device
+        )
+        expandMechanicalPipeline = try Self.computePipeline(
+            named: "expandMechanicalField", library: library, device: device
+        )
+        evolveMechanicalPipeline = try Self.computePipeline(
+            named: "evolveMechanicalField", library: library, device: device
+        )
         reactionPipeline = try Self.computePipeline(named: "reactWorld", library: library, device: device)
         quantumPipeline = try Self.computePipeline(named: "evolveQuantumField", library: library, device: device)
         damagePipeline = try Self.computePipeline(named: "damageWorld", library: library, device: device)
@@ -301,8 +521,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             library: library,
             device: device
         )
+        evolveMembranePipeline = try Self.computePipeline(
+            named: "evolveCellMembranes",
+            library: library,
+            device: device
+        )
         divideAndReduceCellPipeline = try Self.computePipeline(
             named: "divideAndReduceOrganismCells",
+            library: library,
+            device: device
+        )
+        compactCellRenderPipeline = try Self.computePipeline(
+            named: "compactVisibleCells",
             library: library,
             device: device
         )
@@ -409,6 +639,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         reactionEventState = try Self.makeWorldTexture(device: device, label: "Reaction biological events")
         environmentState = try Self.makeWorldTexture(device: device, label: "Persistent geology and hazards")
         reactionEnvironmentState = try Self.makeWorldTexture(device: device, label: "Expanded geology and hazards")
+        mechanicalState = try Self.makeWorldTexture(device: device, label: "Extracellular displacement and velocity")
+        reactionMechanicalState = try Self.makeWorldTexture(device: device, label: "Reaction extracellular mechanics")
         quantumState = try Self.makeQuantumTexture(device: device, label: "Quantum wavefunction")
         reactionQuantumState = try Self.makeQuantumTexture(device: device, label: "Reaction quantum wavefunction")
 
@@ -430,33 +662,113 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let cellStateLength = Self.maxCellCount * MemoryLayout<CellState>.stride
         let cellOccupancyLength = Self.maxCellCount * MemoryLayout<UInt32>.stride
         let cellAggregateLength = Self.maxAgentCount * MemoryLayout<CellAggregate>.stride
+        let developmentalGenomeLength = Self.maxAgentCount * MemoryLayout<DevelopmentalGenome>.stride
+        let regulatoryNodeLength = Self.maxAgentCount * Self.regulatoryNodeCapacity *
+            MemoryLayout<RegulatoryNode>.stride
+        let regulatoryEdgeLength = Self.maxAgentCount * Self.regulatoryEdgeCapacity *
+            MemoryLayout<RegulatoryEdge>.stride
+        let regulatoryStateLength = Self.maxCellCount * Self.regulatoryNodeCapacity *
+            MemoryLayout<Float>.stride
+        let resonanceGenomeLength = Self.maxAgentCount * MemoryLayout<ResonanceGenome>.stride
+        let membraneVertexLength = Self.maxCellCount * Self.membraneVertexCount *
+            MemoryLayout<MembraneVertex>.stride
+        let visibleCellIndexLength = Self.maxCellCount * MemoryLayout<UInt32>.stride
+        let drawArgumentLength = 4 * MemoryLayout<UInt32>.stride
+        let identityCounterLength = 4 * MemoryLayout<UInt32>.stride
+        let lineageEventLength = Self.lineageEventCapacity * MemoryLayout<LineageEventRecord>.stride
+        let mechanicalForcingLength = Self.gridSize * Self.gridSize * Self.worldCount * 2 *
+            MemoryLayout<Int32>.stride
         guard let cellState = device.makeBuffer(length: cellStateLength, options: .storageModePrivate),
               let reactionCellState = device.makeBuffer(length: cellStateLength, options: .storageModePrivate),
               let cellOccupancy = device.makeBuffer(length: cellOccupancyLength, options: .storageModePrivate),
-              let cellAggregates = device.makeBuffer(length: cellAggregateLength, options: .storageModePrivate) else {
+              let cellAggregates = device.makeBuffer(length: cellAggregateLength, options: .storageModePrivate),
+              let developmentalGenomes = device.makeBuffer(
+                length: developmentalGenomeLength,
+                options: .storageModePrivate
+              ),
+              let regulatoryNodes = device.makeBuffer(length: regulatoryNodeLength, options: .storageModePrivate),
+              let regulatoryEdges = device.makeBuffer(length: regulatoryEdgeLength, options: .storageModePrivate),
+              let regulatoryStates = device.makeBuffer(length: regulatoryStateLength, options: .storageModePrivate),
+              let resonanceGenomes = device.makeBuffer(length: resonanceGenomeLength, options: .storageModePrivate),
+              let membraneVertices = device.makeBuffer(length: membraneVertexLength, options: .storageModePrivate),
+              let visibleCellIndices = device.makeBuffer(
+                length: visibleCellIndexLength,
+                options: .storageModePrivate
+              ),
+              let cellDrawArguments = device.makeBuffer(
+                length: drawArgumentLength,
+                options: .storageModeShared
+              ),
+              let identityCounters = device.makeBuffer(length: identityCounterLength, options: .storageModePrivate),
+              let lineageEvents = device.makeBuffer(length: lineageEventLength, options: .storageModePrivate),
+              let mechanicalForcing = device.makeBuffer(
+                length: mechanicalForcingLength,
+                options: .storageModePrivate
+              ) else {
             throw EvolutionRendererError.resourceAllocation("persistent multicellular state")
         }
         cellState.label = "Persistent organism cells"
         reactionCellState.label = "Reaction organism cells"
         cellOccupancy.label = "Cell occupancy"
         cellAggregates.label = "Per-organism cellular aggregates"
+        developmentalGenomes.label = "Evolvable developmental genomes"
+        regulatoryNodes.label = "Sparse developmental nodes"
+        regulatoryEdges.label = "Sparse developmental edges"
+        regulatoryStates.label = "Cell-local regulatory activity"
+        resonanceGenomes.label = "Heritable mechanosensory resonance"
+        membraneVertices.label = "Deformable cell membrane vertices"
+        visibleCellIndices.label = "GPU-compacted visible cell indices"
+        cellDrawArguments.label = "Indirect living-cell draw arguments"
+        let drawArguments = cellDrawArguments.contents().bindMemory(to: UInt32.self, capacity: 4)
+        drawArguments[0] = UInt32(Self.membraneVertexCount * 3)
+        drawArguments[1] = 0
+        drawArguments[2] = 0
+        drawArguments[3] = 0
+        identityCounters.label = "Permanent identity and innovation counters"
+        lineageEvents.label = "GPU lineage event ring"
+        mechanicalForcing.label = "Cell contractile forcing"
         self.cellState = cellState
         self.reactionCellState = reactionCellState
         self.cellOccupancy = cellOccupancy
         self.cellAggregates = cellAggregates
+        self.developmentalGenomes = developmentalGenomes
+        self.regulatoryNodes = regulatoryNodes
+        self.regulatoryEdges = regulatoryEdges
+        self.regulatoryStates = regulatoryStates
+        self.resonanceGenomes = resonanceGenomes
+        self.membraneVertices = membraneVertices
+        self.visibleCellIndices = visibleCellIndices
+        self.cellDrawArguments = cellDrawArguments
+        self.identityCounters = identityCounters
+        self.lineageEvents = lineageEvents
+        self.mechanicalForcing = mechanicalForcing
         let observationLength = Self.maxAgentCount * MemoryLayout<AgentObservationRecord>.stride
         var observationBuffers: [MTLBuffer] = []
+        var observedLineageEventBuffers: [MTLBuffer] = []
+        var observedIdentityCounterBuffers: [MTLBuffer] = []
         for slot in 0..<Self.agentObservationRingSize {
             guard let observationBuffer = device.makeBuffer(
                 length: observationLength,
+                options: .storageModeShared
+            ), let observedLineageEvents = device.makeBuffer(
+                length: lineageEventLength,
+                options: .storageModeShared
+            ), let observedIdentityCounters = device.makeBuffer(
+                length: identityCounterLength,
                 options: .storageModeShared
             ) else {
                 throw EvolutionRendererError.resourceAllocation("organism observation ring")
             }
             observationBuffer.label = "Compact organism observations \(slot)"
+            observedLineageEvents.label = "Observed lineage events \(slot)"
+            observedIdentityCounters.label = "Observed identity counters \(slot)"
             observationBuffers.append(observationBuffer)
+            observedLineageEventBuffers.append(observedLineageEvents)
+            observedIdentityCounterBuffers.append(observedIdentityCounters)
         }
         agentObservationBuffers = observationBuffers
+        lineageEventObservationBuffers = observedLineageEventBuffers
+        identityCounterObservationBuffers = observedIdentityCounterBuffers
 
         let metricsLength = Self.worldCount * Self.metricCount * MemoryLayout<UInt32>.stride
         let occupancyLength = Self.maxAgentCount * MemoryLayout<UInt32>.stride
@@ -472,6 +784,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                   let observedCellAggregates = device.makeBuffer(
                     length: cellAggregateLength,
                     options: .storageModeShared
+                  ),
+                  let observedDevelopmentalGenomes = device.makeBuffer(
+                    length: developmentalGenomeLength,
+                    options: .storageModeShared
+                  ),
+                  let observedResonanceGenomes = device.makeBuffer(
+                    length: resonanceGenomeLength,
+                    options: .storageModeShared
                   ) else {
                 throw EvolutionRendererError.resourceAllocation("the metric readback ring")
             }
@@ -480,12 +800,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             observedAgents.label = "Metric organism state \(slot)"
             observedOccupancy.label = "Metric organism occupancy \(slot)"
             observedCellAggregates.label = "Metric cellular aggregates \(slot)"
+            observedDevelopmentalGenomes.label = "Metric developmental genomes \(slot)"
+            observedResonanceGenomes.label = "Metric resonance genomes \(slot)"
             metricSlots.append(MetricReadbackSlot(
                 metrics: metrics,
                 quantumNorm: quantumNorm,
                 agentState: observedAgents,
                 agentOccupancy: observedOccupancy,
-                cellAggregates: observedCellAggregates
+                cellAggregates: observedCellAggregates,
+                developmentalGenomes: observedDevelopmentalGenomes,
+                resonanceGenomes: observedResonanceGenomes
             ))
         }
         metricReadbackSlots = metricSlots
@@ -525,6 +849,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             quantumStep = 0
             generation = 0
             evaluator = AdaptiveComplexityEvaluator(seed: 0xA170_6E51 ^ frameSettings.resetToken, eliteCount: 1)
+            lineageEventDeliveryState.reset()
             encodeInitialization(into: commandBuffer, settings: frameSettings)
             appliedResetToken = frameSettings.resetToken
             appliedExpansionToken = frameSettings.expansionToken
@@ -651,7 +976,20 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setTexture(environmentState, index: 6)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
         dispatchWorlds(encoder, pipeline: initializePipeline)
+        encoder.setComputePipelineState(initializeMechanicalPipeline)
+        encoder.setTexture(mechanicalState, index: 0)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
+        dispatchWorlds(encoder, pipeline: initializeMechanicalPipeline)
         encoder.endEncoding()
+        if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
+            blitEncoder.label = "Initialize mechanical forcing"
+            blitEncoder.fill(
+                buffer: mechanicalForcing,
+                range: 0..<mechanicalForcing.length,
+                value: 0
+            )
+            blitEncoder.endEncoding()
+        }
         encodeAgentInitialization(into: commandBuffer, settings: settings)
         encodeQuantumInitialization(into: commandBuffer, settings: settings)
         copyAllSlices(from: state, to: checkpointState, commandBuffer: commandBuffer)
@@ -671,6 +1009,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellState, offset: 0, index: 3)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 4)
         encoder.setBuffer(cellAggregates, offset: 0, index: 5)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 6)
+        encoder.setBuffer(regulatoryNodes, offset: 0, index: 7)
+        encoder.setBuffer(regulatoryEdges, offset: 0, index: 8)
+        encoder.setBuffer(regulatoryStates, offset: 0, index: 9)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 10)
+        encoder.setBuffer(membraneVertices, offset: 0, index: 11)
+        encoder.setBuffer(identityCounters, offset: 0, index: 12)
+        encoder.setBuffer(lineageEvents, offset: 0, index: 13)
         dispatchAgents(encoder, pipeline: initializeAgentPipeline)
         encoder.endEncoding()
     }
@@ -690,6 +1036,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellState, offset: 0, index: 3)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 4)
         encoder.setBuffer(cellAggregates, offset: 0, index: 5)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 6)
+        encoder.setBuffer(regulatoryNodes, offset: 0, index: 7)
+        encoder.setBuffer(regulatoryEdges, offset: 0, index: 8)
+        encoder.setBuffer(regulatoryStates, offset: 0, index: 9)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 10)
+        encoder.setBuffer(identityCounters, offset: 0, index: 11)
+        encoder.setBuffer(lineageEvents, offset: 0, index: 12)
         encoder.dispatchThreads(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
@@ -742,6 +1095,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         swapWorldReactionState()
         swap(&environmentState, &reactionEnvironmentState)
 
+        guard let mechanicalEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        mechanicalEncoder.label = "Expand extracellular mechanical medium"
+        mechanicalEncoder.setComputePipelineState(expandMechanicalPipeline)
+        mechanicalEncoder.setTexture(mechanicalState, index: 0)
+        mechanicalEncoder.setTexture(reactionMechanicalState, index: 1)
+        mechanicalEncoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
+        dispatchWorlds(mechanicalEncoder, pipeline: expandMechanicalPipeline)
+        mechanicalEncoder.endEncoding()
+        swap(&mechanicalState, &reactionMechanicalState)
+
         guard let quantumEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
         quantumEncoder.label = "Expand quantum field with world"
         quantumEncoder.setComputePipelineState(expandQuantumPipeline)
@@ -784,6 +1147,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setTexture(reactionEventState, index: 11)
         encoder.setTexture(environmentState, index: 12)
         encoder.setTexture(quantumState, index: 13)
+        encoder.setTexture(mechanicalState, index: 14)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
         dispatchWorlds(encoder, pipeline: reactionPipeline)
         encoder.endEncoding()
@@ -803,13 +1167,24 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellState, offset: 0, index: 3)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 4)
         encoder.setBuffer(cellAggregates, offset: 0, index: 5)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 6)
+        encoder.setBuffer(regulatoryNodes, offset: 0, index: 7)
+        encoder.setBuffer(regulatoryEdges, offset: 0, index: 8)
+        encoder.setBuffer(regulatoryStates, offset: 0, index: 9)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 10)
+        encoder.setBuffer(identityCounters, offset: 0, index: 11)
+        encoder.setBuffer(lineageEvents, offset: 0, index: 12)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(genomeA, index: 1)
         encoder.setTexture(genomeB, index: 2)
         encoder.setTexture(genomeC, index: 3)
         encoder.setTexture(ecology, index: 4)
         dispatch2D(encoder, pipeline: nucleateFounderPipeline)
-        encoder.memoryBarrier(resources: [agentState, agentOccupancy, cellState, cellOccupancy, cellAggregates])
+        encoder.memoryBarrier(resources: [
+            agentState, agentOccupancy, cellState, cellOccupancy, cellAggregates,
+            developmentalGenomes, regulatoryNodes, regulatoryEdges, regulatoryStates,
+            resonanceGenomes, identityCounters, lineageEvents
+        ])
 
         encoder.setComputePipelineState(evolveAgentPipeline)
         encoder.setBuffer(agentState, offset: 0, index: 0)
@@ -817,11 +1192,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(agentOccupancy, offset: 0, index: 2)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 3)
         encoder.setBuffer(cellAggregates, offset: 0, index: 4)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 5)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 6)
+        encoder.setBuffer(lineageEvents, offset: 0, index: 7)
+        encoder.setBuffer(identityCounters, offset: 0, index: 8)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
         encoder.setTexture(environmentState, index: 2)
+        encoder.setTexture(mechanicalState, index: 3)
         dispatchAgents(encoder, pipeline: evolveAgentPipeline)
-        encoder.memoryBarrier(resources: [reactionAgentState])
+        encoder.memoryBarrier(resources: [reactionAgentState, agentOccupancy, lineageEvents, identityCounters])
         swap(&agentState, &reactionAgentState)
 
         encoder.setComputePipelineState(spawnAgentPipeline)
@@ -831,6 +1211,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellState, offset: 0, index: 3)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 4)
         encoder.setBuffer(cellAggregates, offset: 0, index: 5)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 6)
+        encoder.setBuffer(regulatoryNodes, offset: 0, index: 7)
+        encoder.setBuffer(regulatoryEdges, offset: 0, index: 8)
+        encoder.setBuffer(regulatoryStates, offset: 0, index: 9)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 10)
+        encoder.setBuffer(identityCounters, offset: 0, index: 11)
+        encoder.setBuffer(lineageEvents, offset: 0, index: 12)
         dispatchAgents(encoder, pipeline: spawnAgentPipeline)
         encoder.endEncoding()
         encodeCellStep(into: commandBuffer, settings: settings)
@@ -838,7 +1225,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
     private func encodeCellStep(into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.label = "Cell mechanics, metabolism, signaling, division, and apoptosis"
+        encoder.label = "Cell energetics, electrophysiology, oscillators, and mechanical waves"
         var uniforms = makeUniforms(settings: settings)
         encoder.setComputePipelineState(evolveCellPipeline)
         encoder.setBuffer(agentState, offset: 0, index: 0)
@@ -847,12 +1234,29 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(reactionCellState, offset: 0, index: 3)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 4)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 5)
+        encoder.setBuffer(mechanicalForcing, offset: 0, index: 6)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 7)
+        encoder.setBuffer(regulatoryNodes, offset: 0, index: 8)
+        encoder.setBuffer(regulatoryEdges, offset: 0, index: 9)
+        encoder.setBuffer(regulatoryStates, offset: 0, index: 10)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 11)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
         encoder.setTexture(environmentState, index: 2)
         encoder.setTexture(eventState, index: 3)
+        encoder.setTexture(mechanicalState, index: 4)
         dispatchCells(encoder, pipeline: evolveCellPipeline)
-        encoder.memoryBarrier(resources: [reactionCellState, cellOccupancy])
+        encoder.memoryBarrier(resources: [reactionCellState, cellOccupancy, mechanicalForcing])
+        swap(&cellState, &reactionCellState)
+
+        encoder.setComputePipelineState(evolveMembranePipeline)
+        encoder.setBuffer(cellState, offset: 0, index: 0)
+        encoder.setBuffer(reactionCellState, offset: 0, index: 1)
+        encoder.setBuffer(cellOccupancy, offset: 0, index: 2)
+        encoder.setBuffer(membraneVertices, offset: 0, index: 3)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 4)
+        dispatchCells(encoder, pipeline: evolveMembranePipeline)
+        encoder.memoryBarrier(resources: [reactionCellState, membraneVertices])
         swap(&cellState, &reactionCellState)
 
         encoder.setComputePipelineState(divideAndReduceCellPipeline)
@@ -862,8 +1266,21 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellOccupancy, offset: 0, index: 3)
         encoder.setBuffer(cellAggregates, offset: 0, index: 4)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 5)
+        encoder.setBuffer(regulatoryStates, offset: 0, index: 6)
+        encoder.setBuffer(membraneVertices, offset: 0, index: 7)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 8)
         dispatchAgents(encoder, pipeline: divideAndReduceCellPipeline)
+        encoder.memoryBarrier(resources: [cellState, cellAggregates, regulatoryStates, membraneVertices])
+
+        encoder.setComputePipelineState(evolveMechanicalPipeline)
+        encoder.setTexture(mechanicalState, index: 0)
+        encoder.setTexture(reactionMechanicalState, index: 1)
+        encoder.setTexture(environmentState, index: 2)
+        encoder.setBuffer(mechanicalForcing, offset: 0, index: 0)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 1)
+        dispatchWorlds(encoder, pipeline: evolveMechanicalPipeline)
         encoder.endEncoding()
+        swap(&mechanicalState, &reactionMechanicalState)
     }
 
     private func encodeQuantumStep(into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
@@ -968,6 +1385,20 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 destinationOffset: 0,
                 size: slot.cellAggregates.length
             )
+            blit.copy(
+                from: developmentalGenomes,
+                sourceOffset: 0,
+                to: slot.developmentalGenomes,
+                destinationOffset: 0,
+                size: slot.developmentalGenomes.length
+            )
+            blit.copy(
+                from: resonanceGenomes,
+                sourceOffset: 0,
+                to: slot.resonanceGenomes,
+                destinationOffset: 0,
+                size: slot.resonanceGenomes.length
+            )
             blit.endEncoding()
         }
     }
@@ -994,6 +1425,32 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encodeFounderInjection(into: commandBuffer, settings: settings, position: brush.position)
     }
 
+    private func encodeVisibleCellCompaction(
+        into commandBuffer: MTLCommandBuffer,
+        settings: RendererSettings
+    ) {
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.label = "Reset indirect living-cell count"
+            blit.fill(
+                buffer: cellDrawArguments,
+                range: MemoryLayout<UInt32>.stride..<(2 * MemoryLayout<UInt32>.stride),
+                value: 0
+            )
+            blit.endEncoding()
+        }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        encoder.label = "Compact visible living cells"
+        var uniforms = makeUniforms(settings: settings)
+        encoder.setComputePipelineState(compactCellRenderPipeline)
+        encoder.setBuffer(agentOccupancy, offset: 0, index: 0)
+        encoder.setBuffer(cellOccupancy, offset: 0, index: 1)
+        encoder.setBuffer(visibleCellIndices, offset: 0, index: 2)
+        encoder.setBuffer(cellDrawArguments, offset: 0, index: 3)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 4)
+        dispatchCells(encoder, pipeline: compactCellRenderPipeline)
+        encoder.endEncoding()
+    }
+
     private func encodeRender(view: MTKView, into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
         guard let drawable = view.currentDrawable,
               let drawableDescriptor = view.currentRenderPassDescriptor,
@@ -1001,6 +1458,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               let sceneColor,
               let bloomTextureA,
               let bloomTextureB else { return }
+
+        let observationZoom = settings.cameraZoom / max(settings.worldScale, 1)
+        if observationZoom > 5, observationZoom < 180 {
+            encodeVisibleCellCompaction(into: commandBuffer, settings: settings)
+        }
 
         let sceneDescriptor = MTLRenderPassDescriptor()
         let sceneAttachment = sceneDescriptor.colorAttachments[0]!
@@ -1011,7 +1473,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: sceneDescriptor) else { return }
         encoder.label = "Render linear HDR simulation state"
         var uniforms = makeUniforms(settings: settings)
-        let observationZoom = settings.cameraZoom / max(settings.worldScale, 1)
         if observationZoom >= 64 {
             encoder.setRenderPipelineState(quantumRenderPipeline)
             encoder.setFragmentTexture(quantumState, index: 0)
@@ -1023,31 +1484,35 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             encoder.setFragmentTexture(ecology, index: 1)
             encoder.setFragmentTexture(environmentState, index: 2)
             encoder.setFragmentTexture(eventState, index: 3)
+            encoder.setFragmentTexture(mechanicalState, index: 4)
         } else {
             encoder.setRenderPipelineState(renderPipeline)
             encoder.setFragmentTexture(state, index: 0)
             encoder.setFragmentTexture(ecology, index: 1)
             encoder.setFragmentTexture(environmentState, index: 2)
             encoder.setFragmentTexture(eventState, index: 3)
+            encoder.setFragmentTexture(mechanicalState, index: 4)
         }
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
-        encoder.setRenderPipelineState(agentRenderPipeline)
-        encoder.setVertexBuffer(agentState, offset: 0, index: 0)
-        encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
-        encoder.setVertexBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 2)
-        encoder.setVertexBuffer(cellAggregates, offset: 0, index: 3)
-        encoder.setFragmentTexture(state, index: 0)
-        encoder.setFragmentTexture(ecology, index: 1)
-        encoder.setFragmentTexture(quantumState, index: 2)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
-        encoder.drawPrimitives(
-            type: .triangle,
-            vertexStart: 0,
-            vertexCount: 6,
-            instanceCount: Self.maxAgentCount
-        )
+        if observationZoom < 24 {
+            encoder.setRenderPipelineState(agentRenderPipeline)
+            encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+            encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 2)
+            encoder.setVertexBuffer(cellAggregates, offset: 0, index: 3)
+            encoder.setFragmentTexture(state, index: 0)
+            encoder.setFragmentTexture(ecology, index: 1)
+            encoder.setFragmentTexture(quantumState, index: 2)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
+            encoder.drawPrimitives(
+                type: .triangle,
+                vertexStart: 0,
+                vertexCount: 6,
+                instanceCount: Self.maxAgentCount
+            )
+        }
 
         if observationZoom > 5, observationZoom < 180 {
             encoder.setRenderPipelineState(cellRenderPipeline)
@@ -1055,13 +1520,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
             encoder.setVertexBuffer(cellState, offset: 0, index: 2)
             encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
-            encoder.setVertexBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 4)
+            encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 5)
+            encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
             encoder.drawPrimitives(
                 type: .triangle,
-                vertexStart: 0,
-                vertexCount: 6,
-                instanceCount: Self.maxCellCount
+                indirectBuffer: cellDrawArguments,
+                indirectBufferOffset: 0
             )
         }
         encoder.endEncoding()
@@ -1185,6 +1651,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private func encodeAgentObservation(into commandBuffer: MTLCommandBuffer) {
         guard let slot = agentObservationRingState.acquire() else { return }
         let observedRecords = agentObservationBuffers[slot]
+        let observedLineageEvents = lineageEventObservationBuffers[slot]
+        let observedIdentityCounters = identityCounterObservationBuffers[slot]
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             agentObservationRingState.release(slot)
             return
@@ -1194,16 +1662,46 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(agentState, offset: 0, index: 0)
         encoder.setBuffer(agentOccupancy, offset: 0, index: 1)
         encoder.setBuffer(observedRecords, offset: 0, index: 2)
+        encoder.setBuffer(cellAggregates, offset: 0, index: 3)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 4)
+        encoder.setBuffer(resonanceGenomes, offset: 0, index: 5)
         dispatchAgents(encoder, pipeline: collectAgentObservationPipeline)
         encoder.endEncoding()
 
-        let callback = onAgentObservations
-        let buffers = SendableAgentObservationBuffers(records: observedRecords)
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else {
+            let ringState = agentObservationRingState
+            commandBuffer.addCompletedHandler { _ in ringState.release(slot) }
+            return
+        }
+        blit.label = "Collect permanent lineage records"
+        blit.copy(
+            from: lineageEvents,
+            sourceOffset: 0,
+            to: observedLineageEvents,
+            destinationOffset: 0,
+            size: observedLineageEvents.length
+        )
+        blit.copy(
+            from: identityCounters,
+            sourceOffset: 0,
+            to: observedIdentityCounters,
+            destinationOffset: 0,
+            size: observedIdentityCounters.length
+        )
+        blit.endEncoding()
+
+        let callback = onObservationBatch
+        let buffers = SendableAgentObservationBuffers(
+            records: observedRecords,
+            lineageEvents: observedLineageEvents,
+            identityCounters: observedIdentityCounters
+        )
         let ringState = agentObservationRingState
+        let deliveryState = lineageEventDeliveryState
         let agentCapacity = Self.maxAgentCount
+        let lineageCapacity = Self.lineageEventCapacity
         commandBuffer.addCompletedHandler { _ in
             defer { ringState.release(slot) }
-            guard let callback else { return }
             let records = buffers.records.contents().bindMemory(
                 to: AgentObservationRecord.self,
                 capacity: agentCapacity
@@ -1214,12 +1712,29 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 let record = records[index]
                 observations.append(AgentObservation(
                     id: index,
+                    birthID: record.birthID,
+                    parentBirthID: record.parentBirthID,
                     position: record.position,
                     generation: record.generation,
-                    isHunter: record.flags & 2 != 0
+                    isHunter: record.flags & 2 != 0,
+                    genomeHash: record.genomeHash,
+                    topologyHash: record.topologyHash,
+                    morphology: record.morphology,
+                    dynamics: record.dynamics,
+                    mutationDistance: record.mutationDistance
                 ))
             }
-            callback(observations)
+            let eventRecords = buffers.lineageEvents.contents().bindMemory(
+                to: LineageEventRecord.self,
+                capacity: lineageCapacity
+            )
+            let counters = buffers.identityCounters.contents().bindMemory(to: UInt32.self, capacity: 4)
+            let events = deliveryState.consume(
+                records: eventRecords,
+                writeSequence: counters[2],
+                capacity: lineageCapacity
+            )
+            callback?(events, observations)
         }
     }
 
@@ -1246,13 +1761,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             to: CellAggregate.self,
             capacity: Self.maxAgentCount
         )
+        let developmental = slot.developmentalGenomes.contents().bindMemory(
+            to: DevelopmentalGenome.self,
+            capacity: Self.maxAgentCount
+        )
+        let resonance = slot.resonanceGenomes.contents().bindMemory(
+            to: ResonanceGenome.self,
+            capacity: Self.maxAgentCount
+        )
         let livingIndices = (0..<Self.maxAgentCount).filter { occupancy[$0] != 0 }
         let hunterCount = livingIndices.reduce(into: 0) { count, index in
             if agents[index].geneC.w >= 0.08 { count += 1 }
         }
-        let lineageBins = Set(livingIndices.map { index in
-            Int((agents[index].geneB.w - floor(agents[index].geneB.w)) * 32)
-        })
+        let lineageBins = Set(livingIndices.map { developmental[$0].topology.z })
         let meanOrganismSpeed = livingIndices.isEmpty ? 0 : livingIndices.reduce(0.0) { total, index in
             total + Double(simd_length(agents[index].velocity)) * Double(max(settings.worldScale, 1))
         } / Double(livingIndices.count)
@@ -1272,6 +1793,88 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let meanCellStress = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
             total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].physiology.w, 0))
         } / Double(cellCount)
+        let meanMembraneVoltage = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * cellular[index].dynamics.x)
+        } / Double(cellCount)
+        let meanPhaseCoherence = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].dynamics.y, 0))
+        } / Double(cellCount)
+        let meanOscillationFrequency = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].dynamics.z, 0))
+        } / Double(cellCount)
+        let meanTissueStrain = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].mechanics.x, 0))
+        } / Double(cellCount)
+        let cellularEnergyHarvest = livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].energetics.x, 0))
+        }
+        let cellularEnergyDemand = livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].energetics.y + cellular[index].energetics.z, 0))
+        }
+        let cellularEnergyDissipation = livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].energetics.w, 0))
+        }
+        let meanDevelopmentalRegulation: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].regulation) * weight
+            } / Double(max(cellCount, 1))
+        let meanCausalEffects: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].causality) * weight
+            } / Double(max(cellCount, 1))
+        let meanSignaling: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].signaling) * weight
+            } / Double(max(cellCount, 1))
+        let meanSignalCausality: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].signalCausality) * weight
+            } / Double(max(cellCount, 1))
+        let developmentalNodeCount = livingIndices.reduce(into: 0) { total, index in
+            total += Int(developmental[index].topology.x)
+        }
+        let developmentalEdgeCount = livingIndices.reduce(into: 0) { total, index in
+            total += Int(developmental[index].topology.y)
+        }
+        let meanDevelopmentalNodeCount = livingIndices.isEmpty
+            ? 0 : Double(developmentalNodeCount) / Double(livingIndices.count)
+        let meanDevelopmentalEdgeCount = livingIndices.isEmpty
+            ? 0 : Double(developmentalEdgeCount) / Double(livingIndices.count)
+        let meanResonanceFrequency = livingIndices.isEmpty ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(resonance[index].mechanics.x)
+        } / Double(livingIndices.count)
+        let meanResonanceDamping = livingIndices.isEmpty ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(resonance[index].mechanics.y)
+        } / Double(livingIndices.count)
+        let meanResonanceBandwidth = livingIndices.isEmpty ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(resonance[index].tuning.x)
+        } / Double(livingIndices.count)
+        let meanResonanceAmplitude = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].resonance.y, 0))
+        } / Double(cellCount)
+        let meanMembraneArea = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].shape.x, 0))
+        } / Double(cellCount)
+        let meanMembranePerimeter = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].shape.y, 0))
+        } / Double(cellCount)
+        let meanMembraneShapeIndex = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].shape.z, 0))
+        } / Double(cellCount)
+        let meanJunctionForce = cellCount == 0 ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(cellular[index].physiology.x, 0) * max(cellular[index].shape.w, 0))
+        } / Double(cellCount)
+        let meanLineageMutationDistance = livingIndices.isEmpty ? 0 : livingIndices.reduce(0.0) { total, index in
+            total + Double(max(agents[index].mutationDistance, 0))
+        } / Double(livingIndices.count)
         let worlds = (0..<Self.worldCount).map { world -> WorldMetrics in
             let base = world * Self.metricCount
             func mean(_ metric: Int) -> Double {
@@ -1326,10 +1929,52 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 meanCellATP: meanCellATP,
                 meanCellIntegrity: meanCellIntegrity,
                 meanCellStress: meanCellStress,
+                meanMembraneVoltage: meanMembraneVoltage,
+                meanPhaseCoherence: meanPhaseCoherence,
+                meanOscillationFrequency: meanOscillationFrequency,
+                meanTissueStrain: meanTissueStrain,
+                cellularEnergyHarvest: cellularEnergyHarvest,
+                cellularEnergyDemand: cellularEnergyDemand,
+                cellularEnergyDissipation: cellularEnergyDissipation,
+                meanProliferationProgram: meanDevelopmentalRegulation.x,
+                meanAdhesiveProgram: meanDevelopmentalRegulation.y,
+                meanContractileProgram: meanDevelopmentalRegulation.z,
+                meanRepairProgram: meanDevelopmentalRegulation.w,
+                meanDevelopmentalNodeCount: meanDevelopmentalNodeCount,
+                meanDevelopmentalEdgeCount: meanDevelopmentalEdgeCount,
+                meanResonanceFrequency: meanResonanceFrequency,
+                meanResonanceDamping: meanResonanceDamping,
+                meanResonanceBandwidth: meanResonanceBandwidth,
+                meanResonanceAmplitude: meanResonanceAmplitude,
+                meanMembraneArea: meanMembraneArea,
+                meanMembranePerimeter: meanMembranePerimeter,
+                meanMembraneShapeIndex: meanMembraneShapeIndex,
+                meanJunctionForce: meanJunctionForce,
+                meanLineageMutationDistance: meanLineageMutationDistance,
+                meanMechanotransductionEffect: meanCausalEffects.x,
+                meanProliferativeDrive: meanCausalEffects.y,
+                meanContactSuppression: meanCausalEffects.z,
+                meanRepairEffect: meanCausalEffects.w,
+                meanCalciumActivity: meanSignaling.x,
+                meanERKActivity: meanSignaling.y,
+                meanSignalRefractory: meanSignaling.z,
+                meanMechanicsCalciumEffect: meanSignalCausality.x,
+                meanCalciumERKEffect: meanSignalCausality.y,
+                meanERKTractionEffect: meanSignalCausality.z,
+                cellularSignalingCost: meanSignalCausality.w,
                 metrics: champion.metrics,
                 fitness: champion.fitness
             )
 #if DEBUG
+            let netCellularPower = cellularEnergyHarvest - cellularEnergyDemand -
+                cellularEnergyDissipation
+            let developmentalProgramSummary = String(
+                format: "%.2f/%.2f/%.2f/%.2f",
+                meanDevelopmentalRegulation.x,
+                meanDevelopmentalRegulation.y,
+                meanDevelopmentalRegulation.z,
+                meanDevelopmentalRegulation.w
+            )
             print(
                 "generation=\(latestSnapshot.generation) world=\(champion.worldIndex) " +
                 "viability=\(String(format: "%.3f", champion.fitness.viability)) " +
@@ -1345,8 +1990,21 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 "boundary=\(String(format: "%.6f", champion.metrics.boundaryCoherence)) " +
                 "multiscale=\(String(format: "%.4f", champion.metrics.multiscaleDivergence)) " +
                 "lineages=\(String(format: "%.3f", champion.metrics.lineageDiversity)) " +
-                "niches=\(String(format: "%.4f", champion.metrics.nicheDifferentiation))"
-                + " quantum_norm=\(String(format: "%.6f", quantumNorm))"
+                "niches=\(String(format: "%.4f", champion.metrics.nicheDifferentiation)) " +
+                "quantum_norm=\(String(format: "%.6f", quantumNorm)) " +
+                "cells=\(cellCount) dividing=\(dividingCellCount) " +
+                "grn=\(String(format: "%.1f/%.1f", meanDevelopmentalNodeCount, meanDevelopmentalEdgeCount)) " +
+                "programs=\(developmentalProgramSummary) " +
+                "causal=\(String(format: "%+.2e/%+.2e/%+.2e/%+.2e", meanCausalEffects.x, meanCausalEffects.y, meanCausalEffects.z, meanCausalEffects.w)) " +
+                "signals=\(String(format: "%.3f/%.3f/%.3f", meanSignaling.x, meanSignaling.y, meanSignaling.z)) " +
+                "signal_causal=\(String(format: "%+.2e/%+.2e/%+.2e/%+.2e", meanSignalCausality.x, meanSignalCausality.y, meanSignalCausality.z, meanSignalCausality.w)) " +
+                "cell_atp=\(String(format: "%.3f", meanCellATP)) " +
+                "cell_integrity=\(String(format: "%.3f", meanCellIntegrity)) " +
+                "cell_voltage=\(String(format: "%+.4f", meanMembraneVoltage)) " +
+                "phase_coherence=\(String(format: "%.4f", meanPhaseCoherence)) " +
+                "cell_frequency=\(String(format: "%.5f", meanOscillationFrequency)) " +
+                "tissue_strain=\(String(format: "%.5f", meanTissueStrain)) " +
+                "cell_power=\(String(format: "%+.6f", netCellularPower))"
             )
             if let firstIndex = livingIndices.first {
                 let first = agents[firstIndex]
@@ -1393,39 +2051,37 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             cameraCenter: settings.cameraCenter,
             cameraZoom: max(settings.cameraZoom, 0.000_000_001),
             worldScale: max(settings.worldScale, 1),
-            viewportAspect: viewportAspect
+            viewportAspect: viewportAspect,
+            intervention: SIMD4<Float>(settings.mechanosensingGain, 1, 1, 1)
         )
     }
 
     private func dispatchWorlds(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
-        let width = max(1, min(pipeline.threadExecutionWidth, 16))
-        let height = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / width, 16))
+        let threadgroup = threadsPerThreadgroup2D(pipeline: pipeline, gridWidth: Self.gridSize)
         encoder.dispatchThreads(
             MTLSize(width: Self.gridSize, height: Self.gridSize, depth: Self.worldCount),
-            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1)
+            threadsPerThreadgroup: threadgroup
         )
     }
 
     private func dispatch2D(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
-        let width = max(1, min(pipeline.threadExecutionWidth, 16))
-        let height = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / width, 16))
+        let threadgroup = threadsPerThreadgroup2D(pipeline: pipeline, gridWidth: Self.gridSize)
         encoder.dispatchThreads(
             MTLSize(width: Self.gridSize, height: Self.gridSize, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1)
+            threadsPerThreadgroup: threadgroup
         )
     }
 
     private func dispatchQuantum(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
-        let width = max(1, min(pipeline.threadExecutionWidth, 16))
-        let height = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / width, 16))
+        let threadgroup = threadsPerThreadgroup2D(pipeline: pipeline, gridWidth: Self.quantumGridSize)
         encoder.dispatchThreads(
             MTLSize(width: Self.quantumGridSize, height: Self.quantumGridSize, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1)
+            threadsPerThreadgroup: threadgroup
         )
     }
 
     private func dispatchAgents(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
-        let width = max(1, min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup))
+        let width = threadsPerThreadgroup1D(pipeline: pipeline, count: Self.maxAgentCount)
         encoder.dispatchThreads(
             MTLSize(width: Self.maxAgentCount, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1)
@@ -1433,7 +2089,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func dispatchCells(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
-        let width = max(1, min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup))
+        let width = threadsPerThreadgroup1D(pipeline: pipeline, count: Self.maxCellCount)
         encoder.dispatchThreads(
             MTLSize(width: Self.maxCellCount, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1)
@@ -1445,12 +2101,31 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         pipeline: MTLComputePipelineState,
         texture: MTLTexture
     ) {
-        let width = max(1, min(pipeline.threadExecutionWidth, 16))
-        let height = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / width, 16))
+        let threadgroup = threadsPerThreadgroup2D(pipeline: pipeline, gridWidth: texture.width)
         encoder.dispatchThreads(
             MTLSize(width: texture.width, height: texture.height, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1)
+            threadsPerThreadgroup: threadgroup
         )
+    }
+
+    private func threadsPerThreadgroup2D(
+        pipeline: MTLComputePipelineState,
+        gridWidth: Int
+    ) -> MTLSize {
+        let width = max(1, min(pipeline.threadExecutionWidth, gridWidth))
+        let availableRows = max(1, pipeline.maxTotalThreadsPerThreadgroup / width)
+        return MTLSize(width: width, height: min(availableRows, 8), depth: 1)
+    }
+
+    private func threadsPerThreadgroup1D(
+        pipeline: MTLComputePipelineState,
+        count: Int
+    ) -> Int {
+        let executionWidth = max(pipeline.threadExecutionWidth, 1)
+        let limit = max(1, min(pipeline.maxTotalThreadsPerThreadgroup, min(count, 256)))
+        return limit >= executionWidth
+            ? max(executionWidth, (limit / executionWidth) * executionWidth)
+            : limit
     }
 
     private func copyAllSlices(from source: MTLTexture, to destination: MTLTexture, commandBuffer: MTLCommandBuffer) {

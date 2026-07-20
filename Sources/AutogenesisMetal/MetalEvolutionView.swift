@@ -9,6 +9,14 @@ final class InteractiveMetalView: MTKView {
     var resetCameraHandler: (() -> Void)?
     var cycleOrganismHandler: ((Int) -> Void)?
     private var lastDragPosition: SIMD2<Float>?
+    private var pendingZoomLog = 0.0
+    private var pendingZoomAnchor = SIMD2<Float>(repeating: 0.5)
+    private var pendingZoomAspect: Float = 1
+    private var zoomFlushTimer: Timer?
+    private var lastAppliedZoomDirection = 0.0
+    private var lastZoomApplicationTime = 0.0
+    private var horizontalGestureConsumed = false
+    private var lastHorizontalCycleTime = 0.0
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -39,16 +47,112 @@ final class InteractiveMetalView: MTKView {
 
     override func scrollWheel(with event: NSEvent) {
         if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY), abs(event.scrollingDeltaX) > 1.5 {
-            cycleOrganismHandler?(event.scrollingDeltaX < 0 ? -1 : 1)
+            handleHorizontalScroll(event)
             return
         }
-        let sensitivity = event.hasPreciseScrollingDeltas ? 0.012 : 0.08
-        let factor = exp(Double(-event.scrollingDeltaY) * sensitivity)
-        zoomHandler?(factor, normalizedPosition(for: event), aspect)
+        guard event.scrollingDeltaY.isFinite else { return }
+        let sensitivity = event.hasPreciseScrollingDeltas ? 0.0024 : 0.018
+        let momentumScale = event.momentumPhase.isEmpty ? 1.0 : 0.32
+        let rawLogDelta = Double(-event.scrollingDeltaY) * sensitivity * momentumScale
+        let eventLimit = event.hasPreciseScrollingDeltas ? 0.020 : 0.030
+        enqueueZoom(
+            logDelta: tanh(rawLogDelta / eventLimit) * eventLimit,
+            anchor: normalizedPosition(for: event),
+            aspect: aspect
+        )
     }
 
     override func magnify(with event: NSEvent) {
-        zoomHandler?(max(0.05, 1 + Double(event.magnification)), normalizedPosition(for: event), aspect)
+        guard event.magnification.isFinite else { return }
+        let boundedMagnification = min(max(Double(event.magnification), -0.20), 0.20)
+        enqueueZoom(
+            logDelta: log1p(boundedMagnification) * 0.72,
+            anchor: normalizedPosition(for: event),
+            aspect: aspect
+        )
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            cancelPendingZoom()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    func cancelPendingZoomForCommand() {
+        cancelPendingZoom()
+    }
+
+    private func enqueueZoom(logDelta initialLogDelta: Double, anchor: SIMD2<Float>, aspect: Float) {
+        guard initialLogDelta.isFinite, abs(initialLogDelta) >= 0.000_05 else { return }
+        var logDelta = min(max(initialLogDelta, -0.025), 0.025)
+        let now = ProcessInfo.processInfo.systemUptime
+        let direction = logDelta.sign == .minus ? -1.0 : 1.0
+
+        if lastAppliedZoomDirection != 0,
+           direction != lastAppliedZoomDirection,
+           now - lastZoomApplicationTime < 0.14 {
+            logDelta *= 0.35
+            pendingZoomLog *= 0.25
+        } else if pendingZoomLog * logDelta < 0 {
+            pendingZoomLog *= 0.25
+            logDelta *= 0.50
+        }
+
+        // Log-space accumulation keeps equal inward and outward impulses reciprocal.
+        pendingZoomLog = min(max(pendingZoomLog + logDelta, -0.022), 0.022)
+        pendingZoomAnchor = anchor
+        pendingZoomAspect = aspect
+        guard zoomFlushTimer == nil else { return }
+
+        let timer = Timer(
+            timeInterval: 1.0 / 60.0,
+            target: self,
+            selector: #selector(flushPendingZoom),
+            userInfo: nil,
+            repeats: false
+        )
+        zoomFlushTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func flushPendingZoom() {
+        zoomFlushTimer = nil
+        let logDelta = pendingZoomLog
+        pendingZoomLog = 0
+        guard abs(logDelta) >= 0.000_05 else { return }
+
+        lastAppliedZoomDirection = logDelta.sign == .minus ? -1.0 : 1.0
+        lastZoomApplicationTime = ProcessInfo.processInfo.systemUptime
+        zoomHandler?(exp(logDelta), pendingZoomAnchor, pendingZoomAspect)
+    }
+
+    private func cancelPendingZoom() {
+        zoomFlushTimer?.invalidate()
+        zoomFlushTimer = nil
+        pendingZoomLog = 0
+    }
+
+    private func handleHorizontalScroll(_ event: NSEvent) {
+        if event.phase == .began {
+            horizontalGestureConsumed = false
+        }
+        defer {
+            if event.phase == .ended || event.phase == .cancelled {
+                horizontalGestureConsumed = false
+            }
+        }
+        guard event.momentumPhase.isEmpty else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let gestureHasPhase = !event.phase.isEmpty
+        guard !horizontalGestureConsumed,
+              now - lastHorizontalCycleTime >= 0.24 else { return }
+        cycleOrganismHandler?(event.scrollingDeltaX < 0 ? -1 : 1)
+        lastHorizontalCycleTime = now
+        if gestureHasPhase {
+            horizontalGestureConsumed = true
+        }
     }
 
     private var aspect: Float {
@@ -82,8 +186,11 @@ struct MetalEvolutionView: NSViewRepresentable {
                     store.apply(snapshot)
                 }
             }
-            renderer.onAgentObservations = { observations in
+            renderer.onObservationBatch = { events, observations in
                 Task { @MainActor in
+                    if !events.isEmpty {
+                        store.applyLineageEvents(events)
+                    }
                     store.applyAgentObservations(observations)
                 }
             }
@@ -95,7 +202,8 @@ struct MetalEvolutionView: NSViewRepresentable {
             view.zoomHandler = { [weak coordinator = context.coordinator] factor, anchor, aspect in
                 coordinator?.zoom(by: factor, around: anchor, aspect: aspect)
             }
-            view.resetCameraHandler = { [weak coordinator = context.coordinator] in
+            view.resetCameraHandler = { [weak coordinator = context.coordinator, weak view] in
+                view?.cancelPendingZoomForCommand()
                 coordinator?.store.resetCamera()
             }
             view.cycleOrganismHandler = { [weak coordinator = context.coordinator] direction in
