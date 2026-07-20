@@ -926,7 +926,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let agentObservationIntervalFrames: UInt64 = 6
     private static let trackedAgentObservationIntervalFrames: UInt64 = 2
     private static let metricReadbackRingSize = 3
-    private static let metricCount = 36
+    private static let metricCount = 46
     private static let metricScale = 4096.0
     private static let quantumMetricScale = 1_000_000_000.0
     private static let energyAuditScale = 1_048_576.0
@@ -2609,6 +2609,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setTexture(genomeC, index: 5)
         encoder.setTexture(environmentState, index: 6)
         encoder.setTexture(mechanicalState, index: 7)
+        encoder.setTexture(quantumState, index: 8)
         encoder.setBuffer(slot.metrics, offset: 0, index: 0)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 1)
         dispatchWorlds(encoder, pipeline: measurementPipeline)
@@ -2740,6 +2741,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             encoder.setFragmentTexture(quantumState, index: 0)
             encoder.setFragmentTexture(state, index: 1)
             encoder.setFragmentTexture(ecology, index: 2)
+            encoder.setFragmentTexture(environmentState, index: 3)
+            encoder.setFragmentTexture(mechanicalState, index: 4)
+            encoder.setFragmentTexture(genomeA, index: 5)
+            encoder.setFragmentTexture(genomeC, index: 6)
         } else if observationZoom >= 18 {
             encoder.setRenderPipelineState(cellularSurfacePipeline)
             encoder.setFragmentTexture(state, index: 0)
@@ -2780,13 +2785,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         encoder.endEncoding()
 
+        let exposure: Float = observationZoom >= 160 ? 1.06 :
+            (observationZoom >= 64 ? 0.98 :
+                (observationZoom >= 18 ? 0.82 :
+                    (observationZoom >= 6 ? 0.92 : 1.16)))
+        let bloomIntensity: Float = observationZoom >= 420 ? 0.0 :
+            (observationZoom >= 160 ? 0.14 :
+                (observationZoom >= 64 ? 0.12 :
+                    (observationZoom >= 18 ? 0.08 :
+                        (observationZoom >= 6 ? 0.16 : 0.24))))
         var postUniforms = PostProcessUniforms(
             sourceSize: SIMD2<Float>(Float(sceneColor.width), Float(sceneColor.height)),
-            exposure: observationZoom >= 64 ? 1.06 :
-                (observationZoom >= 18 ? 0.82 : (observationZoom >= 6 ? 0.92 : 1.16)),
-            bloomIntensity: observationZoom >= 420 ? 0.0 :
-                (observationZoom >= 64 ? 0.22 :
-                    (observationZoom >= 18 ? 0.08 : (observationZoom >= 6 ? 0.16 : 0.24))),
+            exposure: exposure,
+            bloomIntensity: bloomIntensity,
             observationZoom: observationZoom,
             frameIndex: UInt32(truncatingIfNeeded: frameSerial)
         )
@@ -3297,12 +3308,26 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         let decision = evaluator.evaluate(worlds)
         if let champion = decision.rankedWorlds.first {
+            let selectedMetricBase = champion.worldIndex * Self.metricCount
+            func selectedMean(_ metric: Int) -> Double {
+                Double(raw[selectedMetricBase + metric]) / (metricScale * pixelCount)
+            }
             latestSnapshot = EvolutionSnapshot(
                 generation: Int(completedGeneration),
                 totalSteps: completedSteps,
                 selectedWorld: champion.worldIndex,
                 archiveCount: decision.archiveCount,
                 quantumNorm: quantumNorm,
+                meanMolecularResourceB: selectedMean(36),
+                meanMolecularCatalyst: selectedMean(37),
+                meanMolecularToxin: selectedMean(38),
+                meanMolecularMembrane: selectedMean(39),
+                meanQuantumOrder: selectedMean(40),
+                meanChemicalAffinity: selectedMean(41),
+                meanCatalystProduction: selectedMean(42) / 100,
+                meanPrebioticEnergyProduction: selectedMean(43) / 100,
+                meanMembraneAssembly: selectedMean(44) / 100,
+                meanDetritalMineralization: selectedMean(45) / 100,
                 organismCount: livingIndices.count,
                 hunterCount: hunterCount,
                 organismLineageCount: lineageBins.count,

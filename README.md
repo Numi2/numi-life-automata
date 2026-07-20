@@ -69,8 +69,8 @@ The interface uses one camera over one persistent simulation. The scale controls
       <br /><strong>Wave observables, 160x.</strong> Probability density, phase contours, current, and matter-dependent potential.
     </td>
     <td width="50%">
-      <img src="Docs/Media/numi-automata-reaction.png" alt="Reaction field at 36x" />
-      <br /><strong>Reaction field, 36x.</strong> Resource, biomass, stored energy, membrane, detritus, toxin, and catalyst channels.
+      <img src="Docs/Media/numi-automata-reaction.png" alt="Molecular reaction chemistry at 96x" />
+      <br /><strong>Molecular reaction chemistry, 96x.</strong> Concentration-derived species glyphs, catalyst hotspots, directed conversion flux, energy storage, membrane assembly, toxin inhibition, and detrital recycling.
     </td>
   </tr>
   <tr>
@@ -95,7 +95,7 @@ The interface uses one camera over one persistent simulation. The scale controls
 |---|---:|---|---|
 | Spinor field | `900x` | Real and imaginary parts of `psi_0`, `psi_1`; component phasors | Yes |
 | Wave observables | `160x` | `rho`, relative phase, probability-current proxy, local potential | Yes |
-| Molecular reaction field | `72x` | `R_A`, `B`, `E`, `M`, `R_B`, detritus, toxin, catalyst | Yes |
+| Molecular reaction chemistry | `96x` | `R_A`, `R_B`, detritus, toxin, catalyst, `E`, `M`, chemical affinity, quantum order, and measured source fluxes | Yes |
 | Cellular tissue | `36x` | Cell position, ATP, voltage, Ca*, ERK*, refractory state, phase, frequency, regulatory activity, fate, contractility, strain, morphogens, stress, apoptosis, contact | Yes |
 | Organism morphology | `10x` | Position, velocity, developed tissue geometry, regulatory state, energy, biomass, sensors, defense, predation morphology | Yes |
 | Ecological field | `1x` | Population, resources, hazards, obstacles, occupancy, trophic events | Yes |
@@ -291,6 +291,12 @@ Stored energy receives
 ```
 
 These are designed numerical couplings. They are not derived from quantum chemistry.
+
+### Molecular reaction instrument
+
+From `64x` through `136x`, the renderer remains centered on the `193 x 193` reaction lattice instead of prematurely replacing chemistry with the quantum-wave view. Cyan and violet glyphs encode local `R_A` and `R_B` concentration, magenta rings encode catalyst, amber pulses encode stored energy and its source flux, green filaments encode membrane precursor, orange fragments encode detritus, and red crosses encode toxin. Glyph abundance uses a monotonic square-root radiometric transform so low concentrations remain visible; glyph positions are deterministic visualization samples rather than atom-resolved molecular trajectories. The dark continuous field encodes total substrate intensity and the local `R_A:R_B` ratio without additively mixing every chemical pool into an ambiguous gray value.
+
+Moving paths use the same per-step terms as `reactWorld`: total catalyst production from quantum order and mechanical activity, catalyst-gated stored-energy production, positive membrane assembly toward the prebiotic target, and catalyst-dependent detrital mineralization. Their luminance is a monotonic logarithmic transform of the nonnegative source rate, and short moving traces distinguish rate from concentration; this is visualization radiometry, not a linear physical light-emission model. A GPU reduction separately records the spatial mean of all four source terms plus `R_B`, catalyst, toxin, membrane, quantum order, and chemical affinity. The inspector therefore distinguishes field concentration from conversion rate and identifies which molecular-scale term feeds the cellular ATP boundary. Between `136x` and `176x`, chemistry crossfades into probability, phase, and current; wave and spinor fragments return before molecular texture sampling and glyph synthesis.
 
 ## Reaction field and founder allocation
 

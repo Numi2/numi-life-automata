@@ -34,7 +34,7 @@ struct PostProcessUniforms {
     uint frameIndex;
 };
 
-constant uint metricCount = 36;
+constant uint metricCount = 46;
 constant float metricScale = 4096.0;
 constant uint quantumGridSize = 1024u;
 constant uint maxAgentCount = 384u;
@@ -1903,6 +1903,7 @@ kernel void measureWorld(
     texture2d_array<float, access::read> genomeC [[texture(5)]],
     texture2d_array<float, access::read> environment [[texture(6)]],
     texture2d_array<float, access::read> mechanicalField [[texture(7)]],
+    texture2d<float, access::read> quantum [[texture(8)]],
     device atomic_uint* metrics [[buffer(0)]],
     constant SimulationUniforms& uniforms [[buffer(1)]],
     uint3 gid [[thread_position_in_grid]],
@@ -1963,12 +1964,55 @@ kernel void measureWorld(
     float2 localSubstrateDrive = substrateForcing(uv, localGeology, uniforms.step);
     float substrateDrive = (localSubstrateDrive.x + localSubstrateDrive.y) * 0.5;
     float barrierFraction = smoothstep(0.30, 0.82, localGeology.w);
+    float4 localMechanical = mechanicalField.read(gid.xy, layer);
     float environmentalDrive = saturate(
         environmentalMechanicalAmplitude(localGeology) * 8.0 +
-        length(mechanicalField.read(gid.xy, layer).zw) * 42.0
+        length(localMechanical.zw) * 42.0
     );
     float trophicActivity = active * saturate(niche.w * 0.7 + niche.z * localChemistry.y * 0.8 + localChemistry.z * 0.2);
     uint lineageBin = min(uint(fract(genomeB.read(gid.xy, layer).w) * 16.0), 15u);
+    uint2 quantumCoordinate = min(
+        gid.xy * quantumGridSize / uint2(uniforms.width, uniforms.height),
+        uint2(quantumGridSize - 1u)
+    );
+    float4 spinor = quantum.read(quantumCoordinate);
+    float probabilityA = dot(spinor.xy, spinor.xy);
+    float probabilityB = dot(spinor.zw, spinor.zw);
+    float probability = probabilityA + probabilityB;
+    float quantumDensity = 1.0 - exp(-probability * 285000.0);
+    float componentCoherence = abs(dot(spinor.xy, spinor.zw)) /
+        max(sqrt(probabilityA * probabilityB), 0.0000000001);
+    float quantumOrder = quantumDensity *
+        (0.24 + 0.76 * saturate(componentCoherence));
+    float obstacle = smoothstep(0.48, 0.84, localGeology.w);
+    float permeability = 1.0 - obstacle * 0.88;
+    float resourceA = max(current.x, 0.0);
+    float resourceB = max(localChemistry.x, 0.0);
+    float detritus = max(localChemistry.y, 0.0);
+    float toxin = max(localChemistry.z, 0.0);
+    float catalyst = max(localChemistry.w, 0.0);
+    float mechanicalActivity = saturate(
+        length(localMechanical.xy) * 18.0 + length(localMechanical.zw) * 75.0
+    );
+    float chemicalAffinity = sqrt(saturate(resourceA) * saturate(resourceB)) *
+        permeability * (1.0 - saturate(toxin));
+    float catalystProduction = uniforms.dt * chemicalAffinity *
+        (quantumOrder * 0.0090 + mechanicalActivity * 0.00032);
+    float energyProduction = uniforms.dt * catalyst * permeability *
+        (quantumOrder * (0.015 + 0.035 * saturate(resourceA + resourceB)) +
+            mechanicalActivity * 0.00018);
+    float prebioticOrder = smoothstep(0.018, 0.065, catalyst) *
+        smoothstep(0.002, 0.015, max(current.z, 0.0)) * quantumOrder;
+    float membraneTarget = prebioticOrder * 0.035;
+    float membraneAssembly = max(
+        uniforms.dt * 0.22 * (membraneTarget - max(current.w, 0.0)),
+        0.0
+    );
+    float mineralization = min(
+        detritus,
+        uniforms.dt * detritus * (0.00035 + catalyst * 0.0032) *
+            permeability * (1.0 - saturate(toxin) * 0.72)
+    );
 
     addMetric(groupMetrics, 0, min(current.y, 1.0), laneIndex);
     addMetric(groupMetrics, 1, min(current.x * 0.5, 1.0), laneIndex);
@@ -1991,6 +2035,16 @@ kernel void measureWorld(
     addMetric(groupMetrics, 18, barrierFraction, laneIndex);
     addMetric(groupMetrics, 19, environmentalDrive, laneIndex);
     addBinnedMetric(groupMetrics, 20 + lineageBin, active);
+    addMetric(groupMetrics, 36, saturate(resourceB), laneIndex);
+    addMetric(groupMetrics, 37, saturate(catalyst), laneIndex);
+    addMetric(groupMetrics, 38, saturate(toxin), laneIndex);
+    addMetric(groupMetrics, 39, saturate(current.w), laneIndex);
+    addMetric(groupMetrics, 40, quantumOrder, laneIndex);
+    addMetric(groupMetrics, 41, chemicalAffinity, laneIndex);
+    addMetric(groupMetrics, 42, catalystProduction * 100.0, laneIndex);
+    addMetric(groupMetrics, 43, energyProduction * 100.0, laneIndex);
+    addMetric(groupMetrics, 44, membraneAssembly * 100.0, laneIndex);
+    addMetric(groupMetrics, 45, mineralization * 100.0, laneIndex);
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint metric = threadIndex; metric < metricCount; metric += groupThreadCount) {
@@ -6364,6 +6418,233 @@ inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStren
     return color;
 }
 
+inline float3 molecularReactionVisualization(
+    float2 uv,
+    float4 localState,
+    float4 localEcology,
+    float4 localGeology,
+    float4 geneA,
+    float4 geneC,
+    float quantumOrder,
+    float chemicalAffinity,
+    float catalystProduction,
+    float energyProduction,
+    float membraneAssembly,
+    float mineralization,
+    float phase,
+    float2 reactionDirection,
+    float fieldGridSize,
+    uint step,
+    uint displayMode
+) {
+    const float3 resourceAColor = float3(0.015, 0.56, 1.0);
+    const float3 resourceBColor = float3(0.48, 0.12, 1.0);
+    const float3 catalystColor = float3(1.0, 0.035, 0.62);
+    const float3 energyColor = float3(1.0, 0.68, 0.025);
+    const float3 membraneColor = float3(0.03, 1.0, 0.58);
+    const float3 detritusColor = float3(1.0, 0.30, 0.025);
+    const float3 toxinColor = float3(1.0, 0.025, 0.01);
+
+    float resourceA = saturate(localState.x);
+    float resourceB = saturate(localEcology.x);
+    float storedEnergy = saturate(localState.z * 14.0);
+    float membrane = saturate(localState.w * 22.0);
+    float detritus = saturate(localEcology.y);
+    float toxin = saturate(localEcology.z * 1.2);
+    float catalyst = saturate(localEcology.w * 10.0);
+    // Concentrations span orders of magnitude. Square-root encoding changes only
+    // marker occupancy; field hue and all flux calculations retain linear values.
+    float resourceAAbundance = saturate(sqrt(resourceA) * 1.85);
+    float resourceBAbundance = saturate(sqrt(resourceB) * 1.85);
+    float catalystAbundance = saturate(sqrt(catalyst) * 1.55);
+    float energyAbundance = saturate(sqrt(storedEnergy) * 1.60);
+    float membraneAbundance = saturate(sqrt(membrane) * 1.65);
+    float detritusAbundance = saturate(sqrt(detritus) * 1.35);
+    float toxinAbundance = saturate(sqrt(toxin) * 1.20);
+    float reactionPotential = saturate(
+        resourceA * 0.26 + resourceB * 0.26 + catalyst * 0.22 +
+        storedEnergy * 0.16 + membrane * 0.10
+    );
+    float2 fieldCoordinate = uv * fieldGridSize;
+    float fieldContour = 1.0 - smoothstep(0.026, 0.105,
+        abs(fract(reactionPotential * 13.0 +
+            visualNoise(fieldCoordinate * 0.31) * 0.18) - 0.5));
+    float catalystHotspot = catalyst * chemicalAffinity *
+        (0.42 + quantumOrder * 0.58);
+    float energyHotspot = storedEnergy *
+        (0.32 + saturate(energyProduction * 280.0) * 0.68);
+
+    float substrateTotal = saturate((resourceA + resourceB) * 3.4);
+    float substrateBalance = resourceB / max(resourceA + resourceB, 0.00001);
+    float3 substrateHue = mix(resourceAColor, resourceBColor,
+        smoothstep(0.12, 0.88, substrateBalance));
+    float barrier = smoothstep(0.48, 0.84, localGeology.w);
+    float3 color = float3(0.0012, 0.0028, 0.0070);
+    color += substrateHue * substrateTotal * (0.038 + fieldContour * 0.030);
+    color += catalystColor * catalystHotspot * fieldContour * 0.10;
+    color += energyColor * energyHotspot * fieldContour * 0.085;
+    color += membraneColor * membrane * fieldContour * 0.095;
+    color += detritusColor * detritus * (1.0 - fieldContour) * 0.055;
+    color = mix(color, toxinColor * (0.08 + color), toxin * 0.22);
+
+    float2 glyphCoordinate = uv * fieldGridSize * 6.0;
+    int2 glyphCell = int2(floor(glyphCoordinate));
+    uint glyphSeed = hash32(
+        uint(glyphCell.x) * 1597334677u ^
+        uint(glyphCell.y) * 3812015801u
+    );
+    float2 jitter = float2(
+        random01(glyphSeed + 1u), random01(glyphSeed + 2u)
+    ) - 0.5;
+    float2 glyphPosition = fract(glyphCoordinate) - 0.5 - jitter * 0.34;
+    float glyphAngle = 2.0 * M_PI_F * random01(glyphSeed + 3u) + phase * 0.72;
+    float2 glyphAxis = float2(cos(glyphAngle), sin(glyphAngle));
+    float2 glyphNormal = float2(-glyphAxis.y, glyphAxis.x);
+    float selector = random01(glyphSeed + 4u);
+    float aa = max(fwidth(length(glyphPosition)) * 1.35, 0.003);
+    float glyph = 0.0;
+    float abundance = 0.0;
+    float3 glyphColor = float3(0.0);
+    if (selector < 0.20) {
+        float2 offset = glyphAxis * 0.064;
+        glyph = max(
+            1.0 - smoothstep(0.052, 0.052 + aa * 2.0, length(glyphPosition - offset)),
+            1.0 - smoothstep(0.052, 0.052 + aa * 2.0, length(glyphPosition + offset))
+        );
+        glyph = max(glyph, 1.0 - smoothstep(
+            0.012, 0.012 + aa * 2.0,
+            segmentDistance(glyphPosition, -offset, offset)
+        ));
+        abundance = resourceAAbundance;
+        glyphColor = resourceAColor;
+    } else if (selector < 0.39) {
+        float2 a = glyphAxis * 0.070;
+        float2 b = -glyphAxis * 0.045 + glyphNormal * 0.064;
+        float2 c = -glyphAxis * 0.045 - glyphNormal * 0.064;
+        glyph = max(
+            1.0 - smoothstep(0.045, 0.045 + aa * 2.0, length(glyphPosition - a)),
+            max(
+                1.0 - smoothstep(0.045, 0.045 + aa * 2.0, length(glyphPosition - b)),
+                1.0 - smoothstep(0.045, 0.045 + aa * 2.0, length(glyphPosition - c))
+            )
+        );
+        glyph = max(glyph, 1.0 - smoothstep(
+            0.010, 0.010 + aa * 2.0,
+            min(segmentDistance(glyphPosition, a, b), segmentDistance(glyphPosition, a, c))
+        ));
+        abundance = resourceBAbundance;
+        glyphColor = resourceBColor;
+    } else if (selector < 0.55) {
+        float radius = length(glyphPosition);
+        glyph = 1.0 - smoothstep(aa, aa * 3.0, abs(radius - 0.095));
+        glyph = max(glyph,
+            1.0 - smoothstep(0.026, 0.026 + aa * 2.0, radius));
+        abundance = catalystAbundance;
+        glyphColor = catalystColor;
+    } else if (selector < 0.70) {
+        float diamond = abs(glyphPosition.x) + abs(glyphPosition.y);
+        glyph = 1.0 - smoothstep(0.070, 0.070 + aa * 2.4, diamond);
+        float pulse = 0.65 + 0.35 * sin(
+            float(step) * 0.090 + random01(glyphSeed + 5u) * 2.0 * M_PI_F
+        );
+        abundance = energyAbundance * pulse;
+        glyphColor = energyColor;
+    } else if (selector < 0.84) {
+        float along = dot(glyphPosition, glyphAxis);
+        float across = abs(dot(glyphPosition, glyphNormal) -
+            sin(along * 35.0 + phase * 2.0 * M_PI_F) * 0.020);
+        glyph = (1.0 - smoothstep(0.012, 0.012 + aa * 2.0, across)) *
+            (1.0 - smoothstep(0.09, 0.13, abs(along)));
+        abundance = membraneAbundance;
+        glyphColor = membraneColor;
+    } else if (selector < 0.94) {
+        float shardA = 1.0 - smoothstep(0.012, 0.012 + aa * 2.0,
+            segmentDistance(glyphPosition, -glyphAxis * 0.10, glyphNormal * 0.07));
+        float shardB = 1.0 - smoothstep(0.012, 0.012 + aa * 2.0,
+            segmentDistance(glyphPosition, glyphAxis * 0.09, -glyphNormal * 0.06));
+        glyph = max(shardA, shardB);
+        abundance = detritusAbundance;
+        glyphColor = detritusColor;
+    } else {
+        float crossA = 1.0 - smoothstep(0.013, 0.013 + aa * 2.0,
+            segmentDistance(glyphPosition, -glyphAxis * 0.10, glyphAxis * 0.10));
+        float crossB = 1.0 - smoothstep(0.013, 0.013 + aa * 2.0,
+            segmentDistance(glyphPosition, -glyphNormal * 0.10, glyphNormal * 0.10));
+        glyph = max(crossA, crossB);
+        abundance = toxinAbundance;
+        glyphColor = toxinColor;
+    }
+    float glyphThreshold = random01(glyphSeed + 6u) * 0.58;
+    float glyphVisibility = smoothstep(glyphThreshold,
+        min(glyphThreshold + 0.14, 1.0), abundance);
+    color += glyphColor * glyph * glyphVisibility * (0.82 + abundance * 0.96);
+
+    float2 safeReactionDirection = length(reactionDirection) > 0.0001
+        ? normalize(reactionDirection)
+        : float2(cos(phase * 2.0 * M_PI_F), sin(phase * 2.0 * M_PI_F));
+    float2 reactionNormal = float2(-safeReactionDirection.y, safeReactionDirection.x);
+    float streamline = 1.0 - smoothstep(0.018, 0.060,
+        abs(fract(dot(fieldCoordinate, reactionNormal) * 0.32) - 0.5));
+    float movingPulse = 1.0 - smoothstep(0.018, 0.075,
+        abs(fract(dot(fieldCoordinate, safeReactionDirection) * 0.13 -
+            float(step) * 0.010) - 0.5));
+    float recyclePulse = 1.0 - smoothstep(0.018, 0.070,
+        abs(fract(dot(fieldCoordinate, safeReactionDirection) * 0.11 +
+            float(step) * 0.007 + 0.37) - 0.5));
+    float reactionTrace = streamline * movingPulse;
+    float recycleTrace = streamline * recyclePulse;
+    // Logarithmic radiometry keeps source terms visible across several decades
+    // while preserving zero and monotonic ordering.
+    float catalystFlux = saturate(log2(1.0 + catalystProduction * 1.0e6) * 0.18);
+    float energyFlux = saturate(log2(1.0 + energyProduction * 4.0e6) * 0.18);
+    float assemblyFlux = saturate(log2(1.0 + membraneAssembly * 1.0e6) * 0.18);
+    float recycleFlux = saturate(log2(1.0 + mineralization * 8.0e6) * 0.18);
+    float reactionRing = 1.0 - smoothstep(0.010, 0.030,
+        abs(length(glyphPosition) - 0.155));
+    color += mix(catalystColor, energyColor, energyFlux) * reactionTrace *
+        max(catalystFlux, energyFlux) * 0.96;
+    color += membraneColor * reactionTrace * assemblyFlux * 0.88;
+    color += detritusColor * recycleTrace * recycleFlux * 0.56;
+    color += mix(catalystColor, energyColor, energyFlux) * reactionRing *
+        glyphVisibility * max(catalystFlux, energyFlux) * 0.42;
+    color *= 1.0 - toxin * (0.12 + streamline * 0.25);
+
+    if (displayMode == 1u) {
+        color = float3(0.002, 0.004, 0.009) +
+            resourceAColor * resourceA * 0.38 +
+            resourceBColor * resourceB * 0.34 +
+            energyColor * energyHotspot * (0.48 + movingPulse * 0.42) +
+            detritusColor * detritus * 0.24;
+    } else if (displayMode == 2u) {
+        color = float3(0.002, 0.005, 0.010);
+        color += float3(1.0, 0.12, 0.035) * saturate(geneA.x) * 0.34;
+        color += float3(0.04, 0.94, 0.58) * saturate(geneA.y) * 0.31;
+        color += float3(0.08, 0.42, 1.0) * saturate(geneA.z) * 0.28;
+        color += float3(0.94, 0.06, 0.72) * saturate(geneC.w) * 0.34;
+        color *= 0.72 + fieldContour * 0.44;
+    } else if (displayMode == 3u) {
+        color = float3(0.002, 0.004, 0.009) +
+            resourceAColor * resourceA * 0.42 +
+            resourceBColor * resourceB * 0.38 +
+            detritusColor * detritus * 0.30 +
+            toxinColor * toxin * 0.38;
+    } else if (displayMode == 4u) {
+        color = float3(0.002, 0.005, 0.010) +
+            catalystColor * catalystHotspot * 0.52 +
+            energyColor * energyHotspot * 0.44 +
+            membraneColor * membrane * (0.28 + fieldContour * 0.34);
+    } else if (displayMode == 5u) {
+        color = float3(0.0015, 0.003, 0.007);
+        color += float3(0.02, 0.84, 1.0) * quantumOrder * chemicalAffinity * 0.24;
+        color += catalystColor * catalystFlux * (0.20 + reactionTrace * 0.94);
+        color += energyColor * energyFlux * (0.18 + reactionTrace * 0.86);
+        color += membraneColor * assemblyFlux * reactionTrace * 0.92;
+        color += detritusColor * recycleFlux * recycleTrace * 0.66;
+        color += toxinColor * toxin * 0.18;
+    }
+    return max(color * (1.0 - barrier * 0.82), 0.0);
+}
+
 struct CellRasterData {
     float4 position [[position]];
     float2 local;
@@ -6799,6 +7080,10 @@ fragment float4 quantumSurfaceFragment(
     texture2d<float, access::sample> quantum [[texture(0)]],
     texture2d_array<float, access::sample> state [[texture(1)]],
     texture2d_array<float, access::sample> ecology [[texture(2)]],
+    texture2d_array<float, access::sample> environment [[texture(3)]],
+    texture2d_array<float, access::sample> mechanicalField [[texture(4)]],
+    texture2d_array<float, access::sample> genomeA [[texture(5)]],
+    texture2d_array<float, access::sample> genomeC [[texture(6)]],
     constant SimulationUniforms& uniforms [[buffer(0)]]
 ) {
     constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::linear);
@@ -6825,6 +7110,8 @@ fragment float4 quantumSurfaceFragment(
     float probabilityA = dot(wave.xy, wave.xy);
     float probabilityB = dot(wave.zw, wave.zw);
     float probability = probabilityA + probabilityB;
+    float componentCoherence = abs(dot(wave.xy, wave.zw)) /
+        max(sqrt(probabilityA * probabilityB), 0.0000000001);
     float2 current = float2(
         complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
         complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
@@ -6838,6 +7125,7 @@ fragment float4 quantumSurfaceFragment(
     }
 
     float density = 1.0 - exp(-probability * 285000.0);
+    float quantumOrder = density * (0.24 + 0.76 * saturate(componentCoherence));
     float4 waveDiagonal = quantum.sample(quantumSampler, uv + quantumTexel);
     float2 combinedAmplitude = wave.xy + wave.zw;
     float phase = fract(atan2(combinedAmplitude.y, combinedAmplitude.x) / (2.0 * M_PI_F) + 1.0);
@@ -6874,30 +7162,75 @@ fragment float4 quantumSurfaceFragment(
     waveColor += float3(0.38, 0.92, 1.0) * densityIsoline * density * 0.18;
     waveColor += float3(1.0, 0.08, 0.72) * vortexCore * 1.65;
 
+    // Wave and spinor views do not pay for molecular-field sampling or glyph synthesis.
+    if (observationZoom >= 176.0) {
+        float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
+        float3 quantumOnlyColor = mix(waveColor, spinorTile, latticeReveal);
+        return float4(max(quantumOnlyColor, 0.0) * 1.16, 1.0);
+    }
+
     float4 localState = state.sample(fieldSampler, uv, 0);
     float4 localEcology = ecology.sample(fieldSampler, uv, 0);
-    float resourcePotential = saturate(localState.x * 0.54 + localEcology.x * 0.46);
-    float storedEnergy = saturate(localState.z * 12.0);
-    float membrane = saturate(localState.w * 18.0);
-    float catalyst = saturate(localEcology.w * 8.0);
-    float toxin = saturate(localEcology.z * 1.35);
-    float potential = saturate(
-        localState.x + localEcology.x * 0.8 + localState.y * 2.2 +
-        localState.w * 3.0 + localEcology.z * 1.4
+    float4 localGeology = environment.sample(fieldSampler, uv, 0);
+    float4 localMechanical = mechanicalField.sample(fieldSampler, uv, 0);
+    float4 localGeneA = genomeA.sample(fieldSampler, uv, 0);
+    float4 localGeneC = genomeC.sample(fieldSampler, uv, 0);
+    float2 reactionTexel = 1.0 / float2(uniforms.width, uniforms.height);
+    float4 stateRight = state.sample(fieldSampler, uv + float2(reactionTexel.x, 0.0), 0);
+    float4 stateUp = state.sample(fieldSampler, uv + float2(0.0, reactionTexel.y), 0);
+    float4 ecologyRight = ecology.sample(fieldSampler, uv + float2(reactionTexel.x, 0.0), 0);
+    float4 ecologyUp = ecology.sample(fieldSampler, uv + float2(0.0, reactionTexel.y), 0);
+    float2 reactionGradient = float2(
+        (stateRight.x - localState.x) + (ecologyRight.x - localEcology.x),
+        (stateUp.x - localState.x) + (ecologyUp.x - localEcology.x)
     );
-    float potentialBands = 1.0 - smoothstep(0.055, 0.18, abs(fract(potential * 37.0) - 0.5));
-    float3 chemistryColor = float3(0.003, 0.007, 0.014);
-    chemistryColor += mix(float3(0.01, 0.22, 0.62), float3(0.02, 0.92, 0.48), resourcePotential) *
-        resourcePotential * 0.62;
-    chemistryColor += float3(1.0, 0.66, 0.035) * storedEnergy * 0.82;
-    chemistryColor += float3(0.20, 1.0, 0.74) * membrane * (0.48 + potentialBands * 0.52);
-    chemistryColor += float3(0.96, 0.09, 0.76) * catalyst * density * 0.68;
-    chemistryColor += float3(1.0, 0.025, 0.012) * toxin * 0.42;
-
-    float waveReveal = smoothstep(36.0, 110.0, observationZoom);
-    float3 color = mix(chemistryColor, waveColor, waveReveal);
-    color += mix(float3(0.03, 0.34, 0.84), float3(0.05, 0.96, 0.55), potential) *
-        potentialBands * (1.0 - waveReveal) * density * 0.26;
+    float obstacle = smoothstep(0.48, 0.84, localGeology.w);
+    float permeability = 1.0 - obstacle * 0.88;
+    float chemicalAffinity = sqrt(saturate(localState.x) * saturate(localEcology.x)) *
+        permeability * (1.0 - saturate(localEcology.z));
+    float mechanicalActivity = saturate(
+        length(localMechanical.xy) * 18.0 + length(localMechanical.zw) * 75.0
+    );
+    float catalystProduction = uniforms.dt * chemicalAffinity *
+        (quantumOrder * 0.0090 + mechanicalActivity * 0.00032);
+    float energyProduction = uniforms.dt * max(localEcology.w, 0.0) * permeability *
+        (quantumOrder * (0.015 + 0.035 * saturate(localState.x + localEcology.x)) +
+            mechanicalActivity * 0.00018);
+    float prebioticOrder = smoothstep(0.018, 0.065, max(localEcology.w, 0.0)) *
+        smoothstep(0.002, 0.015, max(localState.z, 0.0)) * quantumOrder;
+    float membraneAssembly = max(
+        uniforms.dt * 0.22 * (prebioticOrder * 0.035 - max(localState.w, 0.0)),
+        0.0
+    );
+    float mineralization = min(
+        max(localEcology.y, 0.0),
+        uniforms.dt * max(localEcology.y, 0.0) *
+            (0.00035 + max(localEcology.w, 0.0) * 0.0032) *
+            permeability * (1.0 - saturate(localEcology.z) * 0.72)
+    );
+    float2 molecularDirection = reactionGradient + currentDirection *
+        (0.0002 + currentStrength * 0.0012);
+    float3 molecularColor = molecularReactionVisualization(
+        uv,
+        localState,
+        localEcology,
+        localGeology,
+        localGeneA,
+        localGeneC,
+        quantumOrder,
+        chemicalAffinity,
+        catalystProduction,
+        energyProduction,
+        membraneAssembly,
+        mineralization,
+        phase,
+        molecularDirection,
+        float(uniforms.width),
+        uniforms.step,
+        uniforms.displayMode
+    );
+    float waveReveal = smoothstep(136.0, 176.0, observationZoom);
+    float3 color = mix(molecularColor, waveColor, waveReveal);
 
     float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
     color = mix(color, spinorTile, latticeReveal);
@@ -7083,12 +7416,12 @@ fragment float4 cellularSurfaceFragment(
     color += float3(0.012, 0.11, 0.16) * saturate(localState.x * 0.72);
     color += float3(0.15, 0.055, 0.015) * saturate(localEcology.x * 0.66);
     color += float3(0.018, 0.14, 0.10) * saturate(localState.w * 1.8);
-    color += float3(0.12, 0.18, 0.20) * matrixStrain * 0.32;
+    color += float3(0.12, 0.18, 0.20) * matrixStrain * 0.18;
     color += mix(float3(0.025, 0.46, 1.0), float3(1.0, 0.08, 0.64),
         saturate(waveAngle / (2.0 * M_PI_F) + 0.5)) * waveFront * waveSpeed * 0.52;
     color += float3(0.06, 0.88, 0.76) * mechanicalStrain * (0.18 + waveFront * 0.34);
     color += mix(float3(0.01, 0.28, 0.48), float3(0.02, 0.58, 0.32), potential) *
-        potentialContour * 0.11;
+        potentialContour * 0.050;
     color += float3(0.84, 0.11, 0.025) * saturate(localEcology.z + localEnvironment.z) * 0.22;
     color += float3(0.00, 0.76, 0.64) * pow(saturate(localEvents.x), 2.2) * 0.24;
     color += float3(0.92, 0.06, 0.66) * pow(saturate(localEvents.y), 2.0) * 0.22;
@@ -7105,7 +7438,8 @@ fragment float4 cellularSurfaceFragment(
         color += float3(0.34, 0.24, 0.015) * potentialContour * storedEnergy * 0.065;
         color += float3(0.01, 0.24, 0.15) * contactSubstrate * 0.10;
     }
-    return float4(max(color, 0.0), 1.0);
+    float contextExposure = uniforms.displayMode == 5 ? 0.82 : 0.64;
+    return float4(max(color, 0.0) * contextExposure, 1.0);
 }
 
 fragment float4 worldFragment(
