@@ -434,6 +434,29 @@ W_i^{freq}=\left(v_i^2+\omega_i^2x_i^2\right)
 
 where `x_i` and `v_i` are resonator displacement and velocity, `f_i` is inherited natural frequency, and `g_i` is inherited response gain. Stored ATP defines a continuous metabolic-readiness variable. Falling readiness suppresses contraction, construction, morphogen synthesis, oscillatory work, and non-nutrient guidance before expenses are integrated; quiescent basal maintenance can fall to `20%` of active demand, while starvation increases resource-gradient weighting. If planned expenses still exceed available ATP, every expense is scaled by the same factor. Maintenance returns `34%` of its energy to detritus and exports `66%` as heat; stress dissipation, rejection, conversion loss, and ATP overflow become heat. During biomass catabolism, up to `52%` of released biomass energy returns to ATP as readiness falls; the remaining exported fraction is split `64%` to detritus and `36%` to heat. Terminal cell loss remains split `72%` to detritus and `28%` to heat. The next `reactWorld` dispatch subtracts exact substrate claims and adds returned detritus to the persistent ecology textures.
 
+Growth uses both stored energy and measured recent flux. For harvested ATP `H_i`, maintenance `U_i`, active work `W_i`, dissipation `D_i`, ATP store `A_i`, and exposed-membrane fraction `xi_i`, define
+
+```math
+q_i=\mathrm{clip}_{[0,1.5]}\left(\frac{H_i}{\max(U_i+W_i+D_i,10^{-6})}\right),
+```
+
+```math
+\eta_i=\mathrm{clip}_{[0,1]}\left[
+0.58\,\mathrm{smoothstep}(0.12,0.36,A_i)+
+0.42\,\mathrm{smoothstep}(0.62,1.06,q_i)\right].
+```
+
+`eta_i` is therefore high only when an ATP reserve and a recent substrate-to-demand ratio jointly support construction. Biomass `B_i` changes according to
+
+```math
+B_i'=\mathrm{clip}_{[0.16,1.08]}\left[B_i+
+0.00018\eta_i\,\mathrm{mix}(0.50,1,\xi_i)\,\mathrm{mix}(0.42,1.38,z_i^P)
+-0.00009(1-\eta_i)\,\mathrm{mix}\left(1,0.58,\mathrm{smoothstep}(0.08,0.30,A_i)\right)
+\right].
+```
+
+Positive biomass change consumes ATP at `0.18` energy units per biomass unit. Negative change releases the same stored biomass energy into the catabolic ATP, detritus, and heat channels described above. This removes a fixed ATP growth threshold: a boundary cell can grow at moderate ATP when local harvest exceeds work, while a high-ATP cell without continuing resource support cannot grow indefinitely.
+
 The GPU accumulates a signed ten-channel global audit. With cellular storage `S_i=A_i+0.18B_i`, active work `W_i`, exported heat `Q_i`, detrital energy `E_i^{det}`, and signed ATP-sharing flux `X_i`, each cell contributes
 
 ```math
@@ -581,21 +604,32 @@ u_{t+1}=0.9975\left(u_t+v_{t+1}\right).
 
 Rock obstacles lower `k` and `gamma`; the outer lattice band adds absorption. Local displacement gradients define strain, while velocity magnitude defines wave speed. Both enter cell work and dissipation. Strain also drives membrane excitation and the reaction field, and organisms can evolve attraction or avoidance to vibration gradients. This implements a closed mechanochemical loop motivated by experimentally observed epithelial signaling and deformation waves [11-14], without claiming a calibrated tissue material model.
 
-Cell-cycle progression is gated by the cell's own ATP, multiplied by the proliferation program, and inhibited by contact density according to the adhesive program. A cell with a completed cycle atomically claims any unoccupied global cell record and divides along an axis dominated by its persistent developmental polarity, with smaller contributions from oscillator phase, measured tissue position, strain, proliferation, and contractile state. Parent and daughter split ATP and biomass, separate mechanically, reset cycle phase, and receive mean-preserving opposite perturbations to morphogens, fate memory, regulatory state, and polarity angle. The daughter receives a new permanent cell ID and records the parent's cell ID. The resulting asymmetry is then stabilized, amplified, or erased by inherited local kinetics and subsequent junction transport. Division stops only when the complete `9,216`-cell hardware pool is occupied.
+Cell-cycle progression is driven by the same cell-local energy-support variable, exposed membrane, biomass, stress, and inherited proliferation output. Contact density supplies a separate brake according to the adhesive program. A completed cycle divides only while ATP is at least `0.18`, biomass is at least `0.42`, membrane integrity is at least `0.52`, and stress is at most `0.68`. These are cell-viability checkpoints, not an organism-level target size. A competent cell atomically claims an unoccupied global cell record and divides along an axis dominated by its persistent developmental polarity, with smaller contributions from oscillator phase, measured tissue position, strain, proliferation, and contractile state.
+
+Parent and daughter receive exactly half of the pre-division ATP and biomass. Their membrane coordinates and rest lengths scale by `1/sqrt(2)`, preserving total polygon area before subsequent membrane dynamics; their opposite separation velocities preserve pair momentum. Both reset cycle phase and receive mean-preserving opposite perturbations to morphogens, fate memory, regulatory state, and polarity angle. The daughter receives a new permanent cell ID and records the parent's cell ID. The resulting asymmetry is then stabilized, amplified, or erased by inherited local kinetics and subsequent junction transport. There is no per-organism cell-count ceiling; division can stop because local energy, mass, integrity, stress, crowding, record availability, or evolved regulation no longer permits it.
 
 For direct causal accounting, the cycle update is decomposed into an unconstrained drive `G_i`, a contact brake `C_i`, and the remaining crowding term:
 
 ```math
-G_i=0.00145\,\mathrm{smoothstep}(0.40,0.72,A_i)\,
-\mathrm{mix}(0.12,1.62,z_i^P)(1-\mathrm{clip}(S_i,0,1)),
+G_i=0.00135\eta_i\,\mathrm{smoothstep}(0.20,0.46,B_i)\,
+\mathrm{mix}(0.24,1,\xi_i)\,\mathrm{mix}(0.12,1.62,z_i^P)
+(1-\mathrm{clip}(S_i,0,1)),
 ```
 
 ```math
 C_i=\chi_i(0.62+0.30z_i^A), \qquad
-\Delta c_i=G_i-G_iC_i-0.00022\chi_i.
+\Delta c_i=G_i(1-C_i)-Q_i,
 ```
 
-Here `chi_i` is bounded contact inhibition, `z_i^P` is the proliferation output, and `z_i^A` is the adhesive output. The recorded positive drive is `G_i`; the recorded contact effect is `-(G_i C_i + 0.00022 chi_i)`. The independently retained repair contribution to membrane integrity is
+with checkpoint regression
+
+```math
+Q_i=0.000018\left[1-\mathrm{smoothstep}(0.10,0.34,\eta_i)\right]
++0.000050\,\mathrm{smoothstep}(0.72,0.96,C_i)
++0.000030\,\mathrm{smoothstep}(0.62,0.88,S_i).
+```
+
+Here `chi_i` is bounded contact inhibition, `z_i^P` is the proliferation output, and `z_i^A` is the adhesive output. Moderate, temporary resource limitation pauses advancement instead of continuously deleting accumulated phase; measurable regression is restricted to severe energetic failure, compression, or damage. The recorded positive drive is `G_i`; the recorded suppressive effect is `-(G_i C_i + Q_i)`. The independently retained repair contribution to membrane integrity is
 
 ```math
 \Delta M_i^{repair}=0.00022\,z_i^R A_i.
@@ -1100,7 +1134,7 @@ The executable can also be invoked directly after a build:
 
 The JSONL stream contains a header, exact lineage events, periodic samples, and a terminal summary. Birth records with a physical parent component are classified additionally as fissions. Samples contain living organisms and cells, maximum living generation, largest tissue size, trophic gain/loss, active and recycled program slots, membrane-derived morphology, junction count/load, the signed energy residual, cell-weighted ATP, integrity, stress, voltage, Ca*, ERK*, division, traction, frequency match, morphogen A/B, fate memory, junction transport, morphogen differentiation, polarity coherence, synthesis rate, transport work, and all invariant counters. `--intervention-step` plus `--post-mechanosensing-gain` defines a scheduled model intervention and forces an exact readback at its boundary. The runner refuses to overwrite an unread lineage-ring interval: reduce `--sample-every` if more than `4,096` events occur between samples.
 
-The terminal summary includes a mechanistic developmental qualification. It passes only when the run has at least three samples, remains viable for the final three samples, reaches at least two cells per organism, forms at least one persistent junction with measured morphogen transport above `1e-8`, reaches mean morphogen differentiation of `0.015`, records physical fission with a living descendant generation, retains zero invariant flags, and keeps the maximum absolute energy residual at or below `0.001`. Failure is reported as a failed qualification, not hidden by an aggregate fitness score. These thresholds are model diagnostics for comparing seeded runs; they are not biological viability criteria.
+The terminal summary includes a mechanistic developmental qualification. It passes only when the run has at least three samples, remains viable for the final three samples, produces an observed tissue of at least six cells, forms at least one persistent junction with measured morphogen transport above `1e-8`, reaches mean morphogen differentiation of `0.015`, records physical fission with a living descendant generation, retains zero invariant flags, and keeps the maximum absolute energy residual at or below `0.001`. Largest observed tissue size is used rather than population mean so coexistence with small propagules cannot hide whether organized growth occurred; a persistent four-cell plateau fails explicitly. Failure is reported as a failed qualification, not hidden by an aggregate fitness score. These thresholds are model diagnostics for comparing seeded runs; they are not biological viability criteria.
 
 Strict invariant enforcement is enabled by default. The GPU records the first exact step that violates any of these conditions:
 
@@ -1163,9 +1197,9 @@ It performs:
 
 1. Standalone Metal compilation of `Replicator.metal` with `xcrun metal`.
 2. Swift build of the `NumiAutomata` executable.
-3. Fourteen Swift tests covering Pareto dominance, collapse/noise rejection, diversification, novelty, preservation of different successful strategies, lineage distance, persistent-clade criteria, differenced lag alignment, zero-variance rejection, paired-effect estimation, and conjunctive developmental qualification.
+3. Fifteen Swift tests covering Pareto dominance, collapse/noise rejection, diversification, novelty, preservation of different successful strategies, lineage distance, persistent-clade criteria, differenced lag alignment, zero-variance rejection, paired-effect estimation, the four-cell developmental plateau guard, and conjunctive developmental qualification.
 
-The current suite contains fourteen passing tests.
+The current suite contains fifteen passing tests.
 
 ### Project layout
 

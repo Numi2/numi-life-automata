@@ -40,7 +40,7 @@ public struct DevelopmentalQualificationInput: Sendable, Equatable {
 public struct DevelopmentalQualification: Codable, Sendable, Equatable {
     public static let minimumObservationCount = 3
     public static let minimumEndpointPersistence = 3
-    public static let minimumCellsPerOrganism = 2.0
+    public static let minimumCellsPerOrganism = 6.0
     public static let minimumMorphogenDifferentiation = 0.015
     public static let maximumEnergyResidual = 0.001
 

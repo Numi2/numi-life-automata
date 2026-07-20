@@ -343,6 +343,44 @@ inline float signedRandom(uint value) {
     return random01(value) * 2.0 - 1.0;
 }
 
+inline float cellularFluxAdequacy(float4 energetics) {
+    float demand = energetics.y + energetics.z + energetics.w;
+    return clamp(energetics.x / max(demand, 0.000001), 0.0, 1.5);
+}
+
+inline float cellularEnergySupport(float atp, float4 energetics) {
+    float reserveSupport = smoothstep(0.12, 0.36, atp);
+    float fluxSupport = smoothstep(0.62, 1.06, cellularFluxAdequacy(energetics));
+    return saturate(reserveSupport * 0.58 + fluxSupport * 0.42);
+}
+
+inline float cellCycleDrive(
+    float atp,
+    float biomass,
+    float4 energetics,
+    float proliferationProgram,
+    float stress,
+    float membraneExposure
+) {
+    float energySupport = cellularEnergySupport(atp, energetics);
+    float massCompetence = smoothstep(0.20, 0.46, biomass);
+    float boundaryAccess = mix(0.24, 1.0, saturate(membraneExposure));
+    return 0.00135 * energySupport * massCompetence * boundaryAccess *
+        mix(0.12, 1.62, proliferationProgram) * (1.0 - saturate(stress));
+}
+
+inline float cellCycleQuiescenceDecay(
+    float energySupport,
+    float contactBrake,
+    float stress
+) {
+    float starvation = 1.0 - smoothstep(0.10, 0.34, energySupport);
+    float severeCrowding = smoothstep(0.72, 0.96, contactBrake);
+    float damageArrest = smoothstep(0.62, 0.88, saturate(stress));
+    return starvation * 0.000018 + severeCrowding * 0.000050 +
+        damageArrest * 0.000030;
+}
+
 inline float4 randomSigned4(uint seed) {
     return float4(
         signedRandom(seed), signedRandom(seed + 1u),
@@ -4473,9 +4511,16 @@ kernel void evolveOrganismCells(
             incomingRejection * 0.00026,
         0.0, 1.0
     );
+    float energySupport = cellularEnergySupport(
+        atp, float4(uptake, maintenance, activeWork, dissipation)
+    );
+    float anabolicDrive = energySupport * mix(0.50, 1.0, membraneExposure) *
+        mix(0.42, 1.38, proliferationProgram);
+    float catabolicDrive = (1.0 - energySupport) *
+        mix(1.0, 0.58, smoothstep(0.08, 0.30, atp));
     float proposedBiomass = clamp(
-        cell.physiology.y + (atp - 0.48) * 0.00018 * mix(0.42, 1.38, proliferationProgram),
-        0.42, 1.08
+        cell.physiology.y + anabolicDrive * 0.00018 - catabolicDrive * 0.000090,
+        0.16, 1.08
     );
     float biomassDelta = proposedBiomass - cell.physiology.y;
     float biomassEnergyDelta = biomassDelta * 0.18;
@@ -4508,12 +4553,15 @@ kernel void evolveOrganismCells(
         -(storageCorrection + biomassHeat + biomassDetritusEnergy)
     );
     float contactInhibition = saturate(contactCount / (3.6 + cell.phenotype.x * 1.8));
-    float unconstrainedCycleDrive = 0.00145 * smoothstep(0.40, 0.72, atp) *
-        mix(0.12, 1.62, proliferationProgram) * (1.0 - saturate(stress));
+    float unconstrainedCycleDrive = cellCycleDrive(
+        atp, biomass, float4(uptake, maintenance, activeWork, dissipation),
+        proliferationProgram, stress, membraneExposure
+    );
     float contactBrake = contactInhibition * (0.62 + adhesiveProgram * 0.30);
     float cycleRate = unconstrainedCycleDrive * (1.0 - contactBrake);
+    float cycleDecay = cellCycleQuiescenceDecay(energySupport, contactBrake, stress);
     float cycle = clamp(
-        cell.physiology.z + cycleRate - contactInhibition * 0.00022,
+        cell.physiology.z + cycleRate - cycleDecay,
         0.0, 1.2
     );
 
@@ -5475,7 +5523,7 @@ kernel void applyCellContactEffects(
     float speed = length(cell.velocity);
     if (speed > 0.0032) { cell.velocity *= 0.0032 / speed; }
     cell.physiology.x = clamp(cell.physiology.x + trophic * 0.82, 0.0, 1.2);
-    cell.physiology.y = clamp(cell.physiology.y + trophic * 0.30, 0.36, 1.12);
+    cell.physiology.y = clamp(cell.physiology.y + trophic * 0.30, 0.16, 1.12);
     cell.physiology.w = clamp(cell.physiology.w - damage, 0.0, 1.0);
     cell.signals.z = saturate(cell.signals.z + damage * 7.5 + max(-trophic, 0.0) * 4.0);
     cell.tissueForce.xy += localImpulse;
@@ -5957,8 +6005,12 @@ kernel void divideAndReduceOrganismCells(
         uint nextIndex = ownerCellNext[index];
         if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) != 0u &&
             cellIdentities[index].owner == owner) {
-            float cycle = cells[index].physiology.z;
-            if (cycle >= mostAdvancedCycle) {
+            CellState candidate = cells[index];
+            float cycle = candidate.physiology.z;
+            bool divisionCompetent = candidate.physiology.x >= 0.18 &&
+                candidate.physiology.y >= 0.42 && candidate.physiology.w >= 0.52 &&
+                candidate.signals.z <= 0.68;
+            if (divisionCompetent && cycle >= mostAdvancedCycle) {
                 mostAdvancedCycle = cycle;
                 divisionParent = index;
             }
@@ -5994,9 +6046,9 @@ kernel void divideAndReduceOrganismCells(
             child.position += axis * 0.095;
             parent.velocity -= axis * 0.00035;
             child.velocity += axis * 0.00035;
-            parent.physiology.x *= 0.56;
+            parent.physiology.x *= 0.50;
             child.physiology.x = parent.physiology.x;
-            parent.physiology.y *= 0.62;
+            parent.physiology.y *= 0.50;
             child.physiology.y = parent.physiology.y;
             parent.physiology.z = 0.0;
             child.physiology.z = 0.0;
@@ -6081,16 +6133,16 @@ kernel void divideAndReduceOrganismCells(
             uint childMembraneBase = divisionTarget * membraneVertexCount;
             for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
                 MembraneVertex membrane = membraneVertices[parentMembraneBase + vertexIndex];
-                membrane.position *= 0.78;
+                membrane.position *= 0.70710678;
                 membrane.velocity *= 0.25;
-                membrane.mechanics.x *= 0.78;
+                membrane.mechanics.x *= 0.70710678;
                 membraneVertices[parentMembraneBase + vertexIndex] = membrane;
                 MembraneVertex daughterMembrane = membrane;
                 daughterMembrane.velocity *= -1.0;
                 daughterMembrane.mechanics.zw = float2(0.0);
                 membraneVertices[childMembraneBase + vertexIndex] = daughterMembrane;
             }
-            parent.membrane.xy *= float2(0.61, 0.78);
+            parent.membrane.xy *= float2(0.50, 0.70710678);
             child.membrane = parent.membrane;
             cells[divisionParent] = parent;
             cells[divisionTarget] = child;
@@ -6259,12 +6311,15 @@ kernel void divideAndReduceOrganismCells(
         trophicGain += max(cell.tissueForce.w, 0.0);
         trophicLoss += max(-cell.tissueForce.w, 0.0);
         maximumDetachment = max(maximumDetachment, cell.tissueGeometry.w);
-        float unconstrainedCycleDrive = 0.00145 * smoothstep(0.40, 0.72, cell.physiology.x) *
-            mix(0.12, 1.62, cell.regulation.x) * (1.0 - saturate(cell.signals.z));
-        float contactInhibition = cell.interaction.z /
-            max(0.62 + cell.regulation.y * 0.30, 0.001);
-        float contactEffect = -(unconstrainedCycleDrive * cell.interaction.z +
-            contactInhibition * 0.00022);
+        float energySupport = cellularEnergySupport(cell.physiology.x, cell.energetics);
+        float unconstrainedCycleDrive = cellCycleDrive(
+            cell.physiology.x, cell.physiology.y, cell.energetics,
+            cell.regulation.x, cell.signals.z, cell.tissueGeometry.z
+        );
+        float cycleDecay = cellCycleQuiescenceDecay(
+            energySupport, cell.interaction.z, cell.signals.z
+        );
+        float contactEffect = -(unconstrainedCycleDrive * cell.interaction.z + cycleDecay);
         float repairEffect = cell.regulation.w * cell.physiology.x * 0.00022;
         causalityTotal += float4(
             cell.interaction.w, unconstrainedCycleDrive, contactEffect, repairEffect
@@ -7396,12 +7451,16 @@ fragment float4 cellFragment(
                 (0.22 + junctionMorphogenTransport * 0.86) +
             regulatoryEmission * nucleus * 0.82;
     } else if (uniforms.displayMode == 5) {
-        float unconstrainedCycleDrive = 0.00145 * smoothstep(0.40, 0.72, atp) *
-            mix(0.12, 1.62, input.regulation.x) * (1.0 - stress);
-        float contactInhibition = input.interaction.z /
-            max(0.62 + input.regulation.y * 0.30, 0.001);
+        float energySupport = cellularEnergySupport(atp, input.energetics);
+        float unconstrainedCycleDrive = cellCycleDrive(
+            atp, input.physiology.y, input.energetics, input.regulation.x,
+            stress, input.tissueGeometry.z
+        );
+        float cycleDecay = cellCycleQuiescenceDecay(
+            energySupport, input.interaction.z, stress
+        );
         float contactEffect = saturate((input.interaction.z * unconstrainedCycleDrive +
-            contactInhibition * 0.00022) * 3000.0);
+            cycleDecay) * 3000.0);
         float repairEffect = saturate(input.regulation.w * atp * 0.00022 * 10000.0);
         float proliferativeEffect = saturate(unconstrainedCycleDrive * 2400.0);
         float3 mechanosensoryColor = float3(0.02, 0.88, 1.0) * mechanosensoryPositive +

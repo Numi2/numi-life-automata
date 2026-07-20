@@ -388,7 +388,9 @@ extension EvolutionRenderer {
         let input = DevelopmentalQualificationInput(
             observationCount: samples.count,
             consecutiveViableEndpointObservations: consecutiveViableEndpointObservations,
-            maximumCellsPerOrganism: samples.map(\.meanCellsPerOrganism).max() ?? 0,
+            maximumCellsPerOrganism: samples.map {
+                Double($0.largestTissueCellCount)
+            }.max() ?? 0,
             maximumActiveJunctions: samples.map(\.activeJunctions).max() ?? 0,
             maximumMorphogenTransport:
                 samples.map(\.meanJunctionMorphogenTransport).max() ?? 0,
