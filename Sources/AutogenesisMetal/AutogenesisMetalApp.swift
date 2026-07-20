@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 final class NumiAutomataAppDelegate: NSObject, NSApplicationDelegate {
@@ -7,7 +8,6 @@ final class NumiAutomataAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-@main
 struct NumiAutomataApp: App {
     @NSApplicationDelegateAdaptor(NumiAutomataAppDelegate.self) private var appDelegate
 
@@ -17,5 +17,23 @@ struct NumiAutomataApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1240, height: 820)
+    }
+}
+
+@main
+enum NumiAutomataEntrypoint {
+    @MainActor
+    static func main() {
+        let arguments = CommandLine.arguments.dropFirst()
+        guard arguments.first == "experiment" else {
+            NumiAutomataApp.main()
+            return
+        }
+        do {
+            try HeadlessExperimentCLI.run(arguments: arguments.dropFirst())
+        } catch {
+            fputs("numi-experiment: \(error.localizedDescription)\n", stderr)
+            exit(EXIT_FAILURE)
+        }
     }
 }

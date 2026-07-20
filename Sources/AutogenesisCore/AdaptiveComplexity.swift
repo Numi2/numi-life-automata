@@ -13,6 +13,10 @@ public struct WorldMetrics: Sendable, Equatable {
     public var lineageDiversity: Double
     public var nicheDifferentiation: Double
     public var trophicActivity: Double
+    public var substrateFluctuation: Double
+    public var detritusDensity: Double
+    public var barrierFraction: Double
+    public var environmentalMechanicalDrive: Double
     public var centroidX: Double
     public var centroidY: Double
 
@@ -29,6 +33,10 @@ public struct WorldMetrics: Sendable, Equatable {
         lineageDiversity: Double = 0,
         nicheDifferentiation: Double = 0,
         trophicActivity: Double = 0,
+        substrateFluctuation: Double = 0,
+        detritusDensity: Double = 0,
+        barrierFraction: Double = 0,
+        environmentalMechanicalDrive: Double = 0,
         centroidX: Double,
         centroidY: Double
     ) {
@@ -44,6 +52,10 @@ public struct WorldMetrics: Sendable, Equatable {
         self.lineageDiversity = lineageDiversity
         self.nicheDifferentiation = nicheDifferentiation
         self.trophicActivity = trophicActivity
+        self.substrateFluctuation = substrateFluctuation
+        self.detritusDensity = detritusDensity
+        self.barrierFraction = barrierFraction
+        self.environmentalMechanicalDrive = environmentalMechanicalDrive
         self.centroidX = centroidX
         self.centroidY = centroidY
     }
@@ -61,6 +73,10 @@ public struct WorldMetrics: Sendable, Equatable {
         lineageDiversity: 0,
         nicheDifferentiation: 0,
         trophicActivity: 0,
+        substrateFluctuation: 0,
+        detritusDensity: 0,
+        barrierFraction: 0,
+        environmentalMechanicalDrive: 0,
         centroidX: 0.5,
         centroidY: 0.5
     )
@@ -78,6 +94,10 @@ public struct WorldMetrics: Sendable, Equatable {
             lineageDiversity,
             nicheDifferentiation,
             trophicActivity,
+            substrateFluctuation,
+            detritusDensity,
+            barrierFraction,
+            environmentalMechanicalDrive,
             centroidX,
             centroidY
         ].map(Self.unit))
