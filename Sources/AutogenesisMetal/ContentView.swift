@@ -54,11 +54,17 @@ private struct ProcessPathwayView: View {
 
 struct ContentView: View {
     @StateObject private var store = EvolutionStore()
-    @State private var showsInspector = false
+    @State private var showsInspector = ProcessInfo.processInfo.environment[
+        "NUMI_SHOW_INSPECTOR"
+    ] == "1"
+    @State private var showsScientificDefinition = false
+
+    private var inspectorWidth: CGFloat { 352 }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             MetalEvolutionView(store: store)
+                .offset(x: showsInspector ? -(inspectorWidth + 24) * 0.5 : 0)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -238,7 +244,7 @@ struct ContentView: View {
 
     private var inspectorPanel: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Image(systemName: observationStops[activeObservationStop].symbol)
                         .font(.system(size: 13, weight: .semibold))
@@ -279,28 +285,11 @@ struct ContentView: View {
                     Text(worldHeadline)
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(worldSummary)
-                        .font(.system(size: 12, weight: .regular))
+                    Text(inspectorSummary)
+                        .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(.secondary)
                         .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if store.observationZoom < 64 {
-                    lifecyclePanel
-                }
-
-                HStack(alignment: .top, spacing: 9) {
-                    Rectangle()
-                        .fill(scaleAccent)
-                        .frame(width: 2, height: 34)
-                    VStack(alignment: .leading, spacing: 2) {
-                        sectionLabel("CROSS-SCALE COUPLING")
-                        Text(scaleRelation)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
                 }
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
@@ -310,6 +299,28 @@ struct ContentView: View {
                 } else {
                     scaleProcessPathway
                 }
+
+                Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
+
+                if store.observationZoom < 64 {
+                    lifecyclePanel
+                }
+
+                if store.observationZoom >= 6, store.observationZoom < 18 {
+                    morphologyQualificationPanel
+                }
+
+                DisclosureGroup(isExpanded: $showsScientificDefinition) {
+                    Text(scientificDefinitionText)
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 6)
+                } label: {
+                    sectionLabel("METHOD AND ASSUMPTIONS")
+                }
+                .tint(scaleAccent)
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
 
@@ -345,7 +356,7 @@ struct ContentView: View {
             .padding(.vertical, 16)
         }
         .scrollIndicators(.hidden)
-        .frame(width: 334)
+        .frame(width: inspectorWidth)
         .frame(maxHeight: .infinity)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
         .background(Color.black.opacity(0.76), in: RoundedRectangle(cornerRadius: 8))
@@ -499,6 +510,116 @@ struct ContentView: View {
                     .tint(lifecycleColor(stage))
             }
         }
+    }
+
+    private var morphologyQualificationPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("INTEGRATION GATE OBSERVABLES")
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), alignment: .leading),
+                    GridItem(.flexible(), alignment: .leading)
+                ],
+                alignment: .leading,
+                spacing: 8
+            ) {
+                qualificationCriterion(
+                    "CONNECTED CELLS",
+                    value: "\(store.snapshot.largestTissueCellCount)",
+                    threshold: ">= 6",
+                    passes: store.snapshot.largestTissueCellCount >= 6
+                )
+                qualificationCriterion(
+                    "QUALIFYING DWELL",
+                    value: percent(followedLifecycleProgress),
+                    threshold: "900 steps",
+                    passes: store.followedLifeStage == .integratedOrganism
+                )
+                qualificationCriterion(
+                    "MEAN ATP",
+                    value: decimal(store.snapshot.meanCellATP),
+                    threshold: ">= 0.12",
+                    passes: store.snapshot.meanCellATP >= 0.12
+                )
+                qualificationCriterion(
+                    "MEMBRANE INTEGRITY",
+                    value: decimal(store.snapshot.meanCellIntegrity),
+                    threshold: ">= 0.42",
+                    passes: store.snapshot.meanCellIntegrity >= 0.42
+                )
+                qualificationCriterion(
+                    "MEAN STRESS",
+                    value: decimal(store.snapshot.meanCellStress),
+                    threshold: "<= 0.48",
+                    passes: store.snapshot.meanCellStress <= 0.48
+                )
+                qualificationCriterion(
+                    "PHASE COHERENCE",
+                    value: decimal(store.snapshot.meanPhaseCoherence),
+                    threshold: ">= 0.15",
+                    passes: store.snapshot.meanPhaseCoherence >= 0.15
+                )
+                qualificationCriterion(
+                    "JUNCTION TRANSPORT",
+                    value: compactScientific(store.snapshot.meanJunctionMorphogenTransport),
+                    threshold: "> 1e-8",
+                    passes: store.snapshot.meanJunctionMorphogenTransport > 1e-8
+                )
+                qualificationCriterion(
+                    "DIFFERENTIATION",
+                    value: decimal(store.snapshot.meanMorphogenDifferentiation),
+                    threshold: ">= 0.006",
+                    passes: store.snapshot.meanMorphogenDifferentiation >= 0.006
+                )
+                qualificationCriterion(
+                    "EXPOSED PERIMETER",
+                    value: decimal(store.snapshot.meanExposedMembraneLength),
+                    threshold: ">= 0.45",
+                    passes: store.snapshot.meanExposedMembraneLength >= 0.45
+                )
+                qualificationCriterion(
+                    "CELL TRACTION",
+                    value: compactScientific(store.snapshot.meanCellGeneratedForce),
+                    threshold: ">= 3e-6",
+                    passes: store.snapshot.meanCellGeneratedForce >= 3e-6
+                )
+            }
+            Text("Population-weighted observations are shown here; lifecycle classification is evaluated per membrane-connected component on the GPU.")
+                .font(.system(size: 8, weight: .regular))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func qualificationCriterion(
+        _ label: String,
+        value: String,
+        threshold: String,
+        passes: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Circle()
+                .fill(passes ? Color.green : Color.orange)
+                .frame(width: 6, height: 6)
+                .padding(.top, 3)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label)
+                    .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                HStack(spacing: 4) {
+                    Text(value)
+                        .foregroundStyle(.primary)
+                    Text(threshold)
+                        .foregroundStyle(.tertiary)
+                }
+                .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func lifecycleStageCell(_ stage: AgentLifeStage, count: Int) -> some View {
@@ -901,8 +1022,27 @@ struct ContentView: View {
                 ? "Junction-coupled morphogen development"
                 : "Cell-derived geometry and mechanochemical control"
         }
-        if zoom >= 6 { return "Membrane-connected tissues and physical locomotion" }
+        if zoom >= 6 {
+            return store.integratedOrganismCount > 0
+                ? "Integrated membrane-connected tissue"
+                : "Membrane-connected tissue formation"
+        }
         return "Contact-mediated trophic and vibrational niches"
+    }
+
+    private var inspectorSummary: String {
+        guard store.observationZoom >= 6, store.observationZoom < 18 else {
+            return worldSummary
+        }
+        let components = max(store.snapshot.organismCount, store.observableAgentCount)
+        return "\(store.snapshot.cellCount) persistent cells form \(components) membrane-connected component\(components == 1 ? "" : "s"); \(store.integratedOrganismCount) currently satisfies the integrated-organism gate. Exposed perimeter is \(decimal(store.snapshot.meanExposedMembraneLength)); net cell-generated force \(compactScientific(store.snapshot.meanCellGeneratedForce)) produces mean translation \(compactScientific(store.snapshot.meanOrganismSpeed))."
+    }
+
+    private var scientificDefinitionText: String {
+        if store.observationZoom >= 6, store.observationZoom < 18 {
+            return worldSummary + "\n\n" + scaleRelation
+        }
+        return scaleRelation
     }
 
     private var worldSummary: String {

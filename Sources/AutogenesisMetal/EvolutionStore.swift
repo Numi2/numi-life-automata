@@ -460,6 +460,10 @@ final class EvolutionStore: ObservableObject {
     private var pendingMechanosensoryIntervention: (baseline: EvolutionSnapshot, blocked: Bool)?
 
     init() {
+        if let rawSpeed = ProcessInfo.processInfo.environment["NUMI_INITIAL_SPEED"],
+           let speed = Int(rawSpeed), [1, 3, 6].contains(speed) {
+            stepsPerFrame = speed
+        }
         guard let rawMagnification = ProcessInfo.processInfo.environment[
             "NUMI_INITIAL_MAGNIFICATION"
         ], let magnification = Double(rawMagnification), magnification.isFinite else { return }

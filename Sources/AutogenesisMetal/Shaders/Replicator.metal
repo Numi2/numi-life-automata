@@ -7220,10 +7220,14 @@ vertex CellRasterData cellVertex(
     output.visibility = visibility;
     output.tracked = uniforms.trackedAgentID == owner ? 1.0 : 0.0;
     output.radialCoordinate = triangleVertex == 0u ? 0.0 : 1.0;
-    uint physicalEdge = triangle / membraneRenderSubdivision;
-    output.edgeExposure = saturate(
-        membraneVertices[cellIndex * membraneVertexCount + physicalEdge].mechanics.w
-    );
+    uint physicalEdge = (membraneSample / membraneRenderSubdivision) % membraneVertexCount;
+    // Exposure is encoded by the sign so the stored strain magnitude remains available.
+    float edgeExposure = membraneVertices[
+        cellIndex * membraneVertexCount + physicalEdge
+    ].mechanics.w > 0.0 ? 1.0 : 0.0;
+    output.edgeExposure = triangleVertex == 0u
+        ? saturate(cell.tissueGeometry.z)
+        : edgeExposure;
     return output;
 }
 
@@ -7241,7 +7245,7 @@ fragment float4 cellFragment(
     float2 morphologyNormal = float2(-morphologyAxis.y, morphologyAxis.x);
     float radius = input.radialCoordinate;
     float aa = max(fwidth(radius) * 1.15, 0.004);
-    float body = 1.0;
+    float body = 1.0 - smoothstep(1.0 - aa * 1.8, 1.0, radius);
     if (body <= 0.001) { discard_fragment(); }
 
     float integrity = saturate(input.physiology.w);
@@ -7291,13 +7295,18 @@ fragment float4 cellFragment(
     ))) * cytoplasm * tractionMagnitude;
     float coarseObservationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
     if (coarseObservationZoom < 18.0) {
+        float morphologyMembrane = body * smoothstep(
+            0.84 - integrity * 0.045, 0.985, radius
+        );
+        float morphologyCytoplasm = body * (1.0 - smoothstep(0.82, 0.97, radius));
+        float morphologyExposedArc = morphologyMembrane * exposure;
         float coarseATP = saturate(input.physiology.x);
         float coarseCalcium = saturate(input.signaling.x);
         float coarseERK = saturate(input.signaling.y);
         float coarseVoltage = saturate(input.dynamics.x * 0.30 + 0.5);
         float organismDetail = smoothstep(3.0, 14.0, coarseObservationZoom);
         float radialDepth = sqrt(saturate(1.0 - radius * radius));
-        float3 coarseLineage = hsvToRGB(float3(input.lineageHue, 0.70, 0.82));
+        float3 coarseLineage = hsvToRGB(float3(input.lineageHue, 0.82, 0.70));
         float roleTotal = max(
             input.phenotype.x + input.phenotype.y + input.phenotype.z + input.phenotype.w,
             0.001
@@ -7311,53 +7320,82 @@ fragment float4 cellFragment(
         float3 coarseVoltageColor = mix(
             float3(0.02, 0.34, 1.0), float3(1.0, 0.08, 0.02), coarseVoltage
         );
-        float3 tissueColor = mix(coarseLineage, roleColor, 0.22 + organismDetail * 0.18);
+        float3 tissueColor = mix(coarseLineage, roleColor, 0.44 + organismDetail * 0.20);
         float coarseContactStrength = length(input.interaction.xy) > 0.001
             ? saturate(input.interaction.z) : 0.0;
         float2 coarseContactDirection = length(input.interaction.xy) > 0.001
             ? normalize(input.interaction.xy) : morphologyAxis;
-        float coarseJunction = (1.0 - smoothstep(0.026, 0.080, segmentDistance(
-            p, coarseContactDirection * 0.54, coarseContactDirection * 1.02
+        float coarseJunction = (1.0 - smoothstep(0.024, 0.074, segmentDistance(
+            p, coarseContactDirection * 0.66, coarseContactDirection * 1.04
         ))) * coarseContactStrength * body;
-        float energyCore = (1.0 - smoothstep(0.06, 0.72, radius)) *
-            cytoplasm * coarseATP;
-        float outerMembrane = exposedArc;
-        float internalMembrane = membrane * (1.0 - exposure);
+        float junctionNode = (1.0 - smoothstep(0.055, 0.125,
+            length(p - coarseContactDirection * 0.78))) * coarseContactStrength * body;
+        float energyCore = (1.0 - smoothstep(0.08, 0.42, radius)) *
+            morphologyCytoplasm * coarseATP;
+        float outerMembrane = morphologyExposedArc;
+        float internalMembrane = morphologyMembrane * (1.0 - exposure);
+        float nucleusRing = (1.0 - smoothstep(aa * 1.1, aa * 3.0,
+            abs(length(p - nucleusPosition) - nucleusRadius * 1.18))) *
+            morphologyCytoplasm;
+        float coarseOrganelleNoise = visualNoise(
+            p * (11.0 + input.phenotype.z * 5.0) +
+            float2(input.lineageHue * 19.0, input.phenotype.w * 13.0)
+        );
+        float coarseOrganelles = smoothstep(0.75, 0.90, coarseOrganelleNoise) *
+            morphologyCytoplasm * (1.0 - nucleus) * organismDetail;
+        float coarseFiber = (1.0 - smoothstep(0.030, 0.095,
+            abs(sin(dot(p, morphologyNormal) * (12.0 + input.phenotype.y * 8.0) +
+                angle * 0.72)))) * morphologyCytoplasm * organismDetail;
         float3 coarseColor = float3(0.006, 0.012, 0.018) * body;
-        coarseColor += tissueColor * cytoplasm *
-            (0.30 + coarseATP * 0.30 + radialDepth * (0.28 + organismDetail * 0.18));
+        coarseColor += tissueColor * morphologyCytoplasm *
+            (0.30 + coarseATP * 0.18 + radialDepth * (0.18 + organismDetail * 0.12));
         coarseColor += float3(1.0, 0.66, 0.05) * energyCore *
-            (0.10 + organismDetail * 0.22);
-        coarseColor += mix(coarseLineage, coarseVoltageColor, 0.46) * membrane *
-            (0.28 + integrity * 0.28);
-        coarseColor += float3(0.018, 0.035, 0.052) * internalMembrane * 0.72;
-        coarseColor += mix(coarseLineage, float3(0.90, 0.98, 1.0), integratedStage) *
-            outerMembrane * (0.36 + integrationSignal * 0.52);
+            (0.05 + organismDetail * 0.10);
+        coarseColor += mix(float3(0.02, 0.16, 0.24), coarseVoltageColor, 0.28) *
+            morphologyMembrane * (0.055 + integrity * 0.075);
+        coarseColor += float3(0.018, 0.075, 0.095) * internalMembrane *
+            (0.48 + coarseContactStrength * 0.52);
+        coarseColor += float3(0.04, 0.92, 0.74) * internalMembrane *
+            coarseContactStrength * (0.16 + organismDetail * 0.28);
+        coarseColor += mix(roleColor, float3(0.94, 0.99, 1.0),
+            0.28 + integratedStage * 0.22) * outerMembrane *
+            (0.44 + integrationSignal * 0.34);
         coarseColor += mix(float3(0.98, 0.12, 0.66), coarseLineage, 0.28) * nucleus *
-            (0.28 + organismDetail * 0.74);
+            (0.24 + organismDetail * 0.62);
+        coarseColor += mix(float3(0.06, 0.78, 1.0), float3(1.0, 0.18, 0.64),
+            coarseERK) * nucleusRing * (0.16 + organismDetail * 0.28);
         coarseColor += float3(0.04, 0.96, 0.76) * coarseJunction *
-            (0.38 + organismDetail * 0.74);
-        coarseColor += float3(0.02, 0.88, 1.0) * coarseCalcium * membrane *
+            (0.56 + organismDetail * 0.82);
+        coarseColor += float3(0.86, 1.0, 0.94) * junctionNode *
+            (0.24 + organismDetail * 0.46);
+        coarseColor += mix(float3(0.04, 0.68, 1.0), float3(1.0, 0.64, 0.05),
+            coarseATP) * coarseOrganelles * 0.36;
+        coarseColor += float3(0.12, 0.82, 0.72) * coarseFiber *
+            (0.045 + saturate(input.mechanics.x) * 0.095);
+        coarseColor += float3(0.02, 0.88, 1.0) * coarseCalcium * morphologyMembrane *
             (0.22 + organismDetail * 0.42);
         coarseColor += float3(0.98, 0.08, 0.66) * coarseERK * nucleus *
             (0.26 + organismDetail * 0.54);
         coarseColor += float3(0.02, 1.0, 0.58) * tractionTrack *
             (0.42 + organismDetail * 0.52);
-        coarseColor += float3(1.0, 0.08, 0.015) * exposedArc * contactDamage * 1.16;
-        coarseColor += float3(1.0, 0.045, 0.01) * exposedArc * input.construction.x * 0.94;
-        coarseColor += float3(0.08, 0.92, 0.62) * exposedArc * input.construction.y * 0.72;
-        coarseColor += float3(0.04, 0.78, 1.0) * exposedArc * input.construction.z * 0.88;
-        coarseColor += float3(0.12, 1.0, 0.42) * exposedArc * input.construction.w * 0.74;
+        coarseColor += float3(1.0, 0.08, 0.015) * morphologyExposedArc * contactDamage * 1.16;
+        coarseColor += float3(1.0, 0.045, 0.01) * morphologyExposedArc * input.construction.x * 0.94;
+        coarseColor += float3(0.08, 0.92, 0.62) * morphologyExposedArc * input.construction.y * 0.72;
+        coarseColor += float3(0.04, 0.78, 1.0) * morphologyExposedArc * input.construction.z * 0.88;
+        coarseColor += float3(0.12, 1.0, 0.42) * morphologyExposedArc * input.construction.w * 0.74;
         coarseColor += mix(
             float3(0.08, 0.96, 0.70), float3(0.96, 0.99, 1.0), integratedStage
-        ) * exposedArc * integrationSignal * integrationPulse *
+        ) * morphologyExposedArc * integrationSignal * integrationPulse *
             (0.46 + organismDetail * 0.34);
         coarseColor += environmentalFrequencyColor * frequencyBand *
             (0.18 + frequencyMatch * 0.56);
-        coarseColor += float3(1.0, 0.28, 0.02) * membrane * barrierCompression * 0.82;
-        coarseColor += float3(1.0, 0.76, 0.02) * cytoplasm * trophicGain * 0.82;
-        coarseColor += float3(0.02, 0.96, 0.82) * membrane * programExchange * 0.82;
-        coarseColor += float3(1.0, 0.04, 0.12) * membrane * programRejection * 0.94;
+        coarseColor += float3(1.0, 0.28, 0.02) * morphologyMembrane *
+            barrierCompression * 0.82;
+        coarseColor += float3(1.0, 0.76, 0.02) * morphologyCytoplasm * trophicGain * 0.82;
+        coarseColor += float3(0.02, 0.96, 0.82) * morphologyMembrane *
+            programExchange * 0.82;
+        coarseColor += float3(1.0, 0.04, 0.12) * morphologyMembrane *
+            programRejection * 0.94;
         if (uniforms.displayMode == 4) {
             float morphogenA = saturate(input.signals.x);
             float morphogenB = saturate(input.signals.y);
@@ -7365,22 +7403,24 @@ fragment float4 cellFragment(
                 float3(0.00, 0.92, 1.0) * morphogenA +
                 float3(1.0, 0.06, 0.58) * morphogenB
             ) / max(morphogenA + morphogenB, 0.001);
-            coarseColor = morphogenColor * cytoplasm *
+            coarseColor = morphogenColor * morphologyCytoplasm *
                 (0.32 + abs(morphogenA - morphogenB) * 0.68);
             coarseColor += mix(
                 float3(1.0, 0.70, 0.02), float3(0.08, 1.0, 0.56),
                 saturate(input.development.z)
             ) * nucleus * 0.96;
-            coarseColor += float3(0.90, 0.98, 1.0) * membrane *
+            coarseColor += float3(0.90, 0.98, 1.0) * morphologyMembrane *
                 saturate(input.development.w * 28.0) * 0.82;
         } else if (uniforms.displayMode == 5) {
             float mechanicsCalcium = saturate(input.signalCausality.x * 48.0);
             float calciumERK = saturate(input.signalCausality.y * 56.0);
             float erkTraction = saturate(input.signalCausality.z * 12000.0);
             coarseColor = float3(0.008, 0.014, 0.022) * body;
-            coarseColor += float3(0.02, 0.88, 1.0) * mechanicsCalcium * membrane * 1.24;
+            coarseColor += float3(0.02, 0.88, 1.0) * mechanicsCalcium *
+                morphologyMembrane * 1.24;
             coarseColor += float3(0.98, 0.08, 0.66) * calciumERK * nucleus * 1.36;
-            coarseColor += float3(0.08, 1.0, 0.56) * erkTraction * cytoplasm * 0.82;
+            coarseColor += float3(0.08, 1.0, 0.56) * erkTraction *
+                morphologyCytoplasm * 0.82;
         }
         float coarseAlpha = body * input.visibility *
             mix(0.76, 0.96, organismDetail) * (1.0 - saturate(input.signals.w) * 0.35);
@@ -7897,8 +7937,21 @@ fragment float4 worldSurfaceFragment(
         color += frequencyColor * frequencyBand * 0.34;
     } else if (uniforms.displayMode == 2) {
         float fieldEdge = smoothstep(0.015, 0.16, abs(resourceA - resourceB));
+        float substrateTotal = saturate(sqrt(resourceA + resourceB) * 0.72);
+        float substrateBalance = resourceB / max(resourceA + resourceB, 0.0001);
+        float3 substrateColor = mix(
+            float3(0.02, 0.48, 0.76), float3(0.42, 0.08, 0.58),
+            substrateBalance
+        );
         color = float3(0.0025, 0.005, 0.011) * (0.84 + terrain * 0.28);
-        color += float3(0.04, 0.10, 0.14) * fieldEdge * 0.42;
+        color += substrateColor * substrateTotal * 0.028;
+        color += float3(0.04, 0.13, 0.17) * fieldEdge * 0.42;
+        color += frequencyColor * frequencyBand * 0.026;
+        color += mix(float3(0.02, 0.44, 0.92), float3(0.06, 0.92, 0.54),
+            saturate(resourceA / max(resourceA + resourceB, 0.001))) *
+            resourceIsoline * resourceFlux * 0.045;
+        color += mix(float3(0.02, 0.50, 1.0), float3(0.94, 0.08, 0.62),
+            frequencyCoordinate) * vibration * 0.055;
     } else if (uniforms.displayMode == 3) {
         color = float3(0.002, 0.006, 0.010);
         color += float3(0.00, 0.76, 0.42) * resourceA * 0.46;
