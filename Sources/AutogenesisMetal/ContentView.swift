@@ -312,6 +312,8 @@ struct ContentView: View {
                 observerMetric("Ca* → ERK* ×1k", value: causalRate(store.snapshot.meanCalciumERKEffect), tint: .pink, values: store.history.map(\.meanCalciumERKEffect))
                 observerMetric("ERK* → traction ×10k", value: scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000), tint: .mint, values: store.history.map(\.meanERKTractionEffect))
                 observerMetric("Signal ATP cost ×10k", value: scaledRate(store.snapshot.cellularSignalingCost, by: 10_000), tint: .orange, values: store.history.map(\.cellularSignalingCost))
+                observerMetric("Substrate → ATP", value: "\(decimal(store.snapshot.auditedSubstrateEnergy)) / \(decimal(store.snapshot.auditedATPHarvest))", tint: .yellow, values: store.history.map(\.auditedATPHarvest))
+                observerMetric("Conservation residual", value: signedDecimal(store.snapshot.energyConservationResidual), tint: .white, values: store.history.map { abs($0.energyConservationResidual) })
                 observerMetric("Cell force |F| ×10k", value: scaledRate(store.snapshot.meanCellGeneratedForce, by: 10_000), tint: .green, values: store.history.map(\.meanCellGeneratedForce))
                 observerMetric("Contact load ×1k", value: scaledRate(store.snapshot.cellularContactLoad, by: 1_000), tint: .red, values: store.history.map(\.cellularContactLoad))
                 observerMetric("Trophic gain / loss ×10k", value: "\(scaledRate(store.snapshot.cellularTrophicGain, by: 10_000)) / \(scaledRate(store.snapshot.cellularTrophicLoss, by: 10_000))", tint: .yellow, values: store.history.map(\.cellularTrophicGain))
@@ -331,6 +333,10 @@ struct ContentView: View {
                 observerMetric("Inherited gⱼ / r", value: "\(decimal(store.snapshot.meanJunctionTransmissionGain)) / \(decimal(store.snapshot.meanRefractoryRecoveryGain))", tint: .mint, values: store.history.map(\.meanJunctionTransmissionGain))
                 observerMetric("Detach θ / investment", value: "\(decimal(store.snapshot.meanDetachmentThreshold)) / \(decimal(store.snapshot.meanPropaguleInvestment))", tint: .yellow, values: store.history.map(\.meanDetachmentScore))
                 observerMetric("ATP / Vₘ", value: "\(decimal(store.snapshot.meanCellATP)) / \(signedDecimal(store.snapshot.meanMembraneVoltage))", tint: .yellow, values: store.history.map(\.meanCellATP))
+                observerMetric("Substrate → ATP", value: "\(decimal(store.snapshot.auditedSubstrateEnergy)) / \(decimal(store.snapshot.auditedATPHarvest))", tint: .yellow, values: store.history.map(\.auditedATPHarvest))
+                observerMetric("Work / resonant work", value: "\(decimal(store.snapshot.auditedActiveWork)) / \(decimal(store.snapshot.auditedFrequencyWork))", tint: .green, values: store.history.map(\.auditedActiveWork))
+                observerMetric("Heat / detritus E", value: "\(decimal(store.snapshot.auditedHeatExport)) / \(decimal(store.snapshot.auditedDetritusReturn))", tint: .orange, values: store.history.map(\.auditedHeatExport))
+                observerMetric("Conservation residual", value: signedDecimal(store.snapshot.energyConservationResidual), tint: .white, values: store.history.map { abs($0.energyConservationResidual) })
             } else if store.observationZoom >= 6 {
                 if store.displayMode == .causality {
                     observerMetric("Direct ΔVₘ ×1k", value: causalRate(store.snapshot.meanMechanotransductionEffect), tint: .cyan, values: store.history.map(\.meanMechanotransductionEffect))
@@ -623,7 +629,7 @@ struct ContentView: View {
         if zoom >= 6 {
             return life == 0
                 ? "No agent slot is occupied. Nucleation remains gated by the measured chemistry thresholds, not by elapsed time."
-                : "Each organism is a measured membrane-connected component within one global pool of 9,216 persistent cells. Every cell separately references one of 4,096 append-only heritable programs. Cross-owner fusion requires membrane contact, reciprocal recognition, and bilateral fusion investment; the oldest permanent cell anchors component continuity. During viable fission, every transmitted source program maps to its own independently mutated descendant."
+                : "Each organism is a measured membrane-connected component within one global pool of 9,216 persistent cells. Every cell references a generation-tagged slot in a recyclable pool of 4,096 heritable programs. Cross-owner fusion requires membrane contact, reciprocal recognition, and bilateral fusion investment; the oldest permanent cell anchors component continuity. During viable fission, every transmitted source program maps to its own independently mutated descendant."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
         return "\(life)/384 organism slots are occupied; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are currently resolved; occupied-field fraction is \(occupied). The clade count requires sustained divergence and is not labeled a species count. Organisms modify shared chemical and mechanical media without a global fitness function."

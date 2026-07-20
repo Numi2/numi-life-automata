@@ -51,10 +51,15 @@ constant uint lineageEventCapacity = 4096u;
 constant uint cellSpatialHashBucketCount = 16384u;
 constant uint cellSpatialHashMask = cellSpatialHashBucketCount - 1u;
 constant uint cellSpatialHashAxisResolution = 256u;
+constant uint cellJunctionCapacity = 32768u;
+constant uint cellJunctionMask = cellJunctionCapacity - 1u;
+constant uint energyExchangeChannelCount = 8u;
 constant uint emptySpatialHashEntry = 0xffffffffu;
 constant int mechanicalForceScale = 1048576;
 constant int cellContactForceScale = 268435456;
 constant int cellContactScalarScale = 1048576;
+constant uint substrateFixedScale = 268435456u;
+constant int energyAuditScale = 1048576;
 
 struct AgentState {
     float2 position;
@@ -79,6 +84,10 @@ struct AgentState {
     float lastMutationDistance;
     uint lineageFlags;
     uint dominantProgramIndex;
+    uint dominantProgramGeneration;
+    uint identityPadding0;
+    uint identityPadding1;
+    uint identityPadding2;
     // Tissue orientation, angular velocity, contact load, and propagule refractory state.
     float4 tissueKinematics;
 };
@@ -124,6 +133,10 @@ struct CellIdentity {
     uint programIndex;
     uint persistentID;
     uint componentRoot;
+    uint programGeneration;
+    uint identityPadding0;
+    uint identityPadding1;
+    uint identityPadding2;
 };
 
 struct HeritableProgram {
@@ -133,9 +146,28 @@ struct HeritableProgram {
     float4 recognition;
     float4 social;
     uint genomeHash;
-    uint parentProgramIndex;
+    uint parentGenomeHash;
     uint originBirthID;
     uint generation;
+};
+
+struct ProgramSlotState {
+    // 0 is free, 2 is claimed for writing, and 1 is published.
+    atomic_uint occupied;
+    atomic_uint referenceCount;
+    atomic_uint generation;
+    uint lineageHash;
+};
+
+struct CellJunctionState {
+    atomic_uint pairKey;
+    atomic_uint lastSeenStep;
+    uint persistentFingerprint;
+    uint flags;
+    float restDistance;
+    float strength;
+    float age;
+    float load;
 };
 
 struct CellAggregate {
@@ -232,6 +264,12 @@ struct MembraneVertex {
     float4 mechanics;
 };
 
+struct MembraneSupportSample {
+    float2 point;
+    float integrity;
+    uint vertexIndex;
+};
+
 struct AgentObservationRecord {
     float2 position;
     uint generation;
@@ -286,6 +324,9 @@ inline float4 randomSigned4(uint seed) {
     );
 }
 
+inline uint substrateToFixed(float value);
+inline float substrateFromFixed(uint value);
+
 inline DevelopmentalGenome emptyDevelopmentalGenome() {
     DevelopmentalGenome genome;
     genome.topology = uint4(0u);
@@ -338,7 +379,7 @@ inline HeritableProgram emptyHeritableProgram() {
     program.recognition = float4(0.0);
     program.social = float4(0.0);
     program.genomeHash = 0u;
-    program.parentProgramIndex = 0xffffffffu;
+    program.parentGenomeHash = 0u;
     program.originBirthID = 0u;
     program.generation = 0u;
     return program;
@@ -371,7 +412,7 @@ inline AgentState agentWithCellProgram(
 
 inline HeritableProgram heritableProgramFromAgent(
     AgentState agent,
-    uint parentProgramIndex
+    uint parentGenomeHash
 ) {
     HeritableProgram program;
     program.geneA = agent.geneA;
@@ -380,7 +421,7 @@ inline HeritableProgram heritableProgramFromAgent(
     program.recognition = agent.recognition;
     program.social = agent.social;
     program.genomeHash = agent.genomeHash;
-    program.parentProgramIndex = parentProgramIndex;
+    program.parentGenomeHash = parentGenomeHash;
     program.originBirthID = agent.birthID;
     program.generation = agent.generation;
     return program;
@@ -927,29 +968,52 @@ inline float2 membraneSupport(
     return float2(max(support, 0.035), saturate(integrity));
 }
 
-inline bool isTissueBoundaryPoint(
-    device const CellState* cells,
-    device const atomic_uint* cellOccupancy,
-    device const atomic_uint* ownerCellHeads,
-    device const uint* ownerCellNext,
-    uint owner,
+inline MembraneSupportSample membraneSupportSample(
+    device const MembraneVertex* membraneVertices,
+    uint cellIndex,
+    float2 direction
+) {
+    float2 unitDirection = length(direction) > 0.000001
+        ? normalize(direction) : float2(1.0, 0.0);
+    MembraneSupportSample sample;
+    sample.point = unitDirection * 0.035;
+    sample.integrity = 1.0;
+    sample.vertexIndex = 0u;
+    float bestProjection = -INFINITY;
+    uint base = cellIndex * membraneVertexCount;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        MembraneVertex membranePoint = membraneVertices[base + vertexIndex];
+        float projection = dot(membranePoint.position, unitDirection);
+        if (projection > bestProjection) {
+            bestProjection = projection;
+            sample.point = membranePoint.position;
+            sample.integrity = saturate(membranePoint.mechanics.y);
+            sample.vertexIndex = vertexIndex;
+        }
+    }
+    return sample;
+}
+
+inline bool pointInsideMembrane(
+    device const MembraneVertex* membraneVertices,
     uint cellIndex,
     float2 point
 ) {
-    uint otherIndex = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
-    while (otherIndex != emptySpatialHashEntry) {
-        uint nextIndex = ownerCellNext[otherIndex];
-        if (otherIndex == cellIndex ||
-            atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) == 0u) {
-            otherIndex = nextIndex;
-            continue;
+    bool inside = false;
+    uint base = cellIndex * membraneVertexCount;
+    float2 previous = membraneVertices[base + membraneVertexCount - 1u].position;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        float2 current = membraneVertices[base + vertexIndex].position;
+        bool crosses = (current.y > point.y) != (previous.y > point.y);
+        if (crosses) {
+            float crossingX = (previous.x - current.x) * (point.y - current.y) /
+                max(abs(previous.y - current.y), 0.0000001) *
+                sign(previous.y - current.y) + current.x;
+            if (point.x < crossingX) { inside = !inside; }
         }
-        CellState other = cells[otherIndex];
-        float radius = clamp(sqrt(max(other.membrane.x, 0.010) / M_PI_F), 0.070, 0.21);
-        if (length(point - other.position) < radius * 0.94) { return false; }
-        otherIndex = nextIndex;
+        previous = current;
     }
-    return true;
+    return inside;
 }
 
 inline float4 traitA(uint lineage, uint seed) {
@@ -1315,6 +1379,7 @@ kernel void reactWorld(
     texture2d<float, access::read> quantum [[texture(13)]],
     texture2d_array<float, access::read> mechanicalField [[texture(14)]],
     constant SimulationUniforms& uniforms [[buffer(0)]],
+    device atomic_uint* cellEnergyExchange [[buffer(1)]],
     uint3 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
@@ -1358,6 +1423,27 @@ kernel void reactWorld(
     toxin += uniforms.dt * geology.z * 0.0045;
     toxin *= 1.0 - uniforms.dt * (0.052 + (1.0 - geology.z) * 0.040);
     catalyst *= 1.0 - uniforms.dt * 0.032;
+
+    uint energyTileBase = ((layer * uniforms.height + gid.y) * uniforms.width + gid.x) *
+        energyExchangeChannelCount;
+    float consumedResourceA = substrateFromFixed(atomic_exchange_explicit(
+        &cellEnergyExchange[energyTileBase + 3u], 0u, memory_order_relaxed
+    ));
+    float consumedResourceB = substrateFromFixed(atomic_exchange_explicit(
+        &cellEnergyExchange[energyTileBase + 4u], 0u, memory_order_relaxed
+    ));
+    float consumedDetritus = substrateFromFixed(atomic_exchange_explicit(
+        &cellEnergyExchange[energyTileBase + 5u], 0u, memory_order_relaxed
+    ));
+    float returnedDetritus = substrateFromFixed(atomic_exchange_explicit(
+        &cellEnergyExchange[energyTileBase + 6u], 0u, memory_order_relaxed
+    ));
+    atomic_exchange_explicit(
+        &cellEnergyExchange[energyTileBase + 7u], 0u, memory_order_relaxed
+    );
+    resourceA = max(resourceA - consumedResourceA, 0.0);
+    resourceB = max(resourceB - consumedResourceB, 0.0);
+    detritus = max(detritus - consumedDetritus + returnedDetritus, 0.0);
 
     float biomass = max(center.y, 0.0);
     float energy = max(center.z, 0.0);
@@ -1601,6 +1687,15 @@ kernel void reactWorld(
     ecologyOut.write(float4(min(resourceB, 2.0), min(detritus, 2.0), min(toxin, 2.0), min(catalyst, 2.0)), gid.xy, layer);
     genomeCOut.write(geneC, gid.xy, layer);
     eventOut.write(min(visibleEvents, 1.0), gid.xy, layer);
+    atomic_store_explicit(
+        &cellEnergyExchange[energyTileBase], substrateToFixed(resourceA), memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &cellEnergyExchange[energyTileBase + 1u], substrateToFixed(resourceB), memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &cellEnergyExchange[energyTileBase + 2u], substrateToFixed(detritus), memory_order_relaxed
+    );
 }
 
 inline float2 damageCenter(uint world, uint generation) {
@@ -1881,32 +1976,174 @@ inline uint claimFreeCell(
     return maxCellCount;
 }
 
-inline uint claimHeritableProgram(device atomic_uint* identityCounters) {
-    uint index = atomic_fetch_add_explicit(
-        &identityCounters[4], 1u, memory_order_relaxed
-    );
-    return index < maxHeritableProgramCount ? index : maxHeritableProgramCount;
+inline bool programSlotMatches(
+    device const ProgramSlotState* programSlots,
+    uint programIndex,
+    uint programGeneration
+) {
+    return programIndex < maxHeritableProgramCount && programGeneration != 0u &&
+        atomic_load_explicit(
+            &programSlots[programIndex].occupied, memory_order_relaxed
+        ) == 1u &&
+        atomic_load_explicit(
+            &programSlots[programIndex].generation, memory_order_relaxed
+        ) == programGeneration;
 }
 
-inline uint claimHeritableProgramRange(
+inline uint claimHeritableProgram(
+    device ProgramSlotState* programSlots,
     device atomic_uint* identityCounters,
-    uint count
+    uint seed,
+    thread uint& programGeneration
 ) {
-    uint current = atomic_load_explicit(&identityCounters[4], memory_order_relaxed);
-    for (uint attempt = 0u; attempt < 64u; ++attempt) {
-        if (count == 0u || current > maxHeritableProgramCount - count) {
-            return maxHeritableProgramCount;
-        }
-        uint expected = current;
+    uint searchStart = hash32(seed) % maxHeritableProgramCount;
+    for (uint offset = 0u; offset < maxHeritableProgramCount; ++offset) {
+        uint candidate = (searchStart + offset) % maxHeritableProgramCount;
+        uint expected = 0u;
         if (atomic_compare_exchange_weak_explicit(
-            &identityCounters[4], &expected, current + count,
+            &programSlots[candidate].occupied, &expected, 2u,
             memory_order_relaxed, memory_order_relaxed
         )) {
-            return current;
+            uint nextGeneration = atomic_fetch_add_explicit(
+                &programSlots[candidate].generation, 1u, memory_order_relaxed
+            ) + 1u;
+            if (nextGeneration == 0u) {
+                atomic_store_explicit(
+                    &programSlots[candidate].generation, 1u, memory_order_relaxed
+                );
+                nextGeneration = 1u;
+            }
+            atomic_store_explicit(
+                &programSlots[candidate].referenceCount, 0u, memory_order_relaxed
+            );
+            programSlots[candidate].lineageHash = 0u;
+            atomic_fetch_add_explicit(&identityCounters[4], 1u, memory_order_relaxed);
+            programGeneration = nextGeneration;
+            return candidate;
         }
-        current = expected;
     }
+    programGeneration = 0u;
     return maxHeritableProgramCount;
+}
+
+inline void publishHeritableProgram(
+    device ProgramSlotState* programSlots,
+    uint programIndex,
+    uint lineageHash
+) {
+    if (programIndex >= maxHeritableProgramCount) { return; }
+    programSlots[programIndex].lineageHash = lineageHash;
+    atomic_store_explicit(
+        &programSlots[programIndex].occupied, 1u, memory_order_relaxed
+    );
+}
+
+inline bool retainHeritableProgram(
+    device ProgramSlotState* programSlots,
+    uint programIndex,
+    uint programGeneration
+) {
+    if (!programSlotMatches(programSlots, programIndex, programGeneration)) { return false; }
+    atomic_fetch_add_explicit(
+        &programSlots[programIndex].referenceCount, 1u, memory_order_relaxed
+    );
+    return true;
+}
+
+inline void releaseHeritableProgram(
+    device ProgramSlotState* programSlots,
+    device atomic_uint* identityCounters,
+    uint programIndex,
+    uint programGeneration
+) {
+    if (!programSlotMatches(programSlots, programIndex, programGeneration)) { return; }
+    uint references = atomic_load_explicit(
+        &programSlots[programIndex].referenceCount, memory_order_relaxed
+    );
+    if (references == 0u) { return; }
+    uint previous = atomic_fetch_sub_explicit(
+        &programSlots[programIndex].referenceCount, 1u, memory_order_relaxed
+    );
+    if (previous == 1u) {
+        uint expected = 1u;
+        if (atomic_compare_exchange_weak_explicit(
+            &programSlots[programIndex].occupied, &expected, 0u,
+            memory_order_relaxed, memory_order_relaxed
+        )) {
+            atomic_fetch_sub_explicit(&identityCounters[4], 1u, memory_order_relaxed);
+        }
+    }
+}
+
+inline void abandonHeritableProgram(
+    device ProgramSlotState* programSlots,
+    device atomic_uint* identityCounters,
+    uint programIndex
+) {
+    if (programIndex >= maxHeritableProgramCount) { return; }
+    uint occupied = atomic_exchange_explicit(
+        &programSlots[programIndex].occupied, 0u, memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &programSlots[programIndex].referenceCount, 0u, memory_order_relaxed
+    );
+    if (occupied != 0u) {
+        atomic_fetch_sub_explicit(&identityCounters[4], 1u, memory_order_relaxed);
+    }
+}
+
+inline uint substrateToFixed(float value) {
+    return uint(clamp(value, 0.0, 2.0) * float(substrateFixedScale));
+}
+
+inline float substrateFromFixed(uint value) {
+    return float(value) / float(substrateFixedScale);
+}
+
+inline float claimSubstrate(
+    device atomic_uint* reservoir,
+    float requested
+) {
+    uint requestedFixed = substrateToFixed(requested);
+    if (requestedFixed == 0u) { return 0.0; }
+    uint available = atomic_load_explicit(reservoir, memory_order_relaxed);
+    for (uint attempt = 0u; attempt < 32u && available > 0u; ++attempt) {
+        uint claimed = min(available, requestedFixed);
+        uint expected = available;
+        if (atomic_compare_exchange_weak_explicit(
+            reservoir, &expected, available - claimed,
+            memory_order_relaxed, memory_order_relaxed
+        )) {
+            return substrateFromFixed(claimed);
+        }
+        available = expected;
+    }
+    return 0.0;
+}
+
+inline void addEnergyAudit(
+    device atomic_int* energyAudit,
+    uint channel,
+    float value
+) {
+    int fixed = int(clamp(
+        value * float(energyAuditScale), -134217728.0, 134217728.0
+    ));
+    atomic_fetch_add_explicit(&energyAudit[channel], fixed, memory_order_relaxed);
+}
+
+inline void addEnergyExchange(
+    device atomic_uint* cellEnergyExchange,
+    uint tileBase,
+    uint channel,
+    float value
+) {
+    uint fixed = substrateToFixed(value);
+    if (fixed > 0u) {
+        atomic_fetch_add_explicit(
+            &cellEnergyExchange[tileBase + channel], fixed, memory_order_relaxed
+        );
+    }
 }
 
 inline AgentState mutatePropaguleProgram(
@@ -1915,10 +2152,12 @@ inline AgentState mutatePropaguleProgram(
     device RegulatoryEdge* regulatoryEdges,
     device ResonanceGenome* resonanceGenomes,
     device HeritableProgram* heritablePrograms,
+    device ProgramSlotState* programSlots,
     device atomic_uint* identityCounters,
     AgentState parentComponent,
     uint parentProgramIndex,
     uint childProgramIndex,
+    uint childProgramGeneration,
     uint childBirthID,
     uint childGeneration,
     uint seed,
@@ -1954,6 +2193,10 @@ inline AgentState mutatePropaguleProgram(
     child.birthStep = parentComponent.birthStep;
     child.lineageFlags = branchMutation ? 2u : 0u;
     child.dominantProgramIndex = childProgramIndex;
+    child.dominantProgramGeneration = childProgramGeneration;
+    child.identityPadding0 = 0u;
+    child.identityPadding1 = 0u;
+    child.identityPadding2 = 0u;
 
     ResonanceGenome childResonance = resonanceGenomes[parentProgramIndex];
     float resonanceMutation = 0.012 + mutation * (branchMutation ? 1.8 : 0.65);
@@ -1994,8 +2237,9 @@ inline AgentState mutatePropaguleProgram(
         childResonance, developmentalGenomes[childProgramIndex]
     );
     heritablePrograms[childProgramIndex] = heritableProgramFromAgent(
-        child, parentProgramIndex
+        child, heritablePrograms[parentProgramIndex].genomeHash
     );
+    publishHeritableProgram(programSlots, childProgramIndex, child.genomeHash);
     return child;
 }
 
@@ -2008,9 +2252,11 @@ inline uint seedOrganismCells(
     device float* regulatoryStates,
     device MembraneVertex* membraneVertices,
     device float4* programInteractions,
+    device ProgramSlotState* programSlots,
     device atomic_uint* identityCounters,
     uint owner,
     uint programIndex,
+    uint programGeneration,
     AgentState agent,
     uint seed,
     ResonanceGenome resonanceGenome
@@ -2025,6 +2271,14 @@ inline uint seedOrganismCells(
         &identityCounters[3], 1u, memory_order_relaxed
     );
     identity.componentRoot = cellIndex;
+    identity.programGeneration = programGeneration;
+    identity.identityPadding0 = 0u;
+    identity.identityPadding1 = 0u;
+    identity.identityPadding2 = 0u;
+    if (!retainHeritableProgram(programSlots, programIndex, programGeneration)) {
+        atomic_store_explicit(&cellOccupancy[cellIndex], 0u, memory_order_relaxed);
+        return maxCellCount;
+    }
     cellIdentities[cellIndex] = identity;
     cellParentIDs[cellIndex] = 0xffffffffu;
     uint stateBase = cellIndex * regulatoryNodeCapacity;
@@ -2087,6 +2341,11 @@ kernel void initializeAgents(
     device atomic_uint* cellComponentPrograms [[buffer(23)]],
     device uint* cellParentIDs [[buffer(24)]],
     device float4* programInteractions [[buffer(25)]],
+    device ProgramSlotState* programSlots [[buffer(26)]],
+    device atomic_uint* componentCellHeads [[buffer(27)]],
+    device uint* componentCellNext [[buffer(28)]],
+    device CellJunctionState* junctionStates [[buffer(29)]],
+    device atomic_int* membraneContactEffects [[buffer(30)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxAgentCount) { return; }
@@ -2111,6 +2370,10 @@ kernel void initializeAgents(
     agent.lastMutationDistance = 0.0;
     agent.lineageFlags = 0u;
     agent.dominantProgramIndex = maxHeritableProgramCount;
+    agent.dominantProgramGeneration = 0u;
+    agent.identityPadding0 = 0u;
+    agent.identityPadding1 = 0u;
+    agent.identityPadding2 = 0u;
     agent.tissueKinematics = float4(0.0);
     agents[gid] = agent;
     atomic_store_explicit(&occupancy[gid], 0u, memory_order_relaxed);
@@ -2124,10 +2387,18 @@ kernel void initializeAgents(
         identity.programIndex = maxHeritableProgramCount;
         identity.persistentID = 0xffffffffu;
         identity.componentRoot = emptySpatialHashEntry;
+        identity.programGeneration = 0u;
+        identity.identityPadding0 = 0u;
+        identity.identityPadding1 = 0u;
+        identity.identityPadding2 = 0u;
         cellIdentities[cellIndex] = identity;
         cellParentIDs[cellIndex] = 0xffffffffu;
         programInteractions[cellIndex] = float4(0.0, 0.0, -1.0, 0.0);
         ownerCellNext[cellIndex] = emptySpatialHashEntry;
+        componentCellNext[cellIndex] = emptySpatialHashEntry;
+        atomic_store_explicit(
+            &componentCellHeads[cellIndex], emptySpatialHashEntry, memory_order_relaxed
+        );
         atomic_store_explicit(
             &cellComponentParents[cellIndex], emptySpatialHashEntry, memory_order_relaxed
         );
@@ -2151,6 +2422,10 @@ kernel void initializeAgents(
         uint membraneBase = cellIndex * membraneVertexCount;
         for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
             membraneVertices[membraneBase + vertexIndex] = emptyMembraneVertex();
+            uint effectBase = (cellIndex * membraneVertexCount + vertexIndex) * 3u;
+            atomic_store_explicit(&membraneContactEffects[effectBase], 0, memory_order_relaxed);
+            atomic_store_explicit(&membraneContactEffects[effectBase + 1u], 0, memory_order_relaxed);
+            atomic_store_explicit(&membraneContactEffects[effectBase + 2u], 0, memory_order_relaxed);
         }
     }
     CellAggregate aggregate;
@@ -2176,6 +2451,10 @@ kernel void initializeAgents(
     for (uint programIndex = gid; programIndex < maxHeritableProgramCount;
          programIndex += maxAgentCount) {
         heritablePrograms[programIndex] = emptyHeritableProgram();
+        atomic_store_explicit(&programSlots[programIndex].occupied, 0u, memory_order_relaxed);
+        atomic_store_explicit(&programSlots[programIndex].referenceCount, 0u, memory_order_relaxed);
+        atomic_store_explicit(&programSlots[programIndex].generation, 0u, memory_order_relaxed);
+        programSlots[programIndex].lineageHash = 0u;
         developmentalGenomes[programIndex] = emptyDevelopmentalGenome();
         resonanceGenomes[programIndex] = emptyResonanceGenome();
         uint nodeBase = programIndex * regulatoryNodeCapacity;
@@ -2191,6 +2470,20 @@ kernel void initializeAgents(
         LineageEventRecord record;
         record.sequence = 0u;
         lineageEvents[event] = record;
+    }
+    for (uint junction = gid; junction < cellJunctionCapacity; junction += maxAgentCount) {
+        atomic_store_explicit(
+            &junctionStates[junction].pairKey, emptySpatialHashEntry, memory_order_relaxed
+        );
+        atomic_store_explicit(
+            &junctionStates[junction].lastSeenStep, 0u, memory_order_relaxed
+        );
+        junctionStates[junction].persistentFingerprint = 0u;
+        junctionStates[junction].flags = 0u;
+        junctionStates[junction].restDistance = 0.0;
+        junctionStates[junction].strength = 0.0;
+        junctionStates[junction].age = 0.0;
+        junctionStates[junction].load = 0.0;
     }
     if (gid == 0u) {
         atomic_store_explicit(&identityCounters[0], 1u, memory_order_relaxed);
@@ -2208,6 +2501,7 @@ kernel void collectAgentObservations(
     device const CellAggregate* cellAggregates [[buffer(3)]],
     device const DevelopmentalGenome* developmentalGenomes [[buffer(4)]],
     device const ResonanceGenome* resonanceGenomes [[buffer(5)]],
+    device const ProgramSlotState* programSlots [[buffer(6)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxAgentCount) { return; }
@@ -2221,7 +2515,9 @@ kernel void collectAgentObservations(
     observation.parentBirthID = agent.parentBirthID;
     observation.genomeHash = agent.genomeHash;
     uint programIndex = agent.dominantProgramIndex;
-    bool validProgram = programIndex < maxHeritableProgramCount;
+    bool validProgram = programSlotMatches(
+        programSlots, programIndex, agent.dominantProgramGeneration
+    );
     DevelopmentalGenome development = validProgram
         ? developmentalGenomes[programIndex] : emptyDevelopmentalGenome();
     ResonanceGenome resonance = validProgram
@@ -2251,12 +2547,15 @@ kernel void collectProgramMetricRecords(
     device const DevelopmentalGenome* developmentalGenomes [[buffer(2)]],
     device const ResonanceGenome* resonanceGenomes [[buffer(3)]],
     device ProgramMetricRecord* records [[buffer(4)]],
+    device const ProgramSlotState* programSlots [[buffer(5)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxAgentCount) { return; }
     uint programIndex = agents[gid].dominantProgramIndex;
     bool valid = atomic_load_explicit(&occupancy[gid], memory_order_relaxed) != 0u &&
-        programIndex < maxHeritableProgramCount;
+        programSlotMatches(
+            programSlots, programIndex, agents[gid].dominantProgramGeneration
+        );
     ProgramMetricRecord record;
     record.developmental = valid
         ? developmentalGenomes[programIndex] : emptyDevelopmentalGenome();
@@ -2284,6 +2583,7 @@ kernel void nucleateAutogenicFounder(
     device HeritableProgram* heritablePrograms [[buffer(15)]],
     device uint* cellParentIDs [[buffer(16)]],
     device float4* programInteractions [[buffer(17)]],
+    device ProgramSlotState* programSlots [[buffer(18)]],
     texture2d_array<float, access::read> state [[texture(0)]],
     texture2d_array<float, access::read> genomeA [[texture(1)]],
     texture2d_array<float, access::read> genomeB [[texture(2)]],
@@ -2331,12 +2631,15 @@ kernel void nucleateAutogenicFounder(
     founder.biomass = clamp(0.42 + localState.y * 1.8, 0.42, 0.70);
     founder.age = 0.0;
     founder.generation = 0u;
-    uint programIndex = claimHeritableProgram(identityCounters);
+    uint founderSeed = hash32(gid.x * 2246822519u ^ gid.y * 3266489917u ^ uniforms.step);
+    uint programGeneration = 0u;
+    uint programIndex = claimHeritableProgram(
+        programSlots, identityCounters, founderSeed ^ 0x4b1d5a77u, programGeneration
+    );
     if (programIndex == maxHeritableProgramCount) {
         atomic_store_explicit(&occupancy[0], 0u, memory_order_relaxed);
         return;
     }
-    uint founderSeed = hash32(gid.x * 2246822519u ^ gid.y * 3266489917u ^ uniforms.step);
     founder.recognition = founderRecognition(founder, founderSeed);
     founder.social = founderSocialControl(founder, founderSeed);
     founder.birthID = atomic_fetch_add_explicit(&identityCounters[0], 1u, memory_order_relaxed);
@@ -2346,6 +2649,10 @@ kernel void nucleateAutogenicFounder(
     founder.lastMutationDistance = 0.0;
     founder.lineageFlags = 1u;
     founder.dominantProgramIndex = programIndex;
+    founder.dominantProgramGeneration = programGeneration;
+    founder.identityPadding0 = 0u;
+    founder.identityPadding1 = 0u;
+    founder.identityPadding2 = 0u;
     founder.tissueKinematics = float4(heading, 0.0, 0.0, 0.0);
     initializeFounderRegulatoryGenome(
         developmentalGenomes, regulatoryNodes, regulatoryEdges, identityCounters,
@@ -2357,14 +2664,16 @@ kernel void nucleateAutogenicFounder(
         founder, developmentalGenomes[programIndex].topology.z, resonance,
         developmentalGenomes[programIndex]
     );
-    heritablePrograms[programIndex] = heritableProgramFromAgent(founder, 0xffffffffu);
+    heritablePrograms[programIndex] = heritableProgramFromAgent(founder, 0u);
+    publishHeritableProgram(programSlots, programIndex, founder.genomeHash);
     agents[0] = founder;
     uint founderCellIndex = seedOrganismCells(
         cells, cellOccupancy, cellIdentities, cellParentIDs, cellAggregates, regulatoryStates,
-        membraneVertices, programInteractions, identityCounters,
-        0u, programIndex, founder, founderSeed, resonance
+        membraneVertices, programInteractions, programSlots, identityCounters,
+        0u, programIndex, programGeneration, founder, founderSeed, resonance
     );
     if (founderCellIndex == maxCellCount) {
+        abandonHeritableProgram(programSlots, identityCounters, programIndex);
         atomic_store_explicit(&occupancy[0], 0u, memory_order_relaxed);
         return;
     }
@@ -2384,6 +2693,7 @@ kernel void evolveAgents(
     device const ResonanceGenome* resonanceGenomes [[buffer(6)]],
     device LineageEventRecord* lineageEvents [[buffer(7)]],
     device atomic_uint* identityCounters [[buffer(8)]],
+    device const ProgramSlotState* programSlots [[buffer(9)]],
     texture2d_array<float, access::read> state [[texture(0)]],
     texture2d_array<float, access::read> ecology [[texture(1)]],
     texture2d_array<float, access::read> environment [[texture(2)]],
@@ -2398,6 +2708,9 @@ kernel void evolveAgents(
     }
 
     CellAggregate cellAggregate = cellAggregates[gid];
+    bool dominantProgramValid = programSlotMatches(
+        programSlots, agent.dominantProgramIndex, agent.dominantProgramGeneration
+    );
     float cellCount = max(cellAggregate.physiology.x, 1.0);
     float tissueMass = max(cellCount * (0.58 + agent.biomass * 0.42), 1.0);
     float2 localForce = cellAggregate.tissueMotion.xy;
@@ -2454,9 +2767,9 @@ kernel void evolveAgents(
     if (agent.age > 180000.0 || cellularFailure) {
         recordLineageEvent(
             lineageEvents, identityCounters, 2u, agent,
-            agent.dominantProgramIndex < maxHeritableProgramCount
+            dominantProgramValid
                 ? developmentalGenomes[agent.dominantProgramIndex] : emptyDevelopmentalGenome(),
-            agent.dominantProgramIndex < maxHeritableProgramCount
+            dominantProgramValid
                 ? resonanceGenomes[agent.dominantProgramIndex] : emptyResonanceGenome(),
             cellAggregate, uniforms.step
         );
@@ -2477,6 +2790,8 @@ kernel void initializeCellComponents(
     device atomic_uint* componentOwners [[buffer(5)]],
     device atomic_uint* ownerPrimaryRoots [[buffer(6)]],
     device atomic_uint* componentPrograms [[buffer(7)]],
+    device atomic_uint* componentCellHeads [[buffer(8)]],
+    device uint* componentCellNext [[buffer(9)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid < maxAgentCount) {
@@ -2488,6 +2803,10 @@ kernel void initializeCellComponents(
     atomic_store_explicit(&componentCounts[gid], 0u, memory_order_relaxed);
     atomic_store_explicit(&componentOwners[gid], emptySpatialHashEntry, memory_order_relaxed);
     atomic_store_explicit(&componentPrograms[gid], 0u, memory_order_relaxed);
+    atomic_store_explicit(
+        &componentCellHeads[gid], emptySpatialHashEntry, memory_order_relaxed
+    );
+    componentCellNext[gid] = emptySpatialHashEntry;
     for (uint channel = 0u; channel < 5u; ++channel) {
         atomic_store_explicit(
             &componentAccumulation[gid * 5u + channel], 0, memory_order_relaxed
@@ -2656,6 +2975,28 @@ kernel void compressCellComponents(
     cellIdentities[gid] = identity;
 }
 
+kernel void buildCellComponentLists(
+    device const atomic_uint* cellOccupancy [[buffer(0)]],
+    device const CellIdentity* cellIdentities [[buffer(1)]],
+    device atomic_uint* componentCellHeads [[buffer(2)]],
+    device uint* componentCellNext [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) {
+        if (gid < maxCellCount) { componentCellNext[gid] = emptySpatialHashEntry; }
+        return;
+    }
+    uint root = cellIdentities[gid].componentRoot;
+    if (root >= maxCellCount) {
+        componentCellNext[gid] = emptySpatialHashEntry;
+        return;
+    }
+    componentCellNext[gid] = atomic_exchange_explicit(
+        &componentCellHeads[root], gid, memory_order_relaxed
+    );
+}
+
 kernel void accumulateCellComponents(
     device const CellState* cells [[buffer(0)]],
     device const atomic_uint* cellOccupancy [[buffer(1)]],
@@ -2767,6 +3108,9 @@ kernel void assignCellComponentOwners(
     device const atomic_uint* cellOccupancy [[buffer(17)]],
     device uint* componentProgramSources [[buffer(18)]],
     device uint* componentProgramTargets [[buffer(19)]],
+    device const atomic_uint* componentCellHeads [[buffer(20)]],
+    device const uint* componentCellNext [[buffer(21)]],
+    device ProgramSlotState* programSlots [[buffer(22)]],
     uint root [[thread_position_in_grid]]
 ) {
     if (root >= maxCellCount) { return; }
@@ -2785,18 +3129,27 @@ kernel void assignCellComponentOwners(
         atomic_store_explicit(&componentOwners[root], parentOwner, memory_order_relaxed);
         uint mappingBase = root * maxProgramsPerPropagule;
         uint absorbedOwnerCount = 0u;
-        for (uint cellIndex = 0u; cellIndex < maxCellCount; ++cellIndex) {
-            if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) == 0u ||
-                cellIdentities[cellIndex].componentRoot != root) { continue; }
-            uint absorbedOwner = cellIdentities[cellIndex].owner;
-            if (absorbedOwner == parentOwner || absorbedOwner >= maxAgentCount) { continue; }
-            bool observed = false;
-            for (uint index = 0u; index < absorbedOwnerCount; ++index) {
-                observed = observed ||
-                    componentProgramSources[mappingBase + index] == absorbedOwner;
+        uint cellIndex = atomic_load_explicit(
+            &componentCellHeads[root], memory_order_relaxed
+        );
+        while (cellIndex != emptySpatialHashEntry) {
+            uint following = componentCellNext[cellIndex];
+            if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) == 0u) {
+                cellIndex = following;
+                continue;
             }
-            if (observed || absorbedOwnerCount >= maxProgramsPerPropagule) { continue; }
-            componentProgramSources[mappingBase + absorbedOwnerCount++] = absorbedOwner;
+            uint absorbedOwner = cellIdentities[cellIndex].owner;
+            if (absorbedOwner != parentOwner && absorbedOwner < maxAgentCount) {
+                bool observed = false;
+                for (uint index = 0u; index < absorbedOwnerCount; ++index) {
+                    observed = observed ||
+                        componentProgramSources[mappingBase + index] == absorbedOwner;
+                }
+                if (!observed && absorbedOwnerCount < maxProgramsPerPropagule) {
+                    componentProgramSources[mappingBase + absorbedOwnerCount++] = absorbedOwner;
+                }
+            }
+            cellIndex = following;
         }
         AgentState survivor = agents[parentOwner];
         uint survivorProgram = survivor.dominantProgramIndex;
@@ -2838,7 +3191,9 @@ kernel void assignCellComponentOwners(
         &componentAccumulation[root * 5u + 4u], memory_order_relaxed
     )) / 65536.0;
     uint parentProgramIndex = cellIdentities[root].programIndex;
-    if (parentProgramIndex >= maxHeritableProgramCount) { return; }
+    if (!programSlotMatches(
+        programSlots, parentProgramIndex, cellIdentities[root].programGeneration
+    )) { return; }
     DevelopmentalGenome parentDevelopment = developmentalGenomes[parentProgramIndex];
     AgentState parentComponent = agents[parentOwner];
     AgentState parent = agentWithCellProgram(
@@ -2856,20 +3211,32 @@ kernel void assignCellComponentOwners(
     componentProgramSources[mappingBase] = parentProgramIndex;
     uint sourceProgramCount = 1u;
     uint dominantCellCount = 0u;
-    for (uint cellIndex = 0u; cellIndex < maxCellCount; ++cellIndex) {
-        if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) == 0u ||
-            cellIdentities[cellIndex].componentRoot != root) { continue; }
+    uint cellIndex = atomic_load_explicit(
+        &componentCellHeads[root], memory_order_relaxed
+    );
+    while (cellIndex != emptySpatialHashEntry) {
+        uint following = componentCellNext[cellIndex];
+        if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) == 0u) {
+            cellIndex = following;
+            continue;
+        }
         uint sourceProgram = cellIdentities[cellIndex].programIndex;
-        if (sourceProgram >= maxHeritableProgramCount) { return; }
+        if (!programSlotMatches(
+            programSlots, sourceProgram, cellIdentities[cellIndex].programGeneration
+        )) { return; }
         dominantCellCount += sourceProgram == parentProgramIndex ? 1u : 0u;
         bool observed = false;
         for (uint index = 0u; index < sourceProgramCount; ++index) {
             observed = observed ||
                 componentProgramSources[mappingBase + index] == sourceProgram;
         }
-        if (observed) { continue; }
+        if (observed) {
+            cellIndex = following;
+            continue;
+        }
         if (sourceProgramCount >= maxProgramsPerPropagule) { return; }
         componentProgramSources[mappingBase + sourceProgramCount++] = sourceProgram;
+        cellIndex = following;
     }
 
     uint birthSeed = hash32(
@@ -2892,37 +3259,50 @@ kernel void assignCellComponentOwners(
     }
     if (target == maxAgentCount) { return; }
 
-    uint childProgramIndex = claimHeritableProgramRange(
-        identityCounters, sourceProgramCount
-    );
-    if (childProgramIndex == maxHeritableProgramCount) {
-        atomic_store_explicit(&agentOccupancy[target], 0u, memory_order_relaxed);
-        return;
-    }
     uint childBirthID = atomic_fetch_add_explicit(
         &identityCounters[0], 1u, memory_order_relaxed
     );
     uint childGeneration = parentComponent.generation + 1u;
     AgentState child = parent;
     bool branchMutation = false;
+    uint childProgramIndex = maxHeritableProgramCount;
+    uint childProgramGeneration = 0u;
+    uint allocatedProgramCount = 0u;
     for (uint index = 0u; index < sourceProgramCount; ++index) {
         uint sourceProgramIndex = componentProgramSources[mappingBase + index];
-        uint targetProgramIndex = childProgramIndex + index;
         uint programSeed = hash32(
             birthSeed ^ sourceProgramIndex * 374761393u ^ index * 668265263u
         );
+        uint targetProgramGeneration = 0u;
+        uint targetProgramIndex = claimHeritableProgram(
+            programSlots, identityCounters, programSeed ^ 0x4b1d5a77u,
+            targetProgramGeneration
+        );
+        if (targetProgramIndex == maxHeritableProgramCount) {
+            for (uint rollback = 0u; rollback < allocatedProgramCount; ++rollback) {
+                abandonHeritableProgram(
+                    programSlots, identityCounters,
+                    componentProgramTargets[mappingBase + rollback]
+                );
+            }
+            atomic_store_explicit(&agentOccupancy[target], 0u, memory_order_relaxed);
+            return;
+        }
         bool programBranchMutation = random01(programSeed + 31u) < 0.032;
         AgentState programChild = mutatePropaguleProgram(
             developmentalGenomes, regulatoryNodes, regulatoryEdges,
-            resonanceGenomes, heritablePrograms, identityCounters,
-            parentComponent, sourceProgramIndex, targetProgramIndex,
+            resonanceGenomes, heritablePrograms, programSlots, identityCounters,
+            parentComponent, sourceProgramIndex, targetProgramIndex, targetProgramGeneration,
             childBirthID, childGeneration, programSeed,
             uniforms.mutationScale, programBranchMutation
         );
         componentProgramSources[mappingBase + index] = sourceProgramIndex;
         componentProgramTargets[mappingBase + index] = targetProgramIndex;
+        allocatedProgramCount += 1u;
         if (index == 0u) {
             child = programChild;
+            childProgramIndex = targetProgramIndex;
+            childProgramGeneration = targetProgramGeneration;
             branchMutation = programBranchMutation;
         }
     }
@@ -2943,6 +3323,10 @@ kernel void assignCellComponentOwners(
     child.birthStep = uniforms.step;
     child.lineageFlags = branchMutation ? 2u : 0u;
     child.dominantProgramIndex = childProgramIndex;
+    child.dominantProgramGeneration = childProgramGeneration;
+    child.identityPadding0 = 0u;
+    child.identityPadding1 = 0u;
+    child.identityPadding2 = 0u;
     child.tissueKinematics = float4(parent.tissueKinematics.x, parent.tissueKinematics.y, 0.0, 1.0);
     ResonanceGenome childResonance = resonanceGenomes[childProgramIndex];
 
@@ -2983,6 +3367,8 @@ kernel void reassignCellComponents(
     device const atomic_uint* componentProgramCounts [[buffer(7)]],
     device const uint* componentProgramSources [[buffer(8)]],
     device const uint* componentProgramTargets [[buffer(9)]],
+    device ProgramSlotState* programSlots [[buffer(10)]],
+    device atomic_uint* identityCounters [[buffer(11)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxCellCount ||
@@ -2998,10 +3384,15 @@ kernel void reassignCellComponents(
             &ownerPrimaryRoots[oldOwner], memory_order_relaxed
         );
         if (root != primaryRoot) {
+            releaseHeritableProgram(
+                programSlots, identityCounters,
+                identity.programIndex, identity.programGeneration
+            );
             atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
             identity.owner = maxAgentCount;
             identity.programIndex = maxHeritableProgramCount;
             identity.componentRoot = emptySpatialHashEntry;
+            identity.programGeneration = 0u;
             cellIdentities[gid] = identity;
         }
         return;
@@ -3010,9 +3401,26 @@ kernel void reassignCellComponents(
         &componentProgramCounts[root], memory_order_relaxed
     );
     uint mappingBase = root * maxProgramsPerPropagule;
+    uint previousProgramIndex = identity.programIndex;
+    uint previousProgramGeneration = identity.programGeneration;
     for (uint index = 0u; index < min(programCount, maxProgramsPerPropagule); ++index) {
         if (componentProgramSources[mappingBase + index] == identity.programIndex) {
-            identity.programIndex = componentProgramTargets[mappingBase + index];
+            uint targetProgram = componentProgramTargets[mappingBase + index];
+            uint targetGeneration = targetProgram < maxHeritableProgramCount
+                ? atomic_load_explicit(
+                    &programSlots[targetProgram].generation, memory_order_relaxed
+                ) : 0u;
+            if (!retainHeritableProgram(
+                programSlots, targetProgram, targetGeneration
+            )) {
+                return;
+            }
+            identity.programIndex = targetProgram;
+            identity.programGeneration = targetGeneration;
+            releaseHeritableProgram(
+                programSlots, identityCounters,
+                previousProgramIndex, previousProgramGeneration
+            );
             break;
         }
     }
@@ -3056,6 +3464,7 @@ kernel void injectFounder(
     device HeritableProgram* heritablePrograms [[buffer(15)]],
     device uint* cellParentIDs [[buffer(16)]],
     device float4* programInteractions [[buffer(17)]],
+    device ProgramSlotState* programSlots [[buffer(18)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid != 0u) { return; }
@@ -3090,7 +3499,10 @@ kernel void injectFounder(
     founder.biomass = 0.66;
     founder.age = 0.0;
     founder.generation = 0u;
-    uint programIndex = claimHeritableProgram(identityCounters);
+    uint programGeneration = 0u;
+    uint programIndex = claimHeritableProgram(
+        programSlots, identityCounters, seed ^ 0x4b1d5a77u, programGeneration
+    );
     if (programIndex == maxHeritableProgramCount) {
         atomic_store_explicit(&occupancy[claimed], 0u, memory_order_relaxed);
         return;
@@ -3102,6 +3514,10 @@ kernel void injectFounder(
     founder.lastMutationDistance = 0.0;
     founder.lineageFlags = 1u;
     founder.dominantProgramIndex = programIndex;
+    founder.dominantProgramGeneration = programGeneration;
+    founder.identityPadding0 = 0u;
+    founder.identityPadding1 = 0u;
+    founder.identityPadding2 = 0u;
     founder.tissueKinematics = float4(heading, 0.0, 0.0, 0.0);
     initializeFounderRegulatoryGenome(
         developmentalGenomes, regulatoryNodes, regulatoryEdges, identityCounters,
@@ -3113,14 +3529,16 @@ kernel void injectFounder(
         founder, developmentalGenomes[programIndex].topology.z, resonance,
         developmentalGenomes[programIndex]
     );
-    heritablePrograms[programIndex] = heritableProgramFromAgent(founder, 0xffffffffu);
+    heritablePrograms[programIndex] = heritableProgramFromAgent(founder, 0u);
+    publishHeritableProgram(programSlots, programIndex, founder.genomeHash);
     agents[claimed] = founder;
     uint founderCellIndex = seedOrganismCells(
         cells, cellOccupancy, cellIdentities, cellParentIDs, cellAggregates, regulatoryStates,
-        membraneVertices, programInteractions, identityCounters, claimed, programIndex, founder,
-        seed ^ 0x63d83595u, resonance
+        membraneVertices, programInteractions, programSlots, identityCounters,
+        claimed, programIndex, programGeneration, founder, seed ^ 0x63d83595u, resonance
     );
     if (founderCellIndex == maxCellCount) {
+        abandonHeritableProgram(programSlots, identityCounters, programIndex);
         atomic_store_explicit(&occupancy[claimed], 0u, memory_order_relaxed);
         return;
     }
@@ -3149,6 +3567,10 @@ kernel void evolveOrganismCells(
     device const HeritableProgram* heritablePrograms [[buffer(15)]],
     device float4* programInteractions [[buffer(16)]],
     device const CellAggregate* cellAggregates [[buffer(17)]],
+    device ProgramSlotState* programSlots [[buffer(18)]],
+    device atomic_uint* identityCounters [[buffer(19)]],
+    device atomic_uint* cellEnergyExchange [[buffer(20)]],
+    device atomic_int* energyAudit [[buffer(21)]],
     texture2d_array<float, access::read> state [[texture(0)]],
     texture2d_array<float, access::read> ecology [[texture(1)]],
     texture2d_array<float, access::read> environment [[texture(2)]],
@@ -3162,10 +3584,15 @@ kernel void evolveOrganismCells(
     if (owner >= maxAgentCount) { return; }
     if (atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) {
         if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) != 0u) {
+            releaseHeritableProgram(
+                programSlots, identityCounters,
+                cellIdentity.programIndex, cellIdentity.programGeneration
+            );
             atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
             cellIdentity.owner = maxAgentCount;
             cellIdentity.programIndex = maxHeritableProgramCount;
             cellIdentity.componentRoot = emptySpatialHashEntry;
+            cellIdentity.programGeneration = 0u;
             cellIdentities[gid] = cellIdentity;
         }
         return;
@@ -3175,11 +3602,12 @@ kernel void evolveOrganismCells(
     }
 
     uint programIndex = cellIdentity.programIndex;
-    if (programIndex >= maxHeritableProgramCount) {
+    if (!programSlotMatches(programSlots, programIndex, cellIdentity.programGeneration)) {
         atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
         cellIdentity.owner = maxAgentCount;
         cellIdentity.programIndex = maxHeritableProgramCount;
         cellIdentity.componentRoot = emptySpatialHashEntry;
+        cellIdentity.programGeneration = 0u;
         cellIdentities[gid] = cellIdentity;
         return;
     }
@@ -3224,15 +3652,6 @@ kernel void evolveOrganismCells(
         float2 delta = other.position - cell.position;
         float distance = max(length(delta), 0.0001);
         float2 direction = delta / distance;
-        float cellRadius = clamp(sqrt(max(cell.membrane.x, 0.010) / M_PI_F), 0.085, 0.18);
-        float otherRadius = clamp(sqrt(max(other.membrane.x, 0.010) / M_PI_F), 0.085, 0.18);
-        float contactDistance = cellRadius + otherRadius;
-        if (distance < contactDistance) {
-            mechanicalForce -= direction * (contactDistance - distance) * 0.024;
-        } else if (distance < contactDistance + 0.30) {
-            float pairAdhesion = min(cell.phenotype.x, other.phenotype.x);
-            mechanicalForce += direction * (distance - contactDistance) * pairAdhesion * 0.0042;
-        }
         if (distance < 0.58) {
             float weight = 1.0 - distance / 0.58;
             contactSignal += other.signals.xy * weight;
@@ -3445,11 +3864,11 @@ kernel void evolveOrganismCells(
         (0.72 + max(voltage, 0.0) * 0.20), 0.11);
 
     float membraneExposure = saturate(cell.tissueGeometry.z);
-    float uptake = 0.00030 + 0.00125 * (
+    float uptakePotential = 0.00125 * (
         localState.x * cell.phenotype.z + localEcology.x * cell.phenotype.w +
         localEcology.y * agent.geneC.z * 0.34
     );
-    uptake *= mix(0.48, 1.08, membraneExposure);
+    uptakePotential *= mix(0.48, 1.08, membraneExposure);
     float maintenance = 0.00039 * (
         0.62 + cell.physiology.y * 0.48 + cell.phenotype.y * 0.28
     );
@@ -3464,7 +3883,7 @@ kernel void evolveOrganismCells(
         fieldStrain,
         saturate(contactCount / 4.2),
         clamp(cell.signals.x - cell.signals.y, -1.0, 1.0),
-        clamp(uptake * 1350.0 - externalStress - cell.signals.z * 0.35, -1.0, 1.0),
+        clamp(uptakePotential * 1350.0 - externalStress - cell.signals.z * 0.35, -1.0, 1.0),
         clamp(resonantResponse, -1.0, 1.0),
         saturate(cell.membrane.w * 8.0 + abs(cell.membrane.z - 1.0))
     };
@@ -3482,24 +3901,87 @@ kernel void evolveOrganismCells(
     float secretionProgram = regulationB.y;
     float apoptosisSuppression = regulationB.z;
     float motilityProgram = regulationB.w;
-    uptake *= mix(0.66, 1.42, permeabilityProgram);
+    float uptakeGain = mix(0.66, 1.42, permeabilityProgram);
+    uint energyTileBase = (coordinate.y * uniforms.width + coordinate.x) *
+        energyExchangeChannelCount;
+    float requestedResourceA = localState.x * cell.phenotype.z * 0.00125 *
+        uptakeGain * mix(0.48, 1.08, membraneExposure);
+    float requestedResourceB = localEcology.x * cell.phenotype.w * 0.00125 *
+        uptakeGain * mix(0.48, 1.08, membraneExposure);
+    float requestedDetritus = localEcology.y * agent.geneC.z * 0.00043 *
+        uptakeGain * mix(0.48, 1.08, membraneExposure);
+    float consumedResourceA = claimSubstrate(
+        &cellEnergyExchange[energyTileBase], requestedResourceA
+    );
+    float consumedResourceB = claimSubstrate(
+        &cellEnergyExchange[energyTileBase + 1u], requestedResourceB
+    );
+    float consumedDetritus = claimSubstrate(
+        &cellEnergyExchange[energyTileBase + 2u], requestedDetritus
+    );
+    addEnergyExchange(cellEnergyExchange, energyTileBase, 3u, consumedResourceA);
+    addEnergyExchange(cellEnergyExchange, energyTileBase, 4u, consumedResourceB);
+    addEnergyExchange(cellEnergyExchange, energyTileBase, 5u, consumedDetritus);
+    float substrateEnergy = consumedResourceA * 0.78 + consumedResourceB * 0.90 +
+        consumedDetritus * 0.62;
+    float conversionEfficiency = clamp(
+        0.52 + agent.geneA.w * 0.28 - max(agent.geneC.x + agent.geneC.y +
+            agent.geneC.z - 1.30, 0.0) * 0.08,
+        0.34, 0.88
+    );
+    float uptake = substrateEnergy * conversionEfficiency;
+    float conversionHeat = max(substrateEnergy - uptake, 0.0);
     contractility *= mix(0.52, 1.58, contractileProgram) * (1.0 + calcium * 0.18);
     maintenance *= 0.94 + repairProgram * 0.16 + proliferationProgram * 0.10;
     float signalingCost = (calcium * 0.000020 + erk * 0.000024 +
         (mechanicsToCalciumEffect + calciumToERKEffect) * 0.000080) *
         development.mechanochemistryB.x;
+    float resonatorEnergy = resonatorVelocity * resonatorVelocity +
+        angularFrequency * angularFrequency * resonatorDisplacement * resonatorDisplacement;
+    float frequencyWork = resonatorEnergy * (0.00042 + naturalFrequency * 0.075) *
+        (0.58 + resonanceGenome.mechanics.y * 0.82);
     float activeWork = contractility * (0.000055 + fieldStrain * 0.000070) +
-        abs(voltageDerivative) * 0.000070 + signalingCost;
+        abs(voltageDerivative) * 0.000070 + signalingCost + frequencyWork;
     float dissipation = externalStress * 0.00032 + fieldWaveSpeed * 0.000035 +
         dot(cell.velocity, cell.velocity) * 2.8;
     float rejectionCost = outgoingRejection * 0.000055;
     float rejectionDamage = incomingRejection * 0.00018;
-    float netProgramContribution = uptake - maintenance - activeWork - dissipation -
-        rejectionCost - rejectionDamage;
-    float atp = clamp(
-        cell.physiology.x + netProgramContribution + atpSharingFlux,
-        0.0, 1.2
-    );
+    float plannedATPExpense = maintenance + activeWork + dissipation +
+        rejectionCost + rejectionDamage;
+    float availableATP = max(cell.physiology.x + uptake + atpSharingFlux, 0.0);
+    float expenseScale = plannedATPExpense > 0.0
+        ? min(availableATP / plannedATPExpense, 1.0) : 1.0;
+    maintenance *= expenseScale;
+    activeWork *= expenseScale;
+    frequencyWork *= expenseScale;
+    dissipation *= expenseScale;
+    rejectionCost *= expenseScale;
+    rejectionDamage *= expenseScale;
+    float paidATPExpense = maintenance + activeWork + dissipation +
+        rejectionCost + rejectionDamage;
+    float unclampedATP = availableATP - paidATPExpense;
+    float overflowHeat = max(unclampedATP - 1.2, 0.0);
+    float atp = clamp(unclampedATP, 0.0, 1.2);
+    float netProgramContribution = uptake - paidATPExpense;
+    float detritusEnergy = maintenance * 0.34;
+    float heatExport = conversionHeat + maintenance * 0.66 + dissipation +
+        rejectionCost + rejectionDamage + overflowHeat;
+    float detritusReturn = detritusEnergy / 0.62;
+    addEnergyExchange(cellEnergyExchange, energyTileBase, 6u, detritusReturn);
+    addEnergyExchange(cellEnergyExchange, energyTileBase, 7u, heatExport);
+    float atpStorageDelta = atp - cell.physiology.x;
+    float conservationResidual = substrateEnergy + atpSharingFlux -
+        (atpStorageDelta + activeWork + detritusEnergy + heatExport);
+    addEnergyAudit(energyAudit, 0u, substrateEnergy);
+    addEnergyAudit(energyAudit, 1u, uptake);
+    addEnergyAudit(energyAudit, 2u, atpStorageDelta);
+    addEnergyAudit(energyAudit, 3u, activeWork);
+    addEnergyAudit(energyAudit, 4u, frequencyWork);
+    addEnergyAudit(energyAudit, 5u, maintenance);
+    addEnergyAudit(energyAudit, 6u, heatExport);
+    addEnergyAudit(energyAudit, 7u, detritusEnergy);
+    addEnergyAudit(energyAudit, 8u, atpSharingFlux);
+    addEnergyAudit(energyAudit, 9u, conservationResidual);
     float stress = mix(cell.signals.z, externalStress + (atp < 0.18 ? 0.36 : 0.0), 0.018);
     float apoptosis = clamp(
         cell.signals.w + max(stress - 0.72, 0.0) * 0.0024 - 0.00022 -
@@ -3513,9 +3995,35 @@ kernel void evolveOrganismCells(
             incomingRejection * 0.00026,
         0.0, 1.0
     );
-    float biomass = clamp(
+    float proposedBiomass = clamp(
         cell.physiology.y + (atp - 0.48) * 0.00018 * mix(0.42, 1.38, proliferationProgram),
         0.42, 1.08
+    );
+    float biomassDelta = proposedBiomass - cell.physiology.y;
+    float biomassEnergyDelta = biomassDelta * 0.18;
+    float biosynthesisCost = min(max(biomassEnergyDelta, 0.0), atp);
+    float biomass = biomassDelta > 0.0
+        ? cell.physiology.y + biosynthesisCost / 0.18
+        : proposedBiomass;
+    float atpBeforeBiomass = atp;
+    atp -= biosynthesisCost;
+    float releasedBiomassEnergy = max(-biomassEnergyDelta, 0.0);
+    float biomassDetritusEnergy = releasedBiomassEnergy * 0.72;
+    float biomassHeat = releasedBiomassEnergy * 0.28;
+    if (releasedBiomassEnergy > 0.0) {
+        addEnergyExchange(
+            cellEnergyExchange, energyTileBase, 6u, biomassDetritusEnergy / 0.62
+        );
+        addEnergyExchange(cellEnergyExchange, energyTileBase, 7u, biomassHeat);
+    }
+    float storageCorrection = (atp - atpBeforeBiomass) +
+        (biomass - cell.physiology.y) * 0.18;
+    addEnergyAudit(energyAudit, 2u, storageCorrection);
+    addEnergyAudit(energyAudit, 6u, biomassHeat);
+    addEnergyAudit(energyAudit, 7u, biomassDetritusEnergy);
+    addEnergyAudit(
+        energyAudit, 9u,
+        -(storageCorrection + biomassHeat + biomassDetritusEnergy)
     );
     float contactInhibition = saturate(contactCount / (3.6 + cell.phenotype.x * 1.8));
     float unconstrainedCycleDrive = 0.00145 * smoothstep(0.40, 0.72, atp) *
@@ -3650,10 +4158,29 @@ kernel void evolveOrganismCells(
 
     if (membraneIntegrity < 0.055 || apoptosis > 0.985 ||
         (atp < 0.008 && stress > 0.82)) {
+        float terminalATP = max(atp, 0.0);
+        float terminalBiomassEnergy = max(biomass, 0.0) * 0.18;
+        float terminalEnergy = terminalATP + terminalBiomassEnergy;
+        float terminalDetritusEnergy = terminalEnergy * 0.72;
+        float terminalHeat = terminalEnergy * 0.28;
+        addEnergyExchange(
+            cellEnergyExchange, energyTileBase, 6u, terminalDetritusEnergy / 0.62
+        );
+        addEnergyExchange(cellEnergyExchange, energyTileBase, 7u, terminalHeat);
+        addEnergyAudit(energyAudit, 2u, -terminalEnergy);
+        addEnergyAudit(energyAudit, 6u, terminalHeat);
+        addEnergyAudit(energyAudit, 7u, terminalDetritusEnergy);
+        addEnergyAudit(
+            energyAudit, 9u, terminalEnergy - terminalHeat - terminalDetritusEnergy
+        );
+        releaseHeritableProgram(
+            programSlots, identityCounters, programIndex, cellIdentity.programGeneration
+        );
         atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
         cellIdentity.owner = maxAgentCount;
         cellIdentity.programIndex = maxHeritableProgramCount;
         cellIdentity.componentRoot = emptySpatialHashEntry;
+        cellIdentity.programGeneration = 0u;
         cellIdentities[gid] = cellIdentity;
     }
     cellsOut[gid] = cell;
@@ -3666,20 +4193,29 @@ kernel void evolveCellMembranes(
     device MembraneVertex* membraneVertices [[buffer(3)]],
     constant SimulationUniforms& uniforms [[buffer(4)]],
     device const CellIdentity* cellIdentities [[buffer(5)]],
-    device const atomic_uint* ownerCellHeads [[buffer(6)]],
-    device const uint* ownerCellNext [[buffer(7)]],
+    device const AgentState* agents [[buffer(6)]],
+    device const HeritableProgram* heritablePrograms [[buffer(7)]],
+    device const ProgramSlotState* programSlots [[buffer(8)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
 
     CellState cell = cellsIn[gid];
-    uint owner = cellIdentities[gid].owner;
+    CellIdentity identity = cellIdentities[gid];
+    uint owner = identity.owner;
     if (owner >= maxAgentCount) { return; }
+    if (!programSlotMatches(
+        programSlots, identity.programIndex, identity.programGeneration
+    )) { return; }
+    AgentState agent = agentWithCellProgram(
+        agents[owner], identity.programIndex, heritablePrograms
+    );
     uint membraneBase = gid * membraneVertexCount;
     float2 positions[membraneVertexCount];
     float2 velocities[membraneVertexCount];
     float localIntegrity[membraneVertexCount];
+    float previousPressure[membraneVertexCount];
     bool uninitialized = membraneVertices[membraneBase].mechanics.x <= 0.0;
     float targetRadius = clamp(
         0.105 + cell.physiology.y * 0.014 - cell.mechanics.x * 0.008,
@@ -3698,7 +4234,28 @@ kernel void evolveCellMembranes(
         positions[vertexIndex] = state.position;
         velocities[vertexIndex] = state.velocity;
         localIntegrity[vertexIndex] = state.mechanics.y;
+        previousPressure[vertexIndex] = max(state.mechanics.z, 0.0);
     }
+
+    float exposure = saturate(cell.tissueGeometry.z);
+    float2 boundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
+        ? normalize(cell.tissueGeometry.xy)
+        : (length(cell.position) > 0.0001 ? normalize(cell.position) : float2(1.0, 0.0));
+    float2 tractionDirection = length(cell.tissueForce.xy) > 0.000001
+        ? normalize(cell.tissueForce.xy) : boundaryNormal;
+    float sensorAngle = cell.dynamics.z * 2.0 * M_PI_F +
+        agent.geneB.w * M_PI_F + cell.resonance.x * 1.8;
+    float2 sensorDirection = normalize(
+        boundaryNormal * 0.52 + float2(cos(sensorAngle), sin(sensorAngle)) * 0.48
+    );
+    float predatoryConstruction = exposure * cell.regulationB.y * cell.regulationB.w *
+        saturate((agent.geneC.w - 0.025) * 2.2) * saturate(cell.physiology.x);
+    float armorConstruction = exposure * cell.regulation.y * cell.regulation.w *
+        agent.geneA.w * saturate(cell.physiology.x);
+    float sensorConstruction = exposure * cell.regulationB.x * cell.regulationB.y *
+        (0.35 + saturate(cell.resonance.z * 5.0) * 0.65);
+    float locomotorConstruction = exposure * cell.regulationB.w * cell.signaling.y *
+        saturate(cell.physiology.x);
 
     float signedDoubleArea = 0.0;
     float perimeter = 0.0;
@@ -3721,7 +4278,22 @@ kernel void evolveCellMembranes(
         float2 toNext = positions[next] - current;
         float previousLength = max(length(toPrevious), 0.0001);
         float nextLength = max(length(toNext), 0.0001);
-        float stiffness = mix(0.006, 0.026, saturate(cell.physiology.w * localIntegrity[vertexIndex]));
+        float radialLength = max(length(current), 0.0001);
+        float2 radialNormal = current / radialLength;
+        float predatoryLobe = pow(saturate(dot(radialNormal, boundaryNormal)), 6.0) *
+            predatoryConstruction;
+        float sensorLobe = pow(saturate(dot(radialNormal, sensorDirection)), 8.0) *
+            sensorConstruction;
+        float locomotorLobe = pow(saturate(dot(radialNormal, tractionDirection)), 4.0) *
+            locomotorConstruction;
+        float armorPlate = pow(saturate(dot(radialNormal, boundaryNormal)), 2.0) *
+            armorConstruction;
+        float vertexTargetRadius = targetRadius * (
+            1.0 + predatoryLobe * 0.58 + sensorLobe * 0.34 +
+            locomotorLobe * 0.24 + armorPlate * 0.10
+        );
+        float stiffness = mix(0.006, 0.026, saturate(cell.physiology.w *
+            localIntegrity[vertexIndex])) * (1.0 + armorPlate * 0.92);
         float2 edgeForce = toPrevious / previousLength * (previousLength - restEdge) * stiffness +
             toNext / nextLength * (nextLength - restEdge) * stiffness;
         float bendingStiffness = mix(
@@ -3731,39 +4303,14 @@ kernel void evolveCellMembranes(
         );
         float2 bendingForce = (positions[previous] + positions[next] - current * 2.0) *
             bendingStiffness;
-        float radialLength = max(length(current), 0.0001);
-        float2 radialNormal = current / radialLength;
         float2 pressureForce = radialNormal * areaError *
             (0.0018 + cell.physiology.x * 0.0028);
+        float2 morphogenesisForce = radialNormal *
+            clamp(vertexTargetRadius - radialLength, -0.08, 0.12) *
+            (0.0048 + cell.regulationB.w * 0.0042 + armorPlate * 0.0020);
         float2 contractileForce = -radialNormal * cell.mechanics.x *
             (0.00028 + cell.regulation.z * 0.00062);
-        float2 contactForce = float2(0.0);
-        float contactPressure = 0.0;
-        float2 tissueVertex = cell.position + current;
-        uint otherIndex = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
-        while (otherIndex != emptySpatialHashEntry) {
-            uint nextIndex = ownerCellNext[otherIndex];
-            if (otherIndex == gid ||
-                atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) == 0u) {
-                otherIndex = nextIndex;
-                continue;
-            }
-            CellState other = cellsIn[otherIndex];
-            float otherRadius = clamp(sqrt(max(other.membrane.x, 0.010) / M_PI_F), 0.085, 0.18);
-            float2 delta = tissueVertex - other.position;
-            float distance = max(length(delta), 0.0001);
-            float overlap = otherRadius - distance;
-            if (overlap > 0.0) {
-                float magnitude = overlap * (0.010 + min(cell.phenotype.x, other.phenotype.x) * 0.012);
-                contactForce += delta / distance * magnitude;
-                contactPressure += magnitude;
-            } else if (distance < otherRadius + 0.055) {
-                float adhesion = min(cell.phenotype.x, other.phenotype.x) *
-                    (1.0 - (distance - otherRadius) / 0.055);
-                contactForce -= delta / distance * adhesion * 0.00024;
-            }
-            otherIndex = nextIndex;
-        }
+        float contactPressure = previousPressure[vertexIndex] * 0.72;
         float integrityTarget = clamp(
             cell.physiology.w - contactPressure * 8.0 - cell.signals.z * 0.08,
             0.04, 1.0
@@ -3771,7 +4318,8 @@ kernel void evolveCellMembranes(
         float integrity = mix(
             localIntegrity[vertexIndex], integrityTarget, 0.012 + cell.regulation.w * 0.014
         );
-        float2 force = edgeForce + bendingForce + pressureForce + contractileForce + contactForce;
+        float2 force = edgeForce + bendingForce + pressureForce + morphogenesisForce +
+            contractileForce;
         float2 velocity = velocities[vertexIndex] * (0.78 + integrity * 0.12) + force;
         float speed = length(velocity);
         if (speed > 0.006) { velocity *= 0.006 / speed; }
@@ -3780,8 +4328,8 @@ kernel void evolveCellMembranes(
         float neighborRadius = 0.5 * (length(positions[previous]) + length(positions[next]));
         float radialAllowance = targetRadius * mix(0.18, 0.34, 1.0 - integrity);
         float maximumRadius = min(
-            targetRadius * 1.48,
-            max(targetRadius * 1.15, neighborRadius + radialAllowance)
+            targetRadius * 1.82,
+            max(vertexTargetRadius * 1.08, neighborRadius + radialAllowance)
         );
         if (radius > maximumRadius) {
             position *= maximumRadius / radius;
@@ -3795,7 +4343,7 @@ kernel void evolveCellMembranes(
             abs(previousLength - restEdge) + abs(nextLength - restEdge)
         );
         membraneVertices[membraneBase + vertexIndex] = output;
-        transmittedForce += length(contactForce);
+        transmittedForce += contactPressure;
     }
 
     float2 membraneCentroid = float2(0.0);
@@ -3891,8 +4439,6 @@ kernel void evolveCellMembranes(
 
     float updatedDoubleArea = 0.0;
     float updatedPerimeter = 0.0;
-    float exposedPerimeter = 0.0;
-    float2 exposedNormal = float2(0.0);
     for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
         uint next = (vertexIndex + 1u) % membraneVertexCount;
         float2 a = membraneVertices[membraneBase + vertexIndex].position;
@@ -3900,31 +4446,6 @@ kernel void evolveCellMembranes(
         updatedDoubleArea += a.x * b.y - b.x * a.y;
         float edgeLength = length(b - a);
         updatedPerimeter += edgeLength;
-        float2 midpoint = cell.position + (a + b) * 0.5;
-        bool occluded = false;
-        uint otherIndex = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
-        while (otherIndex != emptySpatialHashEntry) {
-            uint nextIndex = ownerCellNext[otherIndex];
-            if (otherIndex == gid ||
-                atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) == 0u) {
-                otherIndex = nextIndex;
-                continue;
-            }
-            CellState other = cellsIn[otherIndex];
-            float otherRadius = clamp(sqrt(max(other.membrane.x, 0.010) / M_PI_F), 0.070, 0.21);
-            if (length(midpoint - other.position) < otherRadius * 0.94) {
-                occluded = true;
-                break;
-            }
-            otherIndex = nextIndex;
-        }
-        if (!occluded) {
-            exposedPerimeter += edgeLength;
-            float2 edgeMidpoint = (a + b) * 0.5;
-            if (length(edgeMidpoint) > 0.0001) {
-                exposedNormal += normalize(edgeMidpoint) * edgeLength;
-            }
-        }
     }
     float updatedArea = max(abs(updatedDoubleArea) * 0.5, 0.0001);
     float shapeIndex = updatedPerimeter * updatedPerimeter /
@@ -3932,14 +4453,16 @@ kernel void evolveCellMembranes(
     cell.membrane = float4(
         updatedArea, updatedPerimeter, clamp(shapeIndex, 1.0, 3.5), transmittedForce
     );
-    float exposure = saturate(exposedPerimeter / max(updatedPerimeter, 0.0001));
-    float2 boundaryNormal = length(exposedNormal) > 0.0001
-        ? normalize(exposedNormal)
+    float previousExposure = saturate(cell.tissueGeometry.z);
+    float2 previousBoundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
+        ? normalize(cell.tissueGeometry.xy)
         : (length(cell.position) > 0.0001 ? normalize(cell.position) : float2(1.0, 0.0));
-    float detachmentScore = exposure * saturate(1.0 - cell.interaction.z) *
+    float detachmentScore = previousExposure * saturate(1.0 - cell.interaction.z) *
         saturate(length(cell.position) / 0.62) * saturate(cell.physiology.x) *
         saturate(cell.physiology.w) * mix(1.18, 0.42, cell.phenotype.x);
-    cell.tissueGeometry = float4(boundaryNormal, exposure, saturate(detachmentScore));
+    cell.tissueGeometry = float4(
+        previousBoundaryNormal, previousExposure, saturate(detachmentScore)
+    );
     cellsOut[gid] = cell;
 }
 
@@ -3947,6 +4470,7 @@ kernel void clearCellSpatialHash(
     device atomic_uint* hashHeads [[buffer(0)]],
     device atomic_int* contactEffects [[buffer(1)]],
     device atomic_uint* ownerCellHeads [[buffer(2)]],
+    device atomic_int* membraneContactEffects [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid < cellSpatialHashBucketCount) {
@@ -3954,6 +4478,9 @@ kernel void clearCellSpatialHash(
     }
     if (gid < maxCellCount * 4u) {
         atomic_store_explicit(&contactEffects[gid], 0, memory_order_relaxed);
+    }
+    if (gid < maxCellCount * membraneVertexCount * 3u) {
+        atomic_store_explicit(&membraneContactEffects[gid], 0, memory_order_relaxed);
     }
     if (gid < maxAgentCount) {
         atomic_store_explicit(&ownerCellHeads[gid], emptySpatialHashEntry, memory_order_relaxed);
@@ -4022,7 +4549,124 @@ kernel void buildCellSpatialHash(
     );
 }
 
-kernel void resolveCrossOrganismCellContacts(
+inline uint cellPairKey(uint indexA, uint indexB) {
+    uint lower = min(indexA, indexB);
+    uint upper = max(indexA, indexB);
+    return lower * maxCellCount + upper + 1u;
+}
+
+inline uint cellPairFingerprint(
+    device const CellIdentity* identities,
+    uint indexA,
+    uint indexB
+) {
+    uint lowerID = min(identities[indexA].persistentID, identities[indexB].persistentID);
+    uint upperID = max(identities[indexA].persistentID, identities[indexB].persistentID);
+    return hash32(lowerID ^ hash32(upperID + 0x9e3779b9u));
+}
+
+inline uint findOrCreateCellJunction(
+    device CellJunctionState* junctionStates,
+    uint pairKey,
+    uint fingerprint,
+    uint step,
+    float restDistance,
+    float targetStrength
+) {
+    uint start = hash32(pairKey) & cellJunctionMask;
+    for (uint probe = 0u; probe < 12u; ++probe) {
+        uint slot = (start + probe) & cellJunctionMask;
+        uint observedKey = atomic_load_explicit(
+            &junctionStates[slot].pairKey, memory_order_relaxed
+        );
+        uint lastSeen = atomic_load_explicit(
+            &junctionStates[slot].lastSeenStep, memory_order_relaxed
+        );
+        bool stale = step > lastSeen && step - lastSeen > 180u;
+        if (observedKey == pairKey &&
+            junctionStates[slot].persistentFingerprint == fingerprint) {
+            atomic_store_explicit(
+                &junctionStates[slot].lastSeenStep, step, memory_order_relaxed
+            );
+            junctionStates[slot].age = min(junctionStates[slot].age + 1.0, 65535.0);
+            junctionStates[slot].strength = mix(
+                junctionStates[slot].strength, targetStrength, 0.08
+            );
+            return slot;
+        }
+        if (observedKey == emptySpatialHashEntry || stale ||
+            (observedKey == pairKey &&
+                junctionStates[slot].persistentFingerprint != fingerprint)) {
+            uint expected = observedKey;
+            if (atomic_compare_exchange_weak_explicit(
+                &junctionStates[slot].pairKey, &expected, pairKey,
+                memory_order_relaxed, memory_order_relaxed
+            )) {
+                junctionStates[slot].persistentFingerprint = fingerprint;
+                junctionStates[slot].flags = 1u;
+                junctionStates[slot].restDistance = restDistance;
+                junctionStates[slot].strength = targetStrength;
+                junctionStates[slot].age = 1.0;
+                junctionStates[slot].load = 0.0;
+                atomic_store_explicit(
+                    &junctionStates[slot].lastSeenStep, step, memory_order_relaxed
+                );
+                return slot;
+            }
+        }
+    }
+    return cellJunctionCapacity;
+}
+
+inline uint findCellJunction(
+    device const CellJunctionState* junctionStates,
+    uint pairKey,
+    uint fingerprint
+) {
+    uint start = hash32(pairKey) & cellJunctionMask;
+    for (uint probe = 0u; probe < 12u; ++probe) {
+        uint slot = (start + probe) & cellJunctionMask;
+        uint observedKey = atomic_load_explicit(
+            &junctionStates[slot].pairKey, memory_order_relaxed
+        );
+        if (observedKey == pairKey &&
+            junctionStates[slot].persistentFingerprint == fingerprint) {
+            return slot;
+        }
+        if (observedKey == emptySpatialHashEntry) { return cellJunctionCapacity; }
+    }
+    return cellJunctionCapacity;
+}
+
+inline void accumulateMembraneContactForce(
+    device atomic_int* membraneContactEffects,
+    uint cellIndex,
+    uint vertexIndex,
+    float2 worldForce,
+    float pressure
+) {
+    uint base = (cellIndex * membraneVertexCount + vertexIndex) * 3u;
+    int forceX = int(clamp(
+        worldForce.x * float(cellContactForceScale), -1048576.0, 1048576.0
+    ));
+    int forceY = int(clamp(
+        worldForce.y * float(cellContactForceScale), -1048576.0, 1048576.0
+    ));
+    int fixedPressure = int(clamp(
+        pressure * float(cellContactScalarScale), 0.0, 1048576.0
+    ));
+    atomic_fetch_add_explicit(
+        &membraneContactEffects[base], forceX, memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &membraneContactEffects[base + 1u], forceY, memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &membraneContactEffects[base + 2u], fixedPressure, memory_order_relaxed
+    );
+}
+
+kernel void resolveMembraneContacts(
     device const AgentState* agents [[buffer(0)]],
     device const atomic_uint* agentOccupancy [[buffer(1)]],
     device const CellState* cells [[buffer(2)]],
@@ -4034,6 +4678,10 @@ kernel void resolveCrossOrganismCellContacts(
     constant SimulationUniforms& uniforms [[buffer(8)]],
     device const CellIdentity* cellIdentities [[buffer(9)]],
     device const HeritableProgram* heritablePrograms [[buffer(10)]],
+    device CellJunctionState* junctionStates [[buffer(11)]],
+    device atomic_int* membraneContactEffects [[buffer(12)]],
+    device const ProgramSlotState* programSlots [[buffer(13)]],
+    device atomic_int* energyAudit [[buffer(14)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxCellCount ||
@@ -4043,7 +4691,9 @@ kernel void resolveCrossOrganismCellContacts(
         atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
 
     uint programIndex = cellIdentities[gid].programIndex;
-    if (programIndex >= maxHeritableProgramCount) { return; }
+    if (!programSlotMatches(
+        programSlots, programIndex, cellIdentities[gid].programGeneration
+    )) { return; }
     AgentState agent = agentWithCellProgram(
         agents[owner], programIndex, heritablePrograms
     );
@@ -4075,11 +4725,13 @@ kernel void resolveCrossOrganismCellContacts(
                 if (otherIndex > gid &&
                     atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) != 0u) {
                     uint otherOwner = cellIdentities[otherIndex].owner;
-                    if (otherOwner != owner &&
-                        otherOwner < maxAgentCount &&
+                    if (otherOwner < maxAgentCount &&
                         atomic_load_explicit(&agentOccupancy[otherOwner], memory_order_relaxed) != 0u) {
                         uint otherProgramIndex = cellIdentities[otherIndex].programIndex;
-                        if (otherProgramIndex >= maxHeritableProgramCount) {
+                        if (!programSlotMatches(
+                            programSlots, otherProgramIndex,
+                            cellIdentities[otherIndex].programGeneration
+                        )) {
                             otherIndex = nextIndex;
                             traversed += 1u;
                             continue;
@@ -4096,51 +4748,116 @@ kernel void resolveCrossOrganismCellContacts(
                         float2 normalWorld = delta / distance;
                         float2 localDirection = rotateWorldToTissue(normalWorld, agent);
                         float2 otherLocalDirection = rotateWorldToTissue(-normalWorld, otherAgent);
-                        float2 supportA = membraneSupport(
+                        MembraneSupportSample supportA = membraneSupportSample(
                             membraneVertices, gid, localDirection
                         );
-                        float2 supportB = membraneSupport(
+                        MembraneSupportSample supportB = membraneSupportSample(
                             membraneVertices, otherIndex, otherLocalDirection
                         );
-                        float contactDistance = (supportA.x + supportB.x) * scale;
-                        if (distance < contactDistance) {
-                            float localOverlap = (contactDistance - distance) / max(scale, 0.0000001);
-                            float overlapFraction = saturate(
-                                localOverlap / max(supportA.x + supportB.x, 0.0001)
+                        float2 supportWorldA = worldPosition +
+                            rotateTissueToWorld(supportA.point, agent) * scale;
+                        float2 supportWorldB = otherWorldPosition +
+                            rotateTissueToWorld(supportB.point, otherAgent) * scale;
+                        float supportGap = dot(supportWorldB - supportWorldA, normalWorld);
+                        float localGap = supportGap / max(scale, 0.0000001);
+                        bool sameOwner = otherOwner == owner;
+                        float interactionRange = sameOwner ? 0.090 : 0.012;
+                        if (localGap < interactionRange) {
+                            float localOverlap = max(-localGap, 0.0);
+                            float supportSpan = max(
+                                length(supportA.point) + length(supportB.point), 0.0001
                             );
-                            float contactStrength = smoothstep(0.0, 0.24, overlapFraction);
+                            float overlapFraction = saturate(localOverlap / supportSpan);
+                            float contactStrength = smoothstep(0.0, 0.20, overlapFraction);
                             float pairDifference = saturate(
                                 length(agent.geneC - otherAgent.geneC) * 0.66 +
                                 length(agent.geneA - otherAgent.geneA) * 0.18
                             );
-                            float attackA = saturate((agent.geneC.w - 0.035) * 1.55) *
+                            float attackA = sameOwner ? 0.0 :
+                                saturate((agent.geneC.w - 0.035) * 1.55) *
                                 cell.tissueGeometry.z * cell.regulationB.y *
                                 (0.34 + cell.regulationB.w * 0.66) *
                                 saturate(cell.physiology.x) * pairDifference;
-                            float attackB = saturate((otherAgent.geneC.w - 0.035) * 1.55) *
+                            float attackB = sameOwner ? 0.0 :
+                                saturate((otherAgent.geneC.w - 0.035) * 1.55) *
                                 other.tissueGeometry.z * other.regulationB.y *
                                 (0.34 + other.regulationB.w * 0.66) *
                                 saturate(other.physiology.x) * pairDifference;
                             float defenseA = saturate(
-                                supportA.y * (0.52 + cell.phenotype.x * 0.30 +
+                                supportA.integrity * (0.52 + cell.phenotype.x * 0.30 +
                                     agent.geneA.w * 0.28)
                             );
                             float defenseB = saturate(
-                                supportB.y * (0.52 + other.phenotype.x * 0.30 +
+                                supportB.integrity * (0.52 + other.phenotype.x * 0.30 +
                                     otherAgent.geneA.w * 0.28)
                             );
                             float damageToA = contactStrength * attackB * (1.12 - defenseA) * 0.0065;
                             float damageToB = contactStrength * attackA * (1.12 - defenseB) * 0.0065;
-                            float breachA = (1.0 - smoothstep(0.12, 0.34, supportA.y)) *
+                            float breachA = (1.0 - smoothstep(0.12, 0.34, supportA.integrity)) *
                                 (1.0 - smoothstep(0.18, 0.42, cell.physiology.w));
-                            float breachB = (1.0 - smoothstep(0.12, 0.34, supportB.y)) *
+                            float breachB = (1.0 - smoothstep(0.12, 0.34, supportB.integrity)) *
                                 (1.0 - smoothstep(0.18, 0.42, other.physiology.w));
                             float transferFromA = contactStrength * attackB * breachA * 0.0018;
                             float transferFromB = contactStrength * attackA * breachB * 0.0018;
                             float trophicA = transferFromB * 0.68 - transferFromA;
                             float trophicB = transferFromA * 0.68 - transferFromB;
+                            float trophicLossHeat = max(
+                                -(trophicA + trophicB) * (0.82 + 0.30 * 0.18), 0.0
+                            );
+                            addEnergyAudit(energyAudit, 6u, trophicLossHeat);
+                            addEnergyAudit(energyAudit, 9u, -trophicLossHeat);
                             float impulseMagnitude = localOverlap *
                                 (0.006 + min(defenseA, defenseB) * 0.010);
+
+                            if (sameOwner) {
+                                float pairAdhesion = min(cell.phenotype.x, other.phenotype.x) *
+                                    sqrt(max(cell.physiology.w * other.physiology.w, 0.0));
+                                uint pairKey = cellPairKey(gid, otherIndex);
+                                uint fingerprint = cellPairFingerprint(
+                                    cellIdentities, gid, otherIndex
+                                );
+                                uint junction = findCellJunction(
+                                    junctionStates, pairKey, fingerprint
+                                );
+                                if (junction == cellJunctionCapacity && localGap < 0.038 &&
+                                    pairAdhesion > 0.16) {
+                                    junction = findOrCreateCellJunction(
+                                        junctionStates, pairKey, fingerprint, uniforms.step,
+                                        distance / max(scale, 0.0000001), pairAdhesion
+                                    );
+                                } else if (junction < cellJunctionCapacity) {
+                                    atomic_store_explicit(
+                                        &junctionStates[junction].lastSeenStep,
+                                        uniforms.step, memory_order_relaxed
+                                    );
+                                    junctionStates[junction].age = min(
+                                        junctionStates[junction].age + 1.0, 65535.0
+                                    );
+                                    junctionStates[junction].strength = mix(
+                                        junctionStates[junction].strength,
+                                        pairAdhesion, 0.08
+                                    );
+                                }
+                                if (junction < cellJunctionCapacity) {
+                                    float localCenterDistance = distance / max(scale, 0.0000001);
+                                    float stretch = localCenterDistance -
+                                        junctionStates[junction].restDistance;
+                                    float2 velocityA = rotateTissueToWorld(cell.velocity, agent);
+                                    float2 velocityB = rotateTissueToWorld(other.velocity, otherAgent);
+                                    float relativeNormalVelocity = dot(
+                                        velocityB - velocityA, normalWorld
+                                    );
+                                    float junctionMagnitude = -stretch *
+                                        junctionStates[junction].strength * 0.0080 -
+                                        relativeNormalVelocity * 0.055;
+                                    junctionMagnitude = clamp(junctionMagnitude, -0.0028, 0.0028);
+                                    impulseMagnitude += junctionMagnitude;
+                                    junctionStates[junction].load = abs(junctionMagnitude);
+                                } else if (localGap > 0.0) {
+                                    impulseMagnitude -= pairAdhesion *
+                                        (1.0 - saturate(localGap / interactionRange)) * 0.00022;
+                                }
+                            }
                             float2 impulse = normalWorld * impulseMagnitude;
                             int impulseX = int(clamp(
                                 impulse.x * float(cellContactForceScale), -1048576.0, 1048576.0
@@ -4176,6 +4893,17 @@ kernel void resolveCrossOrganismCellContacts(
                                 &contactEffects[otherIndex * 4u + 3u],
                                 int(trophicB * float(cellContactScalarScale)), memory_order_relaxed
                             );
+                            float pressure = localOverlap *
+                                (0.10 + min(defenseA, defenseB) * 0.18) +
+                                abs(impulseMagnitude) * 2.0;
+                            accumulateMembraneContactForce(
+                                membraneContactEffects, gid, supportA.vertexIndex,
+                                -impulse, pressure
+                            );
+                            accumulateMembraneContactForce(
+                                membraneContactEffects, otherIndex, supportB.vertexIndex,
+                                impulse, pressure
+                            );
                         }
                     }
                 }
@@ -4193,6 +4921,8 @@ kernel void applyCellContactEffects(
     device MembraneVertex* membraneVertices [[buffer(3)]],
     device atomic_int* contactEffects [[buffer(4)]],
     device const CellIdentity* cellIdentities [[buffer(5)]],
+    device atomic_int* membraneContactEffects [[buffer(6)]],
+    device atomic_int* energyAudit [[buffer(7)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxCellCount) { return; }
@@ -4209,6 +4939,8 @@ kernel void applyCellContactEffects(
     float2 localImpulse = rotateWorldToTissue(worldImpulse, agents[owner]);
     float damage = max(float(rawDamage) / float(cellContactScalarScale), 0.0);
     float trophic = float(rawTrophic) / float(cellContactScalarScale);
+    float previousATP = cell.physiology.x;
+    float previousBiomass = cell.physiology.y;
     cell.velocity += localImpulse;
     float speed = length(cell.velocity);
     if (speed > 0.0032) { cell.velocity *= 0.0032 / speed; }
@@ -4220,9 +4952,42 @@ kernel void applyCellContactEffects(
     cell.tissueForce.z = length(localImpulse) + damage;
     cell.tissueForce.w = trophic;
 
+    float trophicStorageDelta = cell.physiology.x - previousATP +
+        (cell.physiology.y - previousBiomass) * 0.18;
+    addEnergyAudit(energyAudit, 2u, trophicStorageDelta);
+    addEnergyAudit(energyAudit, 9u, -trophicStorageDelta);
+
+    uint membraneBase = gid * membraneVertexCount;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint effectBase = (gid * membraneVertexCount + vertexIndex) * 3u;
+        int vertexRawX = atomic_exchange_explicit(
+            &membraneContactEffects[effectBase], 0, memory_order_relaxed
+        );
+        int vertexRawY = atomic_exchange_explicit(
+            &membraneContactEffects[effectBase + 1u], 0, memory_order_relaxed
+        );
+        int vertexRawPressure = atomic_exchange_explicit(
+            &membraneContactEffects[effectBase + 2u], 0, memory_order_relaxed
+        );
+        MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
+        float2 vertexWorldForce = float2(vertexRawX, vertexRawY) /
+            float(cellContactForceScale);
+        float2 vertexLocalForce = rotateWorldToTissue(vertexWorldForce, agents[owner]);
+        membranePoint.velocity += vertexLocalForce * 0.72;
+        float vertexSpeed = length(membranePoint.velocity);
+        if (vertexSpeed > 0.0075) {
+            membranePoint.velocity *= 0.0075 / vertexSpeed;
+        }
+        membranePoint.mechanics.z = mix(
+            membranePoint.mechanics.z,
+            max(float(vertexRawPressure) / float(cellContactScalarScale), 0.0),
+            0.72
+        );
+        membraneVertices[membraneBase + vertexIndex] = membranePoint;
+    }
+
     if (damage > 0.0 && length(localImpulse) > 0.000001) {
         float2 impactDirection = -normalize(localImpulse);
-        uint membraneBase = gid * membraneVertexCount;
         for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
             MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
             float2 radial = length(membranePoint.position) > 0.0001
@@ -4235,6 +5000,124 @@ kernel void applyCellContactEffects(
             membraneVertices[membraneBase + vertexIndex] = membranePoint;
         }
     }
+    cells[gid] = cell;
+}
+
+kernel void measureCellMembraneExposure(
+    device const AgentState* agents [[buffer(0)]],
+    device CellState* cells [[buffer(1)]],
+    device const atomic_uint* cellOccupancy [[buffer(2)]],
+    device MembraneVertex* membraneVertices [[buffer(3)]],
+    device const atomic_uint* hashHeads [[buffer(4)]],
+    device const uint* hashNext [[buffer(5)]],
+    constant SimulationUniforms& uniforms [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    device const atomic_uint* agentOccupancy [[buffer(8)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+
+    AgentState agent = agents[owner];
+    CellState cell = cells[gid];
+    float scale = cellWorldScale(uniforms);
+    uint membraneBase = gid * membraneVertexCount;
+    float perimeter = 0.0;
+    float exposedPerimeter = 0.0;
+    float2 exposedNormal = float2(0.0);
+    float junctionLoad = 0.0;
+    uint nearbySameOwnerCells[64];
+    uint nearbyCellCount = 0u;
+    uint visitedBuckets[25];
+    uint visitedBucketCount = 0u;
+    int2 centerCoordinate = int2(spatialHashCoordinate(
+        cellWorldPosition(agent, cell.position, uniforms)
+    ));
+    for (int offsetY = -2; offsetY <= 2 && nearbyCellCount < 64u; ++offsetY) {
+        for (int offsetX = -2; offsetX <= 2 && nearbyCellCount < 64u; ++offsetX) {
+            int2 candidateCoordinate = centerCoordinate + int2(offsetX, offsetY);
+            if (any(candidateCoordinate < int2(0)) ||
+                any(candidateCoordinate >= int2(cellSpatialHashAxisResolution))) { continue; }
+            uint bucket = cellSpatialHash(uint2(candidateCoordinate));
+            bool visited = false;
+            for (uint index = 0u; index < visitedBucketCount; ++index) {
+                visited = visited || visitedBuckets[index] == bucket;
+            }
+            if (visited) { continue; }
+            visitedBuckets[visitedBucketCount++] = bucket;
+            uint otherIndex = atomic_load_explicit(
+                &hashHeads[bucket], memory_order_relaxed
+            );
+            uint traversed = 0u;
+            while (otherIndex != emptySpatialHashEntry && traversed < 48u &&
+                nearbyCellCount < 64u) {
+                uint following = hashNext[otherIndex];
+                if (otherIndex != gid &&
+                    atomic_load_explicit(
+                        &cellOccupancy[otherIndex], memory_order_relaxed
+                    ) != 0u && cellIdentities[otherIndex].owner == owner) {
+                    nearbySameOwnerCells[nearbyCellCount++] = otherIndex;
+                }
+                otherIndex = following;
+                traversed += 1u;
+            }
+        }
+    }
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        MembraneVertex membraneA = membraneVertices[membraneBase + vertexIndex];
+        MembraneVertex membraneB = membraneVertices[membraneBase + next];
+        float2 edge = membraneB.position - membraneA.position;
+        float edgeLength = length(edge);
+        perimeter += edgeLength;
+        junctionLoad += (membraneA.mechanics.z + membraneB.mechanics.z) *
+            edgeLength * 0.5;
+        float2 localMidpoint = (membraneA.position + membraneB.position) * 0.5;
+        float2 worldMidpoint = cellWorldPosition(
+            agent, cell.position + localMidpoint, uniforms
+        );
+        bool occluded = false;
+        for (uint nearbyIndex = 0u;
+            nearbyIndex < nearbyCellCount && !occluded; ++nearbyIndex) {
+            uint otherIndex = nearbySameOwnerCells[nearbyIndex];
+            CellState other = cells[otherIndex];
+            float2 otherCenter = cellWorldPosition(
+                agent, other.position, uniforms
+            );
+            float2 pointInOther = rotateWorldToTissue(
+                worldMidpoint - otherCenter, agent
+            ) / max(scale, 0.0000001);
+            if (pointInsideMembrane(
+                membraneVertices, otherIndex, pointInOther
+            )) {
+                occluded = true;
+            }
+        }
+        if (!occluded && edgeLength > 0.000001) {
+            exposedPerimeter += edgeLength;
+            float2 outward = normalize(float2(edge.y, -edge.x));
+            if (dot(outward, localMidpoint) < 0.0) { outward *= -1.0; }
+            exposedNormal += outward * edgeLength;
+        }
+        MembraneVertex markedEdge = membraneVertices[membraneBase + vertexIndex];
+        markedEdge.mechanics.w = (occluded ? -1.0 : 1.0) *
+            (abs(markedEdge.mechanics.w) + 0.000001);
+        membraneVertices[membraneBase + vertexIndex] = markedEdge;
+    }
+    float exposure = saturate(exposedPerimeter / max(perimeter, 0.0001));
+    float2 boundaryNormal = length(exposedNormal) > 0.0001
+        ? normalize(exposedNormal)
+        : (length(cell.position) > 0.0001 ? normalize(cell.position) : float2(1.0, 0.0));
+    float detachmentScore = exposure * saturate(1.0 - cell.interaction.z) *
+        saturate(length(cell.position) / 0.62) * saturate(cell.physiology.x) *
+        saturate(cell.physiology.w) * mix(1.18, 0.42, cell.phenotype.x);
+    cell.membrane.w = junctionLoad;
+    cell.tissueGeometry = float4(
+        boundaryNormal, exposure, saturate(detachmentScore)
+    );
     cells[gid] = cell;
 }
 
@@ -4254,6 +5137,7 @@ kernel void divideAndReduceOrganismCells(
     device atomic_uint* identityCounters [[buffer(12)]],
     device uint* cellParentIDs [[buffer(13)]],
     device float4* programInteractions [[buffer(14)]],
+    device ProgramSlotState* programSlots [[buffer(15)]],
     uint owner [[thread_position_in_grid]]
 ) {
     if (owner >= maxAgentCount ||
@@ -4383,6 +5267,18 @@ kernel void divideAndReduceOrganismCells(
                 &identityCounters[3], 1u, memory_order_relaxed
             );
             childIdentity.componentRoot = divisionTarget;
+            childIdentity.programGeneration = parentIdentity.programGeneration;
+            childIdentity.identityPadding0 = 0u;
+            childIdentity.identityPadding1 = 0u;
+            childIdentity.identityPadding2 = 0u;
+            if (!retainHeritableProgram(
+                programSlots, childIdentity.programIndex, childIdentity.programGeneration
+            )) {
+                atomic_store_explicit(
+                    &cellOccupancy[divisionTarget], 0u, memory_order_relaxed
+                );
+                return;
+            }
             cellIdentities[divisionTarget] = childIdentity;
             cellParentIDs[divisionTarget] = parentIdentity.persistentID;
             programInteractions[divisionTarget] = float4(0.0, 0.0, -1.0, 0.0);
@@ -4498,10 +5394,7 @@ kernel void divideAndReduceOrganismCells(
             float2 a = cell.position + membraneVertices[membraneBase + vertexIndex].position;
             float2 b = cell.position + membraneVertices[membraneBase + nextVertex].position;
             float2 midpoint = (a + b) * 0.5;
-            if (!isTissueBoundaryPoint(
-                cells, cellOccupancy, ownerCellHeads, ownerCellNext,
-                owner, index, midpoint
-            )) { continue; }
+            if (membraneVertices[membraneBase + vertexIndex].mechanics.w < 0.0) { continue; }
             float edgeLength = length(b - a);
             boundaryLength += edgeLength;
             boundaryCentroidTotal += midpoint * edgeLength;
@@ -4531,11 +5424,7 @@ kernel void divideAndReduceOrganismCells(
             uint nextVertex = (vertexIndex + 1u) % membraneVertexCount;
             float2 a = cell.position + membraneVertices[membraneBase + vertexIndex].position;
             float2 b = cell.position + membraneVertices[membraneBase + nextVertex].position;
-            float2 midpoint = (a + b) * 0.5;
-            if (!isTissueBoundaryPoint(
-                cells, cellOccupancy, ownerCellHeads, ownerCellNext,
-                owner, index, midpoint
-            )) { continue; }
+            if (membraneVertices[membraneBase + vertexIndex].mechanics.w < 0.0) { continue; }
             float edgeLength = length(b - a);
             float2 offsetA = a - boundaryCentroid;
             float2 offsetB = b - boundaryCentroid;
@@ -4587,11 +5476,7 @@ kernel void divideAndReduceOrganismCells(
             uint nextVertex = (vertexIndex + 1u) % membraneVertexCount;
             float2 a = cell.position + membraneVertices[membraneBase + vertexIndex].position;
             float2 b = cell.position + membraneVertices[membraneBase + nextVertex].position;
-            float2 midpoint = (a + b) * 0.5;
-            if (!isTissueBoundaryPoint(
-                cells, cellOccupancy, ownerCellHeads, ownerCellNext,
-                owner, index, midpoint
-            )) { continue; }
+            if (membraneVertices[membraneBase + vertexIndex].mechanics.w < 0.0) { continue; }
             float2 offsetA = a - boundaryCentroid;
             float2 offsetB = b - boundaryCentroid;
             float2 majorProjection = float2(
@@ -4740,7 +5625,7 @@ kernel void compactVisibleCells(
     if (owner >= maxAgentCount ||
         atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (observationZoom <= 5.0 || observationZoom >= 180.0) { return; }
+    if (observationZoom <= 0.35 || observationZoom >= 180.0) { return; }
     if (uniforms.trackedAgentID != 0xffffffffu &&
         uniforms.trackedAgentID != owner && observationZoom >= 34.0) { return; }
     uint target = atomic_fetch_add_explicit(&drawArguments[1], 1u, memory_order_relaxed);
@@ -4969,447 +5854,6 @@ inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStren
     return color;
 }
 
-struct AgentRasterData {
-    float4 position [[position]];
-    float2 local;
-    float2 worldUV;
-    float4 geneA;
-    float4 geneB;
-    float4 geneC;
-    float energy;
-    float biomass;
-    float age;
-    float speed;
-    float4 behavior;
-    float4 cellularPhysiology;
-    float4 tissueMorphology;
-    float4 tissueDynamics;
-    float4 tissueMechanics;
-    float4 tissueRegulation;
-    float4 tissueCausality;
-    float4 tissueSignaling;
-    float4 tissueSignalCausality;
-    float4 tissueGeometryAxes;
-    float4 tissueGeometryBoundary;
-    float4 tissueMotion;
-    float4 tissueTrophic;
-    float focus;
-    float tracked;
-    float trackingActive;
-};
-
-vertex AgentRasterData agentVertex(
-    device const AgentState* agents [[buffer(0)]],
-    device const uint* occupancy [[buffer(1)]],
-    constant SimulationUniforms& uniforms [[buffer(2)]],
-    device const CellAggregate* cellAggregates [[buffer(3)]],
-    uint vertexID [[vertex_id]],
-    uint instanceID [[instance_id]]
-) {
-    const float2 corners[6] = {
-        float2(-1.0, -1.0), float2(1.0, -1.0), float2(-1.0, 1.0),
-        float2(-1.0, 1.0), float2(1.0, -1.0), float2(1.0, 1.0)
-    };
-    AgentState agent = agents[instanceID];
-    CellAggregate cellularAggregate = cellAggregates[instanceID];
-    float2 corner = corners[vertexID];
-    float speed = length(agent.velocity);
-    float2 tissueAxis = length(cellularAggregate.geometryAxes.xy) > 0.0001
-        ? normalize(cellularAggregate.geometryAxes.xy) : float2(1.0, 0.0);
-    float2 heading = normalize(rotateTissueToWorld(tissueAxis, agent));
-    float2 lateral = float2(-heading.y, heading.x);
-    float majorHalfExtent = max(cellularAggregate.geometryAxes.z * 0.5 + 0.15, 0.18);
-    float minorHalfExtent = max(cellularAggregate.geometryAxes.w * 0.5 + 0.15, 0.18);
-    float worldUnit = cellWorldScale(uniforms) * 1.18;
-    float2 worldPosition = agent.position +
-        heading * corner.x * majorHalfExtent * worldUnit +
-        lateral * corner.y * minorHalfExtent * worldUnit;
-    float safeAspect = max(uniforms.viewportAspect, 0.001);
-    float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
-    float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
-        max(uniforms.cameraZoom, 0.000000001) / viewScale;
-
-    AgentRasterData output;
-    output.position = occupancy[instanceID] == 0u
-        ? float4(3.0, 3.0, 0.0, 1.0)
-        : float4(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0);
-    output.local = corner;
-    output.worldUV = fract(worldPosition + 1.0);
-    output.geneA = agent.geneA;
-    output.geneB = agent.geneB;
-    output.geneC = agent.geneC;
-    output.energy = agent.energy;
-    output.biomass = agent.biomass;
-    output.age = agent.age;
-    output.speed = speed;
-    output.behavior = float4(
-        dot(agent.behavior.xy, heading),
-        dot(agent.behavior.xy, lateral),
-        agent.behavior.zw
-    );
-    output.cellularPhysiology = cellularAggregate.physiology;
-    output.tissueMorphology = cellularAggregate.morphology;
-    output.tissueDynamics = cellularAggregate.dynamics;
-    output.tissueMechanics = cellularAggregate.mechanics;
-    output.tissueRegulation = cellularAggregate.regulation;
-    output.tissueCausality = cellularAggregate.causality;
-    output.tissueSignaling = cellularAggregate.signaling;
-    output.tissueSignalCausality = cellularAggregate.signalCausality;
-    output.tissueGeometryAxes = cellularAggregate.geometryAxes;
-    output.tissueGeometryBoundary = cellularAggregate.geometryBoundary;
-    output.tissueMotion = cellularAggregate.tissueMotion;
-    output.tissueTrophic = cellularAggregate.trophic;
-    output.focus = uniforms.trackedAgentID == instanceID ? 1.0 : 0.0;
-    output.tracked = uniforms.trackedAgentID == instanceID ? 1.0 : 0.0;
-    output.trackingActive = uniforms.trackedAgentID == 0xffffffffu ? 0.0 : 1.0;
-    return output;
-}
-
-fragment float4 agentFragment(
-    AgentRasterData input [[stage_in]],
-    texture2d_array<float, access::sample> state [[texture(0)]],
-    texture2d_array<float, access::sample> ecology [[texture(1)]],
-    texture2d<float, access::sample> quantum [[texture(2)]],
-    constant SimulationUniforms& uniforms [[buffer(0)]]
-) {
-    constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
-    constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::linear);
-    float2 p = input.local;
-    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    float organismEnvelope = 1.0 - smoothstep(14.0, 24.0, observationZoom);
-    if (organismEnvelope <= 0.001) { discard_fragment(); }
-    float scaleVisibility = 1.0 - smoothstep(18.0, 48.0, observationZoom);
-    float focusVisibility = input.trackingActive > 0.5 && input.focus > 0.5
-        ? max(scaleVisibility, 1.0 - smoothstep(64.0, 128.0, observationZoom))
-        : scaleVisibility;
-    if (focusVisibility <= 0.001) { discard_fragment(); }
-    float oscillatorCoherence = saturate(input.tissueDynamics.y);
-    float pulsePhase = mix(
-        float(uniforms.step) * (0.032 + input.geneA.x * 0.018) + input.geneB.w * 11.0,
-        input.tissueDynamics.w * 2.0 * M_PI_F,
-        oscillatorCoherence
-    );
-    float pulse = sin(pulsePhase);
-    float locomotorSpeed = saturate(input.speed * max(uniforms.worldScale, 1.0) * 16000.0);
-
-    float tissueOccupancy = saturate(input.cellularPhysiology.x / referenceTissueCellCount);
-    float tissueRadius = saturate(input.tissueMorphology.z / 0.86);
-    float tissueATP = saturate(input.cellularPhysiology.y);
-    float tissueIntegrity = saturate(input.cellularPhysiology.z);
-    float tissueStress = saturate(input.cellularPhysiology.w);
-    float proliferationProgram = saturate(input.tissueRegulation.x);
-    float adhesiveProgram = saturate(input.tissueRegulation.y);
-    float contractileProgram = saturate(input.tissueRegulation.z);
-    float repairProgram = saturate(input.tissueRegulation.w);
-    float mechanosensoryPositive = saturate(max(input.tissueCausality.x, 0.0) * 3200.0);
-    float mechanosensoryNegative = saturate(max(-input.tissueCausality.x, 0.0) * 3200.0);
-    float proliferativeDrive = saturate(input.tissueCausality.y * 900.0);
-    float contactSuppression = saturate(-input.tissueCausality.z * 900.0);
-    float repairEffect = saturate(input.tissueCausality.w * 5200.0);
-    float calciumSignal = saturate(input.tissueSignaling.x);
-    float erkSignal = saturate(input.tissueSignaling.y);
-    float signalRefractory = saturate(input.tissueSignaling.z);
-    float mechanicsCalciumCause = saturate(input.tissueSignalCausality.x * 48.0);
-    float calciumERKCause = saturate(input.tissueSignalCausality.y * 56.0);
-    float erkTractionCause = saturate(input.tissueSignalCausality.z * 12000.0);
-    float signalingCost = saturate(input.tissueSignalCausality.w * 18000.0);
-    float tissueElongation = saturate(input.tissueGeometryBoundary.z);
-    float exposedMembrane = saturate(
-        input.tissueGeometryBoundary.w / max(input.cellularPhysiology.x * 0.62, 0.62)
-    );
-    float cellGeneratedForce = saturate(input.tissueMotion.w * 9500.0);
-    float physicalContact = saturate(input.tissueTrophic.x * 520.0);
-    float trophicGain = saturate(input.tissueTrophic.y * 1600.0);
-    float trophicLoss = saturate(input.tissueTrophic.z * 1600.0);
-    float synchronizedContraction = input.tissueMechanics.y * oscillatorCoherence;
-    float abdomenLength = (0.66 + input.geneB.z * 0.15) * mix(0.82, 1.10, tissueRadius) *
-        mix(0.90, 1.12, contractileProgram) * mix(0.82, 1.24, tissueElongation);
-    float abdomenWidth = (0.36 + input.geneA.y * 0.16) * mix(0.72, 1.14, sqrt(tissueOccupancy)) *
-        mix(0.86, 1.12, adhesiveProgram) * mix(1.10, 0.78, tissueElongation);
-    abdomenLength *= 1.0 - synchronizedContraction * 0.030;
-    abdomenWidth *= 1.0 + synchronizedContraction * 0.045;
-    float2 abdomenP = float2((p.x + 0.08) / abdomenLength, p.y / abdomenWidth);
-    float abdomenDistance = length(abdomenP);
-    float abdomenAA = max(fwidth(abdomenDistance) * 1.15, 0.0025);
-    float abdomen = 1.0 - smoothstep(1.0 - abdomenAA, 1.0 + abdomenAA, abdomenDistance);
-
-    float2 headCenter = float2(0.56 + input.geneB.z * 0.04, 0.0);
-    float headRadius = (0.19 + input.geneC.w * 0.13 + input.geneA.z * 0.045) *
-        mix(0.84, 1.06, tissueIntegrity) * mix(0.91, 1.08, repairProgram);
-    float headDistance = length(p - headCenter) / headRadius;
-    float headAA = max(fwidth(headDistance) * 1.15, 0.003);
-    float head = 1.0 - smoothstep(1.0 - headAA, 1.0 + headAA, headDistance);
-
-    float tailWave = sin((p.x + 0.78) * (10.0 + input.geneB.z * 7.0) + pulsePhase * 1.35) *
-        (0.045 + input.geneB.z * 0.055) * (0.55 + locomotorSpeed * 0.45);
-    float tailRange = smoothstep(-1.02, -0.80, p.x) * (1.0 - smoothstep(-0.56, -0.45, p.x));
-    float tailDistance = abs(p.y - tailWave);
-    float tailWidth = 0.036 + input.geneB.z * 0.022;
-    float tailAA = max(fwidth(tailDistance) * 1.2, 0.0025);
-    float tail = (1.0 - smoothstep(tailWidth - tailAA, tailWidth + tailAA, tailDistance)) * tailRange;
-
-    float gait = pulse * (0.06 + locomotorSpeed * 0.12);
-    float appendageWidth = 0.018 + input.geneA.y * 0.024;
-    float appendageAA = max(fwidth(p.y) * 1.4, 0.003);
-    float appendageReach = (0.48 + input.geneA.z * 0.22) * mix(0.76, 1.06, tissueATP) *
-        mix(0.56, 1.18, contractileProgram);
-    const float appendageAnchors[3] = { -0.34, -0.07, 0.20 };
-    float limbs = 0.0;
-    float limbJoints = 0.0;
-    for (uint limbIndex = 0; limbIndex < 3; ++limbIndex) {
-        float anchorX = appendageAnchors[limbIndex];
-        float gaitSign = limbIndex == 1u ? -1.0 : 1.0;
-        float tipX = anchorX - 0.14 + gait * gaitSign;
-        float rootY = abdomenWidth * (0.70 - float(limbIndex) * 0.035);
-        float tipY = appendageReach * (0.82 + float(limbIndex) * 0.08);
-        float2 upperRoot = float2(anchorX, rootY);
-        float2 upperKnee = float2(anchorX - 0.08 + gait * 0.45, mix(rootY, tipY, 0.48));
-        float2 upperTip = float2(tipX, tipY);
-        float2 lowerRoot = float2(anchorX, -rootY);
-        float2 lowerKnee = float2(anchorX - 0.08 - gait * 0.55, -mix(rootY, tipY, 0.48));
-        float2 lowerTip = float2(tipX - gait * 1.4, -tipY);
-        float upperLimb = max(
-            taperedSegmentMask(p, upperRoot, upperKnee, appendageWidth, appendageWidth * 0.74, appendageAA),
-            taperedSegmentMask(p, upperKnee, upperTip, appendageWidth * 0.74, appendageWidth * 0.30, appendageAA)
-        );
-        float lowerLimb = max(
-            taperedSegmentMask(p, lowerRoot, lowerKnee, appendageWidth, appendageWidth * 0.74, appendageAA),
-            taperedSegmentMask(p, lowerKnee, lowerTip, appendageWidth * 0.74, appendageWidth * 0.30, appendageAA)
-        );
-        limbs = max(limbs, max(upperLimb, lowerLimb));
-        float jointRadius = appendageWidth * 1.18;
-        limbJoints = max(limbJoints, 1.0 - smoothstep(jointRadius - appendageAA,
-            jointRadius + appendageAA, min(length(p - upperKnee), length(p - lowerKnee))));
-    }
-    limbs *= 0.24 + input.geneA.z * 0.76;
-
-    float defenseInvestment = smoothstep(0.48, 0.90, input.geneA.w);
-    float spines = 0.0;
-    const float spineAnchors[3] = { -0.38, -0.12, 0.15 };
-    for (uint spineIndex = 0; spineIndex < 3; ++spineIndex) {
-        float spineX = spineAnchors[spineIndex];
-        float spineLength = 0.10 + input.geneA.w * 0.14;
-        float upperSpine = segmentDistance(p, float2(spineX, abdomenWidth * 0.80),
-            float2(spineX - 0.035, abdomenWidth + spineLength));
-        float lowerSpine = segmentDistance(p, float2(spineX, -abdomenWidth * 0.80),
-            float2(spineX - 0.035, -abdomenWidth - spineLength));
-        spines = max(spines, 1.0 - smoothstep(0.012, 0.012 + appendageAA,
-            min(upperSpine, lowerSpine)));
-    }
-    spines *= defenseInvestment;
-
-    float predatoryInvestment = smoothstep(0.08, 0.38, input.geneC.w);
-    float jawAperture = 0.10 + predatoryInvestment *
-        (0.08 + 0.035 * (0.5 + 0.5 * pulse) + input.behavior.z * 0.075);
-    float jawTop = 1.0 - smoothstep(0.020, 0.020 + appendageAA, segmentDistance(
-        p, headCenter + float2(headRadius * 0.48, 0.025), float2(0.98, jawAperture)
-    ));
-    float jawBottom = 1.0 - smoothstep(0.020, 0.020 + appendageAA, segmentDistance(
-        p, headCenter + float2(headRadius * 0.48, -0.025), float2(0.98, -jawAperture)
-    ));
-    float jaws = max(jawTop, jawBottom) * predatoryInvestment;
-
-    float body = max(max(abdomen, head), max(max(tail, limbs), max(spines, jaws)));
-    float trackedRing = input.tracked *
-        (1.0 - smoothstep(0.010, 0.026, abs(length(p) - 0.91))) *
-        smoothstep(0.34, 0.48, 0.5 + 0.5 * sin(atan2(p.y, p.x) * 12.0 - pulsePhase));
-    if (max(body, trackedRing) <= 0.001) { discard_fragment(); }
-
-    float abdomenEdge = abdomen * smoothstep(0.72, 0.97, abdomenDistance);
-    float headEdge = head * smoothstep(0.64, 0.95, headDistance);
-    float edge = max(max(abdomenEdge, headEdge), max(spines, jaws));
-    float interior = abdomen * (1.0 - smoothstep(0.38, 0.82, abdomenDistance));
-    float sensorA = 1.0 - smoothstep(0.022, 0.022 + appendageAA,
-        length(p - headCenter - float2(headRadius * 0.24, headRadius * 0.34)));
-    float sensorB = 1.0 - smoothstep(0.022, 0.022 + appendageAA,
-        length(p - headCenter - float2(headRadius * 0.24, -headRadius * 0.34)));
-    float sensor = max(sensorA, sensorB) * head;
-
-    float3 lineage = hsvToRGB(float3(input.geneB.w, 0.82, 0.62 + input.geneA.w * 0.24));
-    float3 defenseColor = float3(0.02, 0.95, 0.64);
-    float3 predatorColor = float3(1.0, 0.045, 0.012);
-    float3 rim = mix(defenseColor, predatorColor, saturate(input.geneC.w * 1.35));
-    float energy = saturate(input.energy / 1.25);
-    float bodyBulge = sqrt(saturate(1.0 - abdomenDistance * abdomenDistance));
-    float3 surfaceNormal = normalize(float3(abdomenP.x * 0.42, abdomenP.y * 0.62,
-        max(bodyBulge, 0.08)));
-    float3 lightDirection = normalize(float3(-0.42, 0.58, 0.74));
-    float diffuse = 0.34 + 0.66 * saturate(dot(surfaceNormal, lightDirection));
-    float specular = pow(saturate(dot(surfaceNormal, normalize(lightDirection + float3(0.0, 0.0, 1.0)))),
-        28.0 + input.geneA.y * 52.0) * abdomen;
-    float nicheTotal = max(input.geneC.x + input.geneC.y + input.geneC.z, 0.001);
-    float3 nicheColor = (input.geneC.x * float3(0.02, 0.78, 0.94) +
-        input.geneC.y * float3(1.0, 0.52, 0.025) +
-        input.geneC.z * float3(0.86, 0.08, 0.78)) / nicheTotal;
-    float3 bodyColor = mix(lineage, nicheColor, 0.16 + input.geneB.x * 0.20);
-    bodyColor = mix(bodyColor, float3(0.72, 0.055, 0.025), tissueStress * 0.42);
-    float voltagePolarity = saturate(input.tissueDynamics.x * 0.30 + 0.5);
-    float3 voltageColor = mix(float3(0.03, 0.42, 1.0), float3(1.0, 0.10, 0.025), voltagePolarity);
-    bodyColor = mix(bodyColor, voltageColor, oscillatorCoherence * 0.16);
-    float3 color = bodyColor * body * diffuse * (0.60 + input.biomass * 0.40);
-    color += rim * edge * (0.42 + input.geneA.w * 0.72) * (0.34 + tissueIntegrity * 0.66);
-    color += float3(1.0, 0.69, 0.045) * interior * energy * energy * 0.40;
-    color += float3(0.84, 0.98, 1.0) * sensor * 1.34;
-    color += predatorColor * jaws * (0.72 + input.geneC.w * 1.18);
-    color += float3(0.84, 0.96, 1.0) * specular * (0.14 + input.geneA.y * 0.24);
-    color += rim * limbJoints * (0.24 + input.geneA.z * 0.34);
-    color += float3(0.12, 0.92, 1.0) * trackedRing * 1.8;
-    float tractionPulse = (0.5 + 0.5 * sin(pulsePhase * 1.7 + p.x * 9.0)) *
-        max(limbs, tail) * cellGeneratedForce;
-    color += float3(0.04, 1.0, 0.54) * tractionPulse * 0.72;
-    color += float3(1.0, 0.06, 0.015) * edge * physicalContact * (0.45 + trophicLoss);
-    color += float3(1.0, 0.76, 0.03) * interior * trophicGain * 0.88;
-    color += float3(0.02, 0.92, 0.78) * edge * exposedMembrane * 0.16;
-    float pursuitStrength = length(input.behavior.xy);
-    float2 pursuitDirection = pursuitStrength > 0.0001
-        ? input.behavior.xy / pursuitStrength
-        : float2(1.0, 0.0);
-    float pursuitPath = 1.0 - smoothstep(0.012, 0.035, segmentDistance(
-        p, headCenter + pursuitDirection * headRadius * 0.42,
-        headCenter + pursuitDirection * (0.34 + pursuitStrength * 0.34)
-    ));
-    pursuitPath *= pursuitStrength * (1.0 - head) * predatoryInvestment;
-    color += mix(float3(1.0, 0.42, 0.02), predatorColor, input.behavior.z) * pursuitPath * 0.92;
-    color += float3(1.0, 0.08, 0.18) * edge * input.behavior.w *
-        (0.32 + 0.24 * sin(pulsePhase * 2.3));
-    float resonanceBand = (1.0 - smoothstep(0.025, 0.075,
-        abs(fract(abdomenDistance * 3.4 - input.tissueDynamics.w) - 0.5))) * abdomen;
-    color += voltageColor * resonanceBand * oscillatorCoherence *
-        (0.10 + synchronizedContraction * 0.34);
-
-    float organismReveal = smoothstep(4.0, 18.0, observationZoom);
-    float chemistryReveal = smoothstep(18.0, 58.0, observationZoom);
-    float quantumReveal = smoothstep(52.0, 160.0, observationZoom);
-    float latticeReveal = smoothstep(420.0, 980.0, observationZoom);
-    float tissueNoiseA = visualNoise(p * (16.0 + input.geneB.x * 9.0) + input.geneA.xy * 17.0);
-    float tissueNoiseB = visualNoise(p * 31.0 + input.geneA.zw * 29.0);
-    float channels = (1.0 - smoothstep(0.035, 0.14, abs(tissueNoiseA - tissueNoiseB))) * abdomen;
-    float segmentCount = 3.0 + floor(input.geneB.x * 5.0);
-    float segmentCoordinate = saturate((p.x + abdomenLength * 0.92) / (abdomenLength * 1.72));
-    float segmentPhase = fract(segmentCoordinate * segmentCount);
-    float segmentRidge = (1.0 - smoothstep(0.035, 0.12, min(segmentPhase, 1.0 - segmentPhase))) *
-        abdomen * smoothstep(0.42, 0.92, abdomenDistance);
-    float pigmentation = smoothstep(0.58 + input.geneA.x * 0.16, 0.94, tissueNoiseA * 0.62 + tissueNoiseB * 0.38) *
-        abdomen * (1.0 - abdomenEdge);
-    float nucleusRadius = 0.095 + input.geneB.x * 0.045;
-    float nucleus = (1.0 - smoothstep(nucleusRadius, nucleusRadius * 1.55,
-        length(p - float2(-0.12, (input.geneA.z - 0.5) * 0.12)))) * abdomen;
-    float reproductionReadiness = smoothstep(0.88, 1.06, input.energy) * smoothstep(560.0, 720.0, input.age);
-    float broodPulse = reproductionReadiness * (0.72 + 0.28 * sin(pulsePhase * 1.7)) * nucleus;
-    color += mix(float3(0.03, 0.58, 0.98), float3(0.98, 0.59, 0.04), input.geneA.x) *
-        channels * organismReveal * 0.22;
-    color += nicheColor * pigmentation * organismReveal * 0.34;
-    color += rim * segmentRidge * organismReveal * (0.18 + input.geneA.w * 0.28);
-    color += float3(0.98, 0.08, 0.74) * nucleus * organismReveal * 0.74;
-    color += float3(0.98, 0.92, 0.30) * broodPulse * organismReveal * 1.10;
-    float signalFront = (1.0 - smoothstep(0.030, 0.105,
-        abs(abdomenDistance - (0.24 + signalRefractory * 0.62)))) * abdomen;
-    float signalConduit = channels * (0.38 + 0.62 * calciumSignal);
-    color += float3(0.02, 0.88, 1.0) * signalFront * calciumSignal * organismReveal * 0.78;
-    color += float3(0.98, 0.08, 0.66) * signalConduit * erkSignal * organismReveal * 0.54;
-    color += float3(0.08, 1.0, 0.56) * max(limbs, tail) * erkTractionCause *
-        organismReveal * 0.44;
-
-    float4 localState = state.sample(fieldSampler, input.worldUV, 0);
-    float4 localEcology = ecology.sample(fieldSampler, input.worldUV, 0);
-    float potential = saturate((localState.x + localEcology.x * 0.8 + localState.y * 2.2 +
-        localState.w * 3.0 + localEcology.z * 1.4) * 0.55);
-    float bands = 1.0 - smoothstep(0.07, 0.19, abs(fract(potential * 31.0 + tissueNoiseA * 0.25) - 0.5));
-    float3 chemistryColor = mix(float3(0.02, 0.30, 0.82), float3(0.04, 1.0, 0.52), potential);
-    chemistryColor = mix(chemistryColor, float3(1.0, 0.12, 0.025), saturate(localEcology.z * 1.4));
-    chemistryColor *= 0.48 + bands * 0.52;
-    color = mix(color, chemistryColor, chemistryReveal * abdomen);
-    color += float3(0.68, 1.0, 0.88) * edge * chemistryReveal * 0.48;
-
-    if (quantumReveal > 0.001) {
-        float4 wave = quantum.sample(quantumSampler, input.worldUV);
-        float2 quantumTexel = 1.0 / float(quantumGridSize);
-        float4 waveRight = quantum.sample(quantumSampler, input.worldUV + float2(quantumTexel.x, 0.0));
-        float4 waveUp = quantum.sample(quantumSampler, input.worldUV + float2(0.0, quantumTexel.y));
-        float4 waveDiagonal = quantum.sample(quantumSampler, input.worldUV + quantumTexel);
-        float probabilityA = dot(wave.xy, wave.xy);
-        float probabilityB = dot(wave.zw, wave.zw);
-        float probability = probabilityA + probabilityB;
-        float phase = spinorPhase(wave);
-        float phaseRight = spinorPhase(waveRight);
-        float phaseUp = spinorPhase(waveUp);
-        float phaseDiagonal = spinorPhase(waveDiagonal);
-        float phaseWinding = abs(
-            wrappedPhaseDelta(phase, phaseRight) +
-            wrappedPhaseDelta(phaseRight, phaseDiagonal) +
-            wrappedPhaseDelta(phaseDiagonal, phaseUp) +
-            wrappedPhaseDelta(phaseUp, phase)
-        );
-        float density = 1.0 - exp(-probability * 285000.0);
-        float polarization = (probabilityA - probabilityB) / max(probability, 0.0000000001);
-        float2 current = float2(
-            complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
-            complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
-        );
-        float currentMagnitude = length(current);
-        float currentStrength = saturate(currentMagnitude * 950000.0);
-        float2 currentDirection = current / max(currentMagnitude, 0.0000000001);
-        float phaseContour = 0.60 + 0.40 * cos(phase * 28.0 * M_PI_F);
-        float flowCoordinate = fract(dot(input.worldUV * float(quantumGridSize), currentDirection) * 0.22 -
-            float(uniforms.step) * 0.012);
-        float currentPulse = 1.0 - smoothstep(0.035, 0.13, abs(flowCoordinate - 0.5));
-        float3 spinColor = mix(float3(1.0, 0.22, 0.025), float3(0.02, 0.82, 1.0),
-            polarization * 0.5 + 0.5);
-        float3 quantumColor = mix(quantumPhaseColor(phase), spinColor, 0.38) *
-            density * (0.52 + phaseContour * 0.48);
-        quantumColor += float3(0.82, 0.97, 1.0) * currentPulse * currentStrength * density * 0.68;
-        float logDensity = log2(1.0 + probability * 1200000.0);
-        float densityIsoline = 1.0 - smoothstep(0.025, 0.095,
-            abs(fract(logDensity * 2.4) - 0.5));
-        float vortexCore = smoothstep(0.55, 0.92, phaseWinding) *
-            (1.0 - smoothstep(0.025, 0.28, density));
-        quantumColor += float3(0.38, 0.92, 1.0) * densityIsoline * density * 0.18;
-        quantumColor += float3(1.0, 0.08, 0.72) * vortexCore * 1.65;
-
-        float3 spinorTile = spinorCellVisualization(input.worldUV, wave, currentStrength);
-        quantumColor = mix(quantumColor, spinorTile, latticeReveal);
-        color = mix(color, quantumColor, quantumReveal * abdomen);
-        color += rim * edge * quantumReveal * (0.18 + currentStrength * 0.52);
-    }
-
-    if (uniforms.displayMode == 1) {
-        color = mix(color, float3(localState.x, localEcology.x, localEcology.y) * body * 1.3, 0.72);
-    } else if (uniforms.displayMode == 2) {
-        color = input.geneA.xyz * body * 0.82 + lineage * edge;
-    } else if (uniforms.displayMode == 3) {
-        float enzymes = max(input.geneC.x + input.geneC.y + input.geneC.z, 0.001);
-        color = input.geneC.xyz / enzymes * body * 1.2 + predatorColor * input.geneC.w * head;
-    } else if (uniforms.displayMode == 4) {
-        float3 regulatoryColor = proliferationProgram * float3(0.98, 0.82, 0.08) +
-            adhesiveProgram * float3(0.08, 0.90, 0.66) +
-            contractileProgram * float3(0.96, 0.16, 0.46) +
-            repairProgram * float3(0.18, 0.50, 1.0);
-        regulatoryColor /= max(
-            proliferationProgram + adhesiveProgram + contractileProgram + repairProgram, 0.001
-        );
-        color = regulatoryColor * body * (0.48 + tissueATP * 0.48) +
-            float3(0.94, 0.98, 1.0) * edge * tissueIntegrity * 0.34;
-    } else if (uniforms.displayMode == 5) {
-        float causalBand = (1.0 - smoothstep(0.035, 0.11,
-            abs(fract((p.x + 1.1) * 3.2 - pulsePhase * 0.045) - 0.5))) * abdomen;
-        float3 mechanosensoryColor = float3(0.02, 0.86, 1.0) * mechanosensoryPositive +
-            float3(0.30, 0.20, 1.0) * mechanosensoryNegative;
-        color = float3(0.008, 0.012, 0.018) * body;
-        color += mechanosensoryColor * edge * (0.42 + causalBand * 0.70);
-        color += float3(1.0, 0.76, 0.04) * proliferativeDrive * nucleus * 1.25;
-        color += float3(0.02, 0.94, 0.62) * contactSuppression * segmentRidge * 1.10;
-        color += float3(0.12, 0.46, 1.0) * repairEffect * edge * 1.20;
-        color += float3(0.02, 0.88, 1.0) * mechanicsCalciumCause * signalFront * 1.55;
-        color += float3(0.98, 0.08, 0.66) * calciumERKCause * signalConduit * 1.40;
-        color += float3(0.08, 1.0, 0.56) * erkTractionCause * max(limbs, tail) * 1.55;
-        color += float3(1.0, 0.42, 0.02) * signalingCost *
-            (0.35 + tissueNoiseA * 0.65) * interior * 0.32;
-    }
-    color += float3(0.12, 0.92, 1.0) * trackedRing * 1.8;
-    float alpha = saturate(max(body, trackedRing)) * focusVisibility * organismEnvelope;
-    return float4(max(color, 0.0) * focusVisibility * 0.84, alpha);
-}
-
 struct CellRasterData {
     float4 position [[position]];
     float2 local;
@@ -5428,11 +5872,13 @@ struct CellRasterData {
     float4 tissueGeometry;
     float4 tissueForce;
     float4 programEcology;
+    float4 construction;
     float lineageHue;
     float ownerEnergy;
     float visibility;
     float tracked;
     float radialCoordinate;
+    float edgeExposure;
 };
 
 inline float2 smoothMembranePosition(
@@ -5468,6 +5914,7 @@ vertex CellRasterData cellVertex(
     device const CellIdentity* cellIdentities [[buffer(7)]],
     device const HeritableProgram* heritablePrograms [[buffer(8)]],
     device const float4* programInteractions [[buffer(9)]],
+    device const ProgramSlotState* programSlots [[buffer(10)]],
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]]
 ) {
@@ -5476,7 +5923,7 @@ vertex CellRasterData cellVertex(
     AgentState agent = agents[owner];
     CellState cell = cells[cellIndex];
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    float scaleVisibility = smoothstep(5.0, 11.0, observationZoom) *
+    float scaleVisibility = smoothstep(0.35, 1.10, observationZoom) *
         (1.0 - smoothstep(112.0, 180.0, observationZoom));
     float trackingVisibility = uniforms.trackedAgentID == 0xffffffffu ||
         uniforms.trackedAgentID == owner ? 1.0 : 1.0 - smoothstep(16.0, 34.0, observationZoom);
@@ -5526,13 +5973,32 @@ vertex CellRasterData cellVertex(
     output.tissueForce = cell.tissueForce;
     output.programEcology = programInteractions[cellIndex];
     uint programIndex = cellIdentities[cellIndex].programIndex;
-    output.lineageHue = programIndex < maxHeritableProgramCount &&
+    AgentState cellProgram = agentWithCellProgram(
+        agent, programIndex, heritablePrograms
+    );
+    float constructionExposure = saturate(cell.tissueGeometry.z) *
+        saturate(cell.physiology.x);
+    output.construction = constructionExposure * float4(
+        cell.regulationB.y * cell.regulationB.w *
+            saturate((cellProgram.geneC.w - 0.025) * 2.2),
+        cell.regulation.y * cell.regulation.w * cellProgram.geneA.w,
+        cell.regulationB.x * cell.regulationB.y *
+            (0.35 + saturate(cell.resonance.z * 5.0) * 0.65),
+        cell.regulationB.w * cell.signaling.y
+    );
+    output.lineageHue = programSlotMatches(
+        programSlots, programIndex, cellIdentities[cellIndex].programGeneration
+    ) &&
         programIndex != agent.dominantProgramIndex
         ? heritablePrograms[programIndex].geneB.w : agent.geneB.w;
     output.ownerEnergy = agent.energy;
     output.visibility = visibility;
     output.tracked = uniforms.trackedAgentID == owner ? 1.0 : 0.0;
     output.radialCoordinate = triangleVertex == 0u ? 0.0 : 1.0;
+    uint physicalEdge = triangle / membraneRenderSubdivision;
+    output.edgeExposure = saturate(
+        membraneVertices[cellIndex * membraneVertexCount + physicalEdge].mechanics.w
+    );
     return output;
 }
 
@@ -5563,12 +6029,11 @@ fragment float4 cellFragment(
     float2 nucleusPosition = float2((input.signals.x - input.signals.y) * 0.12, 0.0);
     float nucleus = (1.0 - smoothstep(nucleusRadius, nucleusRadius + aa * 2.0,
         length(p - nucleusPosition))) * body;
-    float exposure = saturate(input.tissueGeometry.z);
+    float exposure = saturate(input.edgeExposure);
     float2 boundaryNormal = length(input.tissueGeometry.xy) > 0.0001
         ? normalize(input.tissueGeometry.xy) : morphologyAxis;
     float2 surfaceDirection = length(p) > 0.001 ? normalize(p) : boundaryNormal;
-    float exposedArc = smoothstep(0.12, 0.82, dot(surfaceDirection, boundaryNormal)) *
-        membrane * exposure;
+    float exposedArc = membrane * exposure;
     float contactDamage = saturate(input.tissueForce.z * 1800.0);
     float trophicGain = saturate(max(input.tissueForce.w, 0.0) * 1800.0);
     float trophicLoss = saturate(max(-input.tissueForce.w, 0.0) * 1800.0);
@@ -5599,6 +6064,10 @@ fragment float4 cellFragment(
         coarseColor += float3(0.98, 0.08, 0.66) * coarseERK * nucleus * 0.74;
         coarseColor += float3(0.02, 1.0, 0.58) * tractionTrack * 0.68;
         coarseColor += float3(1.0, 0.08, 0.015) * exposedArc * contactDamage * 1.16;
+        coarseColor += float3(1.0, 0.045, 0.01) * exposedArc * input.construction.x * 0.94;
+        coarseColor += float3(0.08, 0.92, 0.62) * exposedArc * input.construction.y * 0.72;
+        coarseColor += float3(0.04, 0.78, 1.0) * exposedArc * input.construction.z * 0.88;
+        coarseColor += float3(0.12, 1.0, 0.42) * exposedArc * input.construction.w * 0.74;
         coarseColor += float3(1.0, 0.76, 0.02) * cytoplasm * trophicGain * 0.82;
         coarseColor += float3(0.02, 0.96, 0.82) * membrane * programExchange * 0.82;
         coarseColor += float3(1.0, 0.04, 0.12) * membrane * programRejection * 0.94;
@@ -5693,6 +6162,10 @@ fragment float4 cellFragment(
     color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
     color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.82;
     color += float3(0.02, 0.94, 0.78) * exposedArc * (0.12 + exposure * 0.22);
+    color += float3(1.0, 0.045, 0.01) * exposedArc * input.construction.x * 0.90;
+    color += float3(0.08, 0.92, 0.62) * exposedArc * input.construction.y * 0.72;
+    color += float3(0.04, 0.78, 1.0) * exposedArc * input.construction.z * 0.86;
+    color += float3(0.12, 1.0, 0.42) * exposedArc * input.construction.w * 0.70;
     color += float3(1.0, 0.055, 0.012) * exposedArc * contactDamage * (0.72 + trophicLoss);
     color += float3(1.0, 0.74, 0.02) * cytoplasm * trophicGain * 0.76;
     float contractionRing = (1.0 - smoothstep(0.020, 0.060,
