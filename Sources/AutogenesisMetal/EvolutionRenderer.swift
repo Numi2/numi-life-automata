@@ -102,7 +102,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 10,
+            schemaVersion: 11,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -125,6 +125,8 @@ extension EvolutionRenderer {
         var selectionIntervals: [MultilevelSelectionInterval] = []
         var individualityObserver = IndividualityObserverEngine()
         var latestObserverResult: IndividualityObserverResult?
+        var componentMorphologyArchive: [UInt32: MorphologyDescriptor] = [:]
+        var componentMorphologyOrder: [UInt32] = []
 
         while totalSteps < configuration.steps {
             let remaining = configuration.steps - totalSteps
@@ -216,7 +218,9 @@ extension EvolutionRenderer {
                     previousProgramRepresentations: &previousProgramRepresentations,
                     selectionIntervals: &selectionIntervals,
                     individualityObserver: &individualityObserver,
-                    latestObserverResult: &latestObserverResult
+                    latestObserverResult: &latestObserverResult,
+                    componentMorphologyArchive: &componentMorphologyArchive,
+                    componentMorphologyOrder: &componentMorphologyOrder
                 )
                 if let latestSample {
                     observationSamples.append(latestSample)
@@ -269,7 +273,9 @@ extension EvolutionRenderer {
                         previousProgramRepresentations: &previousProgramRepresentations,
                         selectionIntervals: &selectionIntervals,
                         individualityObserver: &individualityObserver,
-                        latestObserverResult: &latestObserverResult
+                        latestObserverResult: &latestObserverResult,
+                        componentMorphologyArchive: &componentMorphologyArchive,
+                        componentMorphologyOrder: &componentMorphologyOrder
                     )
                     if let latestSample,
                        observationSamples.last?.step != latestSample.step {
@@ -478,9 +484,12 @@ extension EvolutionRenderer {
                 ? "Invariant or energy-conservation failure invalidates collective inference."
                 : collectiveSupport
                     ? "Between-component Price covariance and parent-descendant collective resemblance have positive 95% bootstrap intervals."
-                    : "Collective support requires at least eight transmitted parent components plus positive 95% intervals for between-component covariance and collective resemblance."
+                    : "Collective support requires at least eight transmitted parent components plus positive 95% intervals for between-component covariance and collective resemblance.",
+            timeBasis: .accumulatedHistory
         )
         return IndividualityEvidence(
+            endogenousPredictability: observerResult?.endogenousPredictabilityClaim ??
+                IndividualityEvidence.inconclusive.endogenousPredictability,
             mechanochemicalAutonomy: observerResult?.autonomyClaim ??
                 IndividualityEvidence.inconclusive.mechanochemicalAutonomy,
             physicalDescent: evolutionary.physicalDescent,
@@ -509,7 +518,9 @@ extension EvolutionRenderer {
         previousProgramRepresentations: inout [ProgramRepresentation],
         selectionIntervals: inout [MultilevelSelectionInterval],
         individualityObserver: inout IndividualityObserverEngine,
-        latestObserverResult: inout IndividualityObserverResult?
+        latestObserverResult: inout IndividualityObserverResult?,
+        componentMorphologyArchive: inout [UInt32: MorphologyDescriptor],
+        componentMorphologyOrder: inout [UInt32]
     ) throws -> ExperimentSample {
         let counters = readback.identityCounters.contents().bindMemory(
             to: UInt32.self,
@@ -711,11 +722,33 @@ extension EvolutionRenderer {
             }
             return gains.contains(0) ? 0 : pow(gains.reduce(1, *), 0.25)
         }
+        func coordinatedTractionStrain(_ aggregate: CellAggregate) -> Float {
+            let cellCount = max(aggregate.physiology.x, 1)
+            let forceCoherence = min(max(
+                simd_length(SIMD2<Float>(aggregate.tissueMotion.x, aggregate.tissueMotion.y)) /
+                    max(aggregate.tissueMotion.w * cellCount, 0.0000001),
+                0
+            ), 1)
+            return max(aggregate.mechanics.x, 0) * forceCoherence
+        }
+        func morphologyDescriptor(owner: Int) -> MorphologyDescriptor {
+            let aggregate = aggregates[owner]
+            return MorphologyDescriptor(values: [
+                Double(aggregate.physiology.x / 24),
+                Double(aggregate.morphology.z / 0.86),
+                Double((aggregate.shape.z - 1) / 2.5),
+                Double(aggregate.morphology.w),
+                Double((aggregate.resonance.z - 0.0008) / 0.0082),
+                Double(aggregate.resonance.y * 18),
+                Double(aggregate.dynamics.y),
+                Double(aggregate.mechanics.y)
+            ])
+        }
         func collectiveTrait(owner: Int) -> Double {
             let aggregate = aggregates[owner]
             return pow(Double(max(
                 aggregate.signalCausality.x * aggregate.signalCausality.y *
-                aggregate.signalCausality.z * aggregate.tissueMotion.w,
+                aggregate.signalCausality.z * coordinatedTractionStrain(aggregate),
                 0
             )), 0.25)
         }
@@ -724,6 +757,20 @@ extension EvolutionRenderer {
         observerCandidates.reserveCapacity(living.count + livingCellCount)
         let componentAutonomyVectors = living.map { owner -> AutonomyVector in
             let aggregate = aggregates[owner]
+            let currentMorphology = morphologyDescriptor(owner: owner)
+            let parentResemblance: Double
+            if agents[owner].parentBirthID != .max,
+               let parentMorphology = componentMorphologyArchive[
+                agents[owner].parentBirthID
+               ] {
+                let morphologyResemblance = exp(
+                    -4 * currentMorphology.distance(to: parentMorphology)
+                )
+                let programResemblance = exp(-Double(max(agents[owner].mutationDistance, 0)))
+                parentResemblance = sqrt(morphologyResemblance * programResemblance)
+            } else {
+                parentResemblance = 0
+            }
             let observation = ComponentObservation(
                     step: totalSteps,
                     candidateID: UInt64(agents[owner].birthID),
@@ -739,7 +786,7 @@ extension EvolutionRenderer {
                     strainToCalcium: Double(max(aggregate.signalCausality.x, 0)),
                     calciumToERK: Double(max(aggregate.signalCausality.y, 0)),
                     erkToTraction: Double(max(aggregate.signalCausality.z, 0)),
-                    tractionToStrain: Double(max(aggregate.tissueMotion.w, 0)),
+                    tractionToStrain: Double(coordinatedTractionStrain(aggregate)),
                     junctionTransmission: Double(max(aggregate.development.w, 0)),
                     atpSharing: Double(max(aggregate.programEcology.x, 0)),
                     rejection: Double(max(aggregate.programEcology.y, 0)),
@@ -747,7 +794,7 @@ extension EvolutionRenderer {
                         aggregate.programEcology.w, 0
                     )),
                     descendantRepresentation: agents[owner].generation > 0 ? 1 : 0,
-                    parentResemblance: exp(-Double(max(agents[owner].mutationDistance, 0)))
+                    parentResemblance: parentResemblance
                 )
             observerCandidates.append(IndividualityCandidate(
                 observation: observation,
@@ -757,7 +804,8 @@ extension EvolutionRenderer {
                 environmentalDependence: Double(
                     abs(aggregate.environment.x) + abs(aggregate.environment.y) +
                     (1 - min(max(aggregate.environment.w, 0), 1))
-                )
+                ),
+                parentComponentID: nil
             ))
             return AutonomyVector.measured(
                 from: observation,
@@ -811,7 +859,8 @@ extension EvolutionRenderer {
                 environmentalDependence: Double(
                     abs(cell.environment.x) + abs(cell.environment.y) +
                     (1 - min(max(cell.environment.w, 0), 1))
-                )
+                ),
+                parentComponentID: UInt64(agents[owner].birthID)
             ))
             cellAutonomyVectors.append(AutonomyVector.measured(
                 from: cellObservation,
@@ -847,6 +896,21 @@ extension EvolutionRenderer {
             resamples: 48
         ) {
             latestObserverResult = observerResult
+        }
+        for owner in living {
+            let birthID = agents[owner].birthID
+            if componentMorphologyArchive[birthID] == nil {
+                componentMorphologyOrder.append(birthID)
+            }
+            componentMorphologyArchive[birthID] = morphologyDescriptor(owner: owner)
+        }
+        let morphologyArchiveCapacity = 8_192
+        if componentMorphologyOrder.count > morphologyArchiveCapacity {
+            let excess = componentMorphologyOrder.count - morphologyArchiveCapacity
+            for birthID in componentMorphologyOrder.prefix(excess) {
+                componentMorphologyArchive.removeValue(forKey: birthID)
+            }
+            componentMorphologyOrder.removeFirst(excess)
         }
         let currentProgramRepresentations = representationCounts.map { key, value in
             ProgramRepresentation(
@@ -1024,7 +1088,7 @@ extension EvolutionRenderer {
             },
             meanMechanochemicalClosure: cellWeightedMean {
                 pow(max($0.signalCausality.x * $0.signalCausality.y *
-                    $0.signalCausality.z * $0.tissueMotion.w, 0), 0.25)
+                    $0.signalCausality.z * coordinatedTractionStrain($0), 0), 0.25)
             },
             meanProgramCooperation: cellWeightedMean {
                 max($0.programEcology.x, 0) + max($0.programEcology.y, 0)

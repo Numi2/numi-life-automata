@@ -2940,7 +2940,10 @@ kernel void collectAgentObservations(
             aggregate.energetics.z + aggregate.energetics.w, 0.0000001);
     float mechanochemicalClosure = pow(max(
         aggregate.signalCausality.x * aggregate.signalCausality.y *
-        aggregate.signalCausality.z * aggregate.tissueMotion.w, 0.0
+        aggregate.signalCausality.z * aggregate.mechanics.x *
+        saturate(length(aggregate.tissueMotion.xy) /
+            max(aggregate.tissueMotion.w * max(aggregate.physiology.x, 1.0), 0.0000001)),
+        0.0
     ), 0.25);
     observation.padding = float3(
         saturate(energeticClosure),
@@ -2963,7 +2966,10 @@ kernel void collectAgentObservations(
         max(aggregate.signalCausality.x, 0.0),
         max(aggregate.signalCausality.y, 0.0),
         max(aggregate.signalCausality.z, 0.0),
-        max(aggregate.tissueMotion.w, 0.0)
+        max(aggregate.mechanics.x, 0.0) * saturate(
+            length(aggregate.tissueMotion.xy) /
+                max(aggregate.tissueMotion.w * max(aggregate.physiology.x, 1.0), 0.0000001)
+        )
     );
     observation.social = float4(
         max(aggregate.programEcology.x, 0.0),
@@ -3260,9 +3266,14 @@ kernel void evolveAgents(
         meanPredatoryConstruction * 0.28;
     float2 localForce = cellAggregate.tissueMotion.xy;
     float2 worldForce = rotateTissueToWorld(localForce, agent) * cellWorldScale(uniforms);
+    float forceCoherence = saturate(
+        length(localForce) /
+            max(cellAggregate.tissueMotion.w * cellCount, 0.0000001)
+    );
     float translationalMobility = mix(4.8, 2.2, saturate(cellCount / referenceTissueCellCount)) *
         mix(0.72, 1.22, cellAggregate.regulationB.w) /
         (1.0 + meanArmorConstruction * 0.90 + meanPredatoryConstruction * 0.24);
+    translationalMobility *= mix(0.10, 1.0, forceCoherence);
     agent.velocity = agent.velocity * 0.91 +
         worldForce * (translationalMobility / tissueMass) * uniforms.transportScale;
     agent.velocity *= mix(1.0, 0.62, saturate(cellAggregate.environment.y));
@@ -4230,6 +4241,7 @@ kernel void evolveOrganismCells(
     float neighborCalcium = 0.0;
     float neighborERK = 0.0;
     float2 erkGradient = float2(0.0);
+    float sharingContactWeight = 0.0;
     float mixedContactWeight = 0.0;
     float atpSharingPotential = 0.0;
     float incomingRejectionTotal = 0.0;
@@ -4277,6 +4289,23 @@ kernel void evolveOrganismCells(
                         difference.y * development.morphogenTransport.y;
                     morphogenGradient += direction * receptorDifference * conductance;
                     junctionConductance += conductance;
+                    uint transportProgramIndex = cellIdentities[otherIndex].programIndex;
+                    AgentState transportProgram = agent;
+                    float transportCompatibility = 1.0;
+                    if (transportProgramIndex < maxHeritableProgramCount &&
+                        transportProgramIndex != programIndex) {
+                        transportProgram = agentWithCellProgram(
+                            agents[owner], transportProgramIndex, heritablePrograms
+                        );
+                        transportCompatibility = recognitionCompatibility(
+                            agent, transportProgram
+                        );
+                    }
+                    float sharingGain = min(agent.social.y, transportProgram.social.y) *
+                        transportCompatibility;
+                    atpSharingPotential +=
+                        (other.physiology.x - cell.physiology.x) * sharingGain * conductance;
+                    sharingContactWeight += conductance;
                 }
             }
             neighborVoltage += other.dynamics.x * weight;
@@ -4300,9 +4329,6 @@ kernel void evolveOrganismCells(
                 );
                 float compatibility = recognitionCompatibility(agent, otherProgram);
                 float incompatibility = 1.0 - compatibility;
-                float sharingGain = min(agent.social.y, otherProgram.social.y) * compatibility;
-                atpSharingPotential +=
-                    (other.physiology.x - cell.physiology.x) * sharingGain * weight;
                 incomingRejectionTotal += otherProgram.social.z * incompatibility * weight;
                 outgoingRejectionTotal += agent.social.z * incompatibility * weight;
                 recognitionCompatibilityTotal += compatibility * weight;
@@ -4318,8 +4344,8 @@ kernel void evolveOrganismCells(
     }
 
     float inverseMixedContactWeight = 1.0 / max(mixedContactWeight, 0.0001);
-    float atpSharingFlux = mixedContactWeight > 0.0001
-        ? clamp(atpSharingPotential * inverseMixedContactWeight * 0.00024, -0.0012, 0.0012)
+    float atpSharingFlux = sharingContactWeight > 0.0001
+        ? clamp(atpSharingPotential / sharingContactWeight * 0.00024, -0.0012, 0.0012)
         : 0.0;
     float incomingRejection = mixedContactWeight > 0.0001
         ? saturate(incomingRejectionTotal * inverseMixedContactWeight) : 0.0;
@@ -4518,7 +4544,7 @@ kernel void evolveOrganismCells(
         localState.x * cell.phenotype.z + localEcology.x * cell.phenotype.w +
         localEcology.y * agent.geneC.z * 0.34
     );
-    uptakePotential *= mix(0.48, 1.08, membraneExposure);
+    uptakePotential *= mix(0.12, 1.12, pow(membraneExposure, 0.70));
     float metabolicReadiness = smoothstep(0.12, 0.46, cell.physiology.x);
     float maintenance = 0.000055 * (
         0.62 + cell.physiology.y * 0.48 + cell.phenotype.y * 0.28
@@ -4586,7 +4612,8 @@ kernel void evolveOrganismCells(
     float fateTarget = saturate(
         0.5 + receptorBalance * 0.42 +
             (contractileProgram - adhesiveProgram) * 0.13 +
-            (motilityProgram - repairProgram) * 0.07
+            (motilityProgram - repairProgram) * 0.07 +
+            (membraneExposure - 0.5) * 0.18
     );
     float fateMemory = mix(
         saturate(cell.development.z), fateTarget,
@@ -4606,6 +4633,7 @@ kernel void evolveOrganismCells(
     float morphogenWork =
         (morphogenProduction.x + morphogenProduction.y) * 0.018 +
         (abs(morphogenDiffusion.x) + abs(morphogenDiffusion.y)) * 0.006;
+    float junctionTransportWork = abs(atpSharingFlux) * 0.040;
     float allocationContrast = saturate(abs(receptorBalance) * 0.82 + abs(fateMemory - 0.5));
     float predatoryConstruction = membraneExposure * secretionProgram * motilityProgram *
         saturate((agent.geneC.w - 0.025) * 2.2) * saturate(cell.physiology.x) *
@@ -4627,11 +4655,11 @@ kernel void evolveOrganismCells(
     uint energyTileBase = (coordinate.y * uniforms.width + coordinate.x) *
         energyExchangeChannelCount;
     float requestedResourceA = localState.x * cell.phenotype.z * 0.00125 *
-        uptakeGain * mix(0.48, 1.08, membraneExposure);
+        uptakeGain * mix(0.12, 1.12, pow(membraneExposure, 0.70));
     float requestedResourceB = localEcology.x * cell.phenotype.w * 0.00125 *
-        uptakeGain * mix(0.48, 1.08, membraneExposure);
+        uptakeGain * mix(0.12, 1.12, pow(membraneExposure, 0.70));
     float requestedDetritus = localEcology.y * agent.geneC.z * 0.00043 *
-        uptakeGain * mix(0.48, 1.08, membraneExposure);
+        uptakeGain * mix(0.12, 1.12, pow(membraneExposure, 0.70));
     float consumedResourceA = claimSubstrate(
         &cellEnergyExchange[energyTileBase], requestedResourceA
     );
@@ -4672,7 +4700,8 @@ kernel void evolveOrganismCells(
         smoothstep(0.16, 0.38, cell.physiology.x);
     float activeWork = (contractility * (0.000055 + fieldStrain * 0.000070) +
         abs(voltageDerivative) * 0.000070 + signalingCost + frequencyWork +
-        constructionWork + propagulePreparation * 0.000060 + morphogenWork) *
+        constructionWork + propagulePreparation * 0.000060 + morphogenWork +
+        junctionTransportWork) *
         mix(0.16, 1.0, metabolicReadiness);
     float dissipation = externalStress * 0.00032 + fieldWaveSpeed * 0.000035 +
         dot(cell.velocity, cell.velocity) * 2.8 + barrierLoad *
@@ -4829,6 +4858,10 @@ kernel void evolveOrganismCells(
             mix(0.34, 1.0, metabolicReadiness) +
         developmentalPolarity * (0.16 + allocationContrast * 0.18) *
             mix(0.38, 1.0, metabolicReadiness);
+    if (length(erkGradient) > 0.0001) {
+        tractionDirection += normalize(erkGradient) * repairProgram *
+            saturate(junctionConductance) * (0.22 + (1.0 - membraneIntegrity) * 0.78);
+    }
     tractionDirection = length(tractionDirection) > 0.0001
         ? normalize(tractionDirection)
         : boundaryNormal;
@@ -5796,6 +5829,10 @@ kernel void applyCellContactEffects(
     cell.physiology.y = clamp(cell.physiology.y + trophic * 0.30, 0.16, 1.12);
     cell.physiology.w = clamp(cell.physiology.w - damage, 0.0, 1.0);
     cell.signals.z = saturate(cell.signals.z + damage * 7.5 + max(-trophic, 0.0) * 4.0);
+    float woundSignal = saturate(damage * 12.0);
+    cell.signaling.x = saturate(cell.signaling.x + woundSignal * 0.48);
+    cell.signaling.y = saturate(cell.signaling.y + woundSignal * 0.14);
+    cell.dynamics.x = clamp(cell.dynamics.x + woundSignal * 0.16, -1.8, 1.8);
     cell.tissueForce.xy += localImpulse;
     cell.tissueForce.z = length(localImpulse) + damage;
     cell.tissueForce.w = trophic;
@@ -6519,10 +6556,14 @@ kernel void divideAndReduceOrganismCells(
                 cellIdentities, divisionParent, divisionTarget
             );
             float daughterAdhesion = min(parent.phenotype.x, child.phenotype.x);
+            float daughterRepair = min(parent.regulation.w, child.regulation.w);
+            float daughterIntegrity = min(parent.physiology.w, child.physiology.w);
+            float cytokineticTension = max(parent.membrane.w, child.membrane.w);
+            float tensionGate = 1.0 / (1.0 + max(cytokineticTension, 0.0) * 6.0);
             float midbodyStrength = clamp(
-                0.46 + daughterAdhesion * 0.34 +
-                    min(parent.physiology.w, child.physiology.w) * 0.20,
-                0.46, 0.94
+                (0.32 + daughterAdhesion * 0.28 + daughterRepair * 0.20 +
+                    daughterIntegrity * 0.20) * tensionGate,
+                0.28, 0.94
             );
             uint midbodyJunction = findOrCreateCellJunction(
                 cellJunctions, cytokineticPairKey, cytokineticFingerprint,
@@ -6530,7 +6571,9 @@ kernel void divideAndReduceOrganismCells(
             );
             if (midbodyJunction < cellJunctionCapacity) {
                 cellJunctions[midbodyJunction].flags = 3u;
-                cellJunctions[midbodyJunction].age = 8.0;
+                cellJunctions[midbodyJunction].age = mix(
+                    5.0, 14.0, daughterRepair * daughterIntegrity
+                );
             }
             uint ownerHead = atomic_load_explicit(
                 &ownerCellHeads[owner], memory_order_relaxed
@@ -8289,9 +8332,9 @@ fragment float4 worldSurfaceFragment(
     float geologicalMechanicalDrive = environmentalMechanicalAmplitude(geology);
     float grain = visualNoise(uv * float2(uniforms.width, uniforms.height) * 0.84 + float2(11.0, 3.0));
     float nutrient = nutrientBed * mix(0.12, 1.0, smoothstep(0.58, 0.88, grain)) *
-        mix(0.32, 1.0, substrateDrive.x);
+        mix(0.32, 1.0, substrateDrive.x) * smoothstep(0.004, 0.18, resourceA);
     float mineral = mineralBed * mix(0.10, 1.0, smoothstep(0.64, 0.91, 1.0 - grain)) *
-        mix(0.32, 1.0, substrateDrive.y);
+        mix(0.32, 1.0, substrateDrive.y) * smoothstep(0.004, 0.18, resourceB);
     float hazardPulse = 0.68 + 0.32 * sin(float(uniforms.step) * 0.016 +
         (uv.x * 13.0 - uv.y * 9.0) * M_PI_F);
     float fissure = 1.0 - smoothstep(0.025, 0.12,
@@ -8364,15 +8407,15 @@ fragment float4 worldSurfaceFragment(
         float rockStrata = 0.72 + 0.28 * sin((geology.w * 11.0 + fineTerrain * 2.0) * M_PI_F);
         color += float3(0.014, 0.019, 0.023) * rock * rockLight * rockStrata;
         color += float3(0.10, 0.14, 0.15) * rockRim * (0.08 + rockLight * 0.12);
-        color += float3(0.02, 0.82, 0.48) * nutrient * (1.0 - rock) * 0.15;
-        color += float3(1.0, 0.56, 0.025) * mineral * (1.0 - rock) * 0.17;
+        color += float3(0.02, 0.82, 0.48) * nutrient * (1.0 - rock) * 0.12;
+        color += float3(0.96, 0.52, 0.025) * mineral * (1.0 - rock) * 0.11;
         color += mix(float3(0.02, 0.42, 0.92), float3(0.86, 0.06, 0.66),
             saturate(0.5 + atan2(localMechanical.w, localMechanical.z) / (2.0 * M_PI_F))) *
             vibration * (1.0 - rock) * 0.050;
         color += float3(1.0, 0.035, 0.012) * hazard * 0.18;
         color += mix(float3(0.02, 0.44, 0.78), float3(0.06, 0.92, 0.54),
             saturate(resourceA / max(resourceA + resourceB, 0.001))) *
-            resourceIsoline * resourceFlux * (1.0 - rock) * 0.050;
+            resourceIsoline * resourceFlux * (1.0 - rock) * 0.085;
         color += float3(0.72, 0.12, 0.94) * ecotone * (1.0 - rock) * 0.10;
         color += frequencyColor * frequencyBand * (1.0 - rock * 0.72) * 0.045;
     }
@@ -8639,8 +8682,12 @@ fragment float4 worldFragment(
     float mineralBed = smoothstep(0.16, 0.66, localEnvironment.y + (terrainB - 0.5) * 0.34);
     float nutrientGrain = smoothstep(0.60, 0.86, visualNoise(uv * biologicalSize * 0.72 + float2(11.0, 3.0)));
     float mineralGrain = smoothstep(0.66, 0.90, visualNoise(uv * biologicalSize * 0.94 + float2(5.0, 19.0)));
-    float nutrientObject = nutrientBed * (0.10 + nutrientGrain * 0.90);
-    float mineralObject = mineralBed * (0.08 + mineralGrain * 0.92);
+    float visibleResourceA = saturate(fieldCell.x * 0.82);
+    float visibleResourceB = saturate(fieldChemistry.x * 0.86);
+    float nutrientObject = nutrientBed * (0.10 + nutrientGrain * 0.90) *
+        smoothstep(0.004, 0.18, visibleResourceA);
+    float mineralObject = mineralBed * (0.08 + mineralGrain * 0.92) *
+        smoothstep(0.004, 0.18, visibleResourceB);
     float hazardPulse = 0.62 + 0.38 * sin(float(uniforms.step) * 0.016 +
         (uv.x * 13.0 - uv.y * 9.0) * M_PI_F);
     float fissure = 1.0 - smoothstep(0.025, 0.12,
@@ -8700,8 +8747,8 @@ fragment float4 worldFragment(
         color *= 1.0 - rockMask * 0.76;
         color += float3(0.055, 0.070, 0.078) * rockMask * (0.58 + terrain * 0.34);
         color += float3(0.30, 0.38, 0.40) * rockRim * 0.24;
-        color += float3(0.02, 0.82, 0.48) * nutrientObject * (1.0 - rockMask) * 0.40;
-        color += float3(1.0, 0.56, 0.025) * mineralObject * (1.0 - rockMask) * 0.48;
+        color += float3(0.02, 0.82, 0.48) * nutrientObject * (1.0 - rockMask) * 0.25;
+        color += float3(0.96, 0.52, 0.025) * mineralObject * (1.0 - rockMask) * 0.27;
         color += float3(1.0, 0.025, 0.012) * hazardObject * (0.24 + localEnvironment.z * 0.42);
     }
     color += rim * bodyEdge * rimStrength;

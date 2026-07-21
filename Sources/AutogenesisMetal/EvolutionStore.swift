@@ -459,6 +459,8 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var maximumProgramReplicationGeneration: UInt32 = 0
     @Published private(set) var individualityEvidence = IndividualityEvidence.inconclusive
     @Published private(set) var autonomyVectors: [AutonomyVector] = []
+    @Published private(set) var currentComponentAutonomyVectors: [AutonomyVector] = []
+    @Published private(set) var resolvedIndividualLabels: [String] = []
     @Published private(set) var runtimeTelemetry = RendererRuntimeTelemetry.idle
     @Published private(set) var maximumLivingLineageGeneration: UInt32 = 0
     @Published private(set) var livingDescendantCount = 0
@@ -493,6 +495,9 @@ final class EvolutionStore: ObservableObject {
     private var individualityObserver = IndividualityObserverEngine()
     private var previousProgramRepresentations: [ProgramRepresentation] = []
     private var selectionIntervals: [MultilevelSelectionInterval] = []
+    private var componentMorphologyArchive: [UInt32: MorphologyDescriptor] = [:]
+    private var componentMorphologyOrder: [UInt32] = []
+    private var previousResolvedIndividualKeys: Set<String> = []
     private var currentSelection = SelectionPartition(
         betweenComponentSelection: 0,
         withinComponentSelection: 0,
@@ -563,6 +568,8 @@ final class EvolutionStore: ObservableObject {
         maximumProgramReplicationGeneration = 0
         individualityEvidence = .inconclusive
         autonomyVectors.removeAll(keepingCapacity: true)
+        currentComponentAutonomyVectors.removeAll(keepingCapacity: true)
+        resolvedIndividualLabels.removeAll(keepingCapacity: true)
         runtimeTelemetry = .idle
         maximumLivingLineageGeneration = 0
         livingDescendantCount = 0
@@ -574,6 +581,9 @@ final class EvolutionStore: ObservableObject {
         individualityObserver.reset()
         previousProgramRepresentations.removeAll(keepingCapacity: true)
         selectionIntervals.removeAll(keepingCapacity: true)
+        componentMorphologyArchive.removeAll(keepingCapacity: true)
+        componentMorphologyOrder.removeAll(keepingCapacity: true)
+        previousResolvedIndividualKeys.removeAll(keepingCapacity: true)
         currentSelection = SelectionPartition(
             betweenComponentSelection: 0,
             withinComponentSelection: 0,
@@ -776,6 +786,7 @@ final class EvolutionStore: ObservableObject {
         )
         snapshot.persistentCladeCount = lineageAnalysis.persistentCladeCount
         snapshot.meanMorphologyDistance = lineageAnalysis.meanMorphologyDistance
+        archiveMorphologies(agents)
     }
 
     private func follow(_ agent: AgentObservation) {
@@ -816,6 +827,9 @@ final class EvolutionStore: ObservableObject {
             resolvedCollectiveIndividualCount = 0
             resolvedDescendantCount = 0
             autonomyVectors.removeAll(keepingCapacity: true)
+            currentComponentAutonomyVectors.removeAll(keepingCapacity: true)
+            resolvedIndividualLabels.removeAll(keepingCapacity: true)
+            previousResolvedIndividualKeys.removeAll(keepingCapacity: true)
             individualityEvidence = .inconclusive
         }
         runtimeTelemetry = telemetry
@@ -833,8 +847,18 @@ final class EvolutionStore: ObservableObject {
             runtimeTelemetry.scientificallyCommittedStep,
             snapshot.totalSteps
         )
-        var candidates: [IndividualityCandidate] = agents.map { agent in
+        let componentCandidates: [IndividualityCandidate] = agents.map { agent in
             let cellCount = max(Int((agent.morphology.x * 24).rounded()), 1)
+            let morphology = morphologyDescriptor(for: agent)
+            let parentResemblance: Double
+            if agent.parentBirthID != .max,
+               let parentMorphology = componentMorphologyArchive[agent.parentBirthID] {
+                let morphologyResemblance = exp(-4 * morphology.distance(to: parentMorphology))
+                let programResemblance = exp(-Double(agent.mutationDistance))
+                parentResemblance = sqrt(morphologyResemblance * programResemblance)
+            } else {
+                parentResemblance = 0
+            }
             let observation = ComponentObservation(
                 step: observationStep,
                 candidateID: UInt64(agent.birthID),
@@ -856,7 +880,7 @@ final class EvolutionStore: ObservableObject {
                 rejection: Double(agent.social.y),
                 withinComponentReplicationAdvantage: Double(agent.social.w),
                 descendantRepresentation: agent.componentDescentDepth > 0 ? 1 : 0,
-                parentResemblance: exp(-Double(agent.mutationDistance))
+                parentResemblance: parentResemblance
             )
             return IndividualityCandidate(
                 observation: observation,
@@ -866,9 +890,17 @@ final class EvolutionStore: ObservableObject {
                 environmentalDependence: Double(
                     abs(agent.environment.x) + abs(agent.environment.y) +
                     (1 - min(max(agent.environment.w, 0), 1))
-                )
+                ),
+                parentComponentID: nil
             )
         }
+        currentComponentAutonomyVectors = componentCandidates.map {
+            AutonomyVector.measured(
+                from: $0.observation,
+                conditionalSelfPredictiveInformation: 0
+            )
+        }
+        var candidates = componentCandidates
         candidates.append(contentsOf: cells.map { cell in
             let observation = ComponentObservation(
                 step: observationStep,
@@ -901,7 +933,8 @@ final class EvolutionStore: ObservableObject {
                 environmentalDependence: Double(
                     abs(cell.environment.x) + abs(cell.environment.y) +
                     (1 - min(max(cell.environment.w, 0), 1))
-                )
+                ),
+                parentComponentID: UInt64(cell.componentBirthID)
             )
         })
 
@@ -915,6 +948,35 @@ final class EvolutionStore: ObservableObject {
         resolvedIndividualCount = observerResult.resolvedIndividuals.count
         resolvedDescendantCount = observerResult.resolvedDescendantCount
         autonomyVectors = observerResult.resolvedIndividuals.map(\.autonomy)
+        let allResolvedKeys = observerResult.resolvedIndividuals
+            .sorted {
+                if $0.partitionLevel != $1.partitionLevel {
+                    return $0.partitionLevel.rawValue < $1.partitionLevel.rawValue
+                }
+                return $0.candidateID < $1.candidateID
+            }
+            .map {
+                ($0.partitionLevel == .cell ? "S" : "C") + "#\($0.candidateID)"
+            }
+        resolvedIndividualLabels = Array(allResolvedKeys.prefix(6))
+        let resolvedKeys = Set(allResolvedKeys)
+        for key in resolvedKeys.subtracting(previousResolvedIndividualKeys).sorted() {
+            recordEvent(
+                generation: snapshot.generation,
+                kind: .emergence,
+                title: "Observer resolved \(key)",
+                detail: "The current partition sustained energetic uptake, boundary repair, mechanochemical closure, and endogenous predictability across the required autocorrelation-adjusted evidence windows. This observer result does not alter causal dynamics."
+            )
+        }
+        for key in previousResolvedIndividualKeys.subtracting(resolvedKeys).sorted() {
+            recordEvent(
+                generation: snapshot.generation,
+                kind: .observation,
+                title: "Observer released \(key)",
+                detail: "The current partition no longer sustained the full autonomy evidence conjunction across the release windows. Physical component identity and causal dynamics are unchanged."
+            )
+        }
+        previousResolvedIndividualKeys = resolvedKeys
 
         let evolutionary = EvolutionaryEvidence.evaluate(
             selection: currentSelection,
@@ -930,9 +992,11 @@ final class EvolutionStore: ObservableObject {
             nullUpperBound: 0,
             reason: collectiveSupport
                 ? "Measured between-component Price covariance and collective parent-descendant resemblance have positive 95% bootstrap intervals."
-                : "Collective support requires eight transmitted parent components and positive 95% intervals for between-component covariance and collective resemblance."
+                : "Collective support requires eight transmitted parent components and positive 95% intervals for between-component covariance and collective resemblance.",
+            timeBasis: .accumulatedHistory
         )
         individualityEvidence = IndividualityEvidence(
+            endogenousPredictability: observerResult.endogenousPredictabilityClaim,
             mechanochemicalAutonomy: observerResult.autonomyClaim,
             physicalDescent: evolutionary.physicalDescent,
             heritableVariation: evolutionary.heritableVariation,
@@ -943,6 +1007,36 @@ final class EvolutionStore: ObservableObject {
             autocorrelationTime: observerResult.autocorrelationTime,
             observationWindows: observerResult.observationWindows
         )
+    }
+
+    private func morphologyDescriptor(for agent: AgentObservation) -> MorphologyDescriptor {
+        MorphologyDescriptor(values: [
+            Double(agent.morphology.x),
+            Double(agent.morphology.y / 0.86),
+            Double((agent.morphology.z - 1) / 2.5),
+            Double(agent.morphology.w),
+            Double((agent.dynamics.x - 0.0008) / 0.0082),
+            Double(agent.dynamics.y * 18),
+            Double(agent.dynamics.z),
+            Double(agent.dynamics.w)
+        ])
+    }
+
+    private func archiveMorphologies(_ agents: [AgentObservation]) {
+        for agent in agents {
+            if componentMorphologyArchive[agent.birthID] == nil {
+                componentMorphologyOrder.append(agent.birthID)
+            }
+            componentMorphologyArchive[agent.birthID] = morphologyDescriptor(for: agent)
+        }
+        let capacity = 8_192
+        if componentMorphologyOrder.count > capacity {
+            let excess = componentMorphologyOrder.count - capacity
+            for id in componentMorphologyOrder.prefix(excess) {
+                componentMorphologyArchive.removeValue(forKey: id)
+            }
+            componentMorphologyOrder.removeFirst(excess)
+        }
     }
 
     private func updateSelectionObserver(

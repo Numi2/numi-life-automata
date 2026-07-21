@@ -250,8 +250,9 @@ struct ContentView: View {
     }
 
     private var inspectorPanel: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Image(systemName: observationStops[activeObservationStop].symbol)
                         .font(.system(size: 13, weight: .semibold))
@@ -287,6 +288,7 @@ struct ContentView: View {
                         showsInspector = false
                     }
                 }
+                .id("inspector-top")
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(worldHeadline)
@@ -368,11 +370,20 @@ struct ContentView: View {
                         }
                     }
                 }
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
+            .scrollIndicators(.hidden)
+            .onAppear {
+                DispatchQueue.main.async {
+                    proxy.scrollTo("inspector-top", anchor: .top)
+                }
+            }
+            .onChange(of: activeObservationStop) { _, _ in
+                proxy.scrollTo("inspector-top", anchor: .top)
+            }
         }
-        .scrollIndicators(.hidden)
         .frame(width: inspectorWidth)
         .frame(maxHeight: .infinity)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
@@ -409,7 +420,7 @@ struct ContentView: View {
                 observerMetric("ΔM / recycle per step", value: "\(scientific(store.snapshot.meanMembraneAssembly)) / \(scientific(store.snapshot.meanDetritalMineralization))", tint: .orange, values: store.history.map(\.meanMembraneAssembly))
                 observerMetric("Detritus pool", value: decimal(store.snapshot.metrics.detritusDensity), tint: .orange, values: store.history.map(\.metrics.detritusDensity))
             } else if store.observationZoom >= 18, store.displayMode == .causality {
-                let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
+                let tissueCount = store.observableAgentCount
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
                 observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Mean / max component", value: "\(decimal(store.snapshot.meanCellsPerOrganism)) / \(store.snapshot.largestTissueCellCount)", tint: .green, values: store.history.map(\.meanCellsPerOrganism))
@@ -440,7 +451,7 @@ struct ContentView: View {
                 observerMetric("Obs ΔCa* → ΔERK*", value: calciumERKAssociationLabel, tint: .purple, values: store.history.map(\.meanCalciumActivity))
                 observerMetric("Obs Δmatch → Δtraction", value: frequencyTractionAssociationLabel, tint: .cyan, values: store.history.map(\.meanFrequencyMatch))
             } else if store.observationZoom >= 18 {
-                let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
+                let tissueCount = store.observableAgentCount
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
                 observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
@@ -491,6 +502,8 @@ struct ContentView: View {
                 }
             } else {
                 observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
+                observerMetric("Cells / mean component", value: "\(store.snapshot.cellCount) / \(decimal(store.snapshot.meanCellsPerOrganism))", tint: .blue, values: store.history.map { Double($0.cellCount) })
+                observerMetric("Largest component", value: "\(store.snapshot.largestTissueCellCount) cells", tint: .green, values: store.history.map { Double($0.largestTissueCellCount) })
                 observerMetric("Mean free R", value: resourceLabel, tint: .cyan, values: store.history.map(\.metrics.resourceDensity))
                 observerMetric("Substrate forcing", value: decimal(store.snapshot.metrics.substrateFluctuation), tint: .cyan, values: store.history.map(\.metrics.substrateFluctuation))
                 observerMetric("Detritus density", value: decimal(store.snapshot.metrics.detritusDensity), tint: .orange, values: store.history.map(\.metrics.detritusDensity))
@@ -498,6 +511,8 @@ struct ContentView: View {
                 observerMetric("Mechanical drive", value: decimal(store.snapshot.metrics.environmentalMechanicalDrive), tint: .pink, values: store.history.map(\.metrics.environmentalMechanicalDrive))
                 observerMetric("Mean |ΔB|", value: activityLabel, tint: .orange, values: store.history.map(\.metrics.temporalActivity))
                 observerMetric("Predatory trait", value: "\(store.snapshot.hunterCount) units", tint: .red, values: store.history.map { Double($0.hunterCount) })
+                observerMetric("Junction ATP exchange ×1M", value: scaledRate(store.snapshot.meanProgramATPExchange, by: 1_000_000), tint: .mint, values: store.history.map(\.meanProgramATPExchange))
+                observerMetric("Trophic transfer", value: "\(store.snapshot.trophicTransferSamples) / \(compactScientific(store.snapshot.transferredEnergy)) E", tint: .yellow, values: store.history.map { Double($0.trophicTransferSamples) })
                 observerMetric("Persistent clades", value: "\(store.snapshot.persistentCladeCount)", tint: .pink, values: store.history.map { Double($0.persistentCladeCount) })
                 observerMetric("Energy residual", value: signedDecimal(store.snapshot.energyConservationResidual), tint: .white, values: store.history.map { abs($0.energyConservationResidual) })
             }
@@ -506,19 +521,31 @@ struct ContentView: View {
 
     private var individualityPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("OBSERVER INFERENCE — NONCAUSAL")
+            sectionLabel("CURRENT PARTITION INFERENCE — NONCAUSAL")
             HStack(spacing: 10) {
                 evidenceCount("COMP", value: store.observableAgentCount, tint: .cyan)
                 evidenceCount("IND", value: store.resolvedIndividualCount, tint: .mint)
-                evidenceCount("CDEP", value: Int(store.maximumLivingLineageGeneration), tint: .orange)
-                evidenceCount("PGEN", value: Int(store.maximumProgramReplicationGeneration), tint: .pink)
+                evidenceCount("C-IND", value: store.resolvedCollectiveIndividualCount, tint: .green)
+                evidenceCount("S-IND", value: store.resolvedCellIndividualCount, tint: .blue)
             }
+            evidenceRow("ENDOGENOUS PREDICTABILITY", claim: store.individualityEvidence.endogenousPredictability)
             evidenceRow("AUTONOMY", claim: store.individualityEvidence.mechanochemicalAutonomy)
+
+            Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
+                .padding(.vertical, 2)
+
+            sectionLabel("ACCUMULATED EVOLUTIONARY RECORD")
+            HStack(spacing: 10) {
+                evidenceCount("CDEP NOW", value: Int(store.maximumLivingLineageGeneration), tint: .orange)
+                evidenceCount("PGEN NOW", value: Int(store.maximumProgramReplicationGeneration), tint: .pink)
+                evidenceCount("TX COMP", value: store.individualityEvidence.selection.independentDescendantCount, tint: .cyan)
+                evidenceCount("TX VAR", value: store.individualityEvidence.selection.transmittedVariantCount, tint: .pink)
+            }
             evidenceRow("PHYSICAL DESCENT", claim: store.individualityEvidence.physicalDescent)
             evidenceRow("HERITABLE VARIATION", claim: store.individualityEvidence.heritableVariation)
             evidenceRow("DIFF TRANSMISSION", claim: store.individualityEvidence.differentialTransmission)
             evidenceRow("DARWINIAN EVOLUTION", claim: store.individualityEvidence.darwinianEvolution)
-            evidenceRow("COLLECTIVE LEVEL", claim: store.individualityEvidence.collectiveLevelIndividuality)
+            evidenceRow("COLLECTIVE SELECTION", claim: store.individualityEvidence.collectiveLevelIndividuality)
         }
     }
 
@@ -576,7 +603,9 @@ struct ContentView: View {
 
     private var autonomyObservablesPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("MEASURED AUTONOMY VARIABLES")
+            sectionLabel(store.autonomyVectors.isEmpty
+                ? "CURRENT COMPONENT MEANS — NO RESOLVED INDIVIDUAL"
+                : "RESOLVED INDIVIDUAL MEANS")
             LazyVGrid(
                 columns: [
                     GridItem(.flexible(), alignment: .leading),
@@ -586,8 +615,10 @@ struct ContentView: View {
                 spacing: 8
             ) {
                 measuredAutonomyValue(
-                    "RESOLVED PARTITIONS",
-                    value: "cell \(store.resolvedCellIndividualCount) / collective \(store.resolvedCollectiveIndividualCount)",
+                    "RESOLVED CANDIDATE IDS",
+                    value: store.resolvedIndividualLabels.isEmpty
+                        ? "none"
+                        : store.resolvedIndividualLabels.joined(separator: ", "),
                     tint: .cyan
                 )
                 measuredAutonomyValue(
@@ -607,7 +638,10 @@ struct ContentView: View {
                 )
                 measuredAutonomyValue(
                     "ENDOGENOUS INFORMATION",
-                    value: compactScientific(meanAutonomy(\.endogenousDetermination)),
+                    value: compactScientific(
+                        store.individualityEvidence.endogenousPredictability.estimate?.estimate ??
+                            meanAutonomy(\.endogenousDetermination)
+                    ),
                     tint: .cyan
                 )
                 measuredAutonomyValue(
@@ -742,9 +776,12 @@ struct ContentView: View {
     }
 
     private func meanAutonomy(_ keyPath: KeyPath<AutonomyVector, Double>) -> Double {
-        guard !store.autonomyVectors.isEmpty else { return 0 }
-        return store.autonomyVectors.reduce(0) { $0 + $1[keyPath: keyPath] } /
-            Double(store.autonomyVectors.count)
+        let vectors = store.autonomyVectors.isEmpty
+            ? store.currentComponentAutonomyVectors
+            : store.autonomyVectors
+        guard !vectors.isEmpty else { return 0 }
+        return vectors.reduce(0) { $0 + $1[keyPath: keyPath] } /
+            Double(vectors.count)
     }
 
     private func evidenceCount(_ label: String, value: Int, tint: Color) -> some View {
@@ -760,11 +797,32 @@ struct ContentView: View {
     }
 
     private func evidenceRow(_ label: String, claim: EvidenceClaim) -> some View {
-        HStack(spacing: 7) {
-            Circle().fill(evidenceColor(claim.state)).frame(width: 6, height: 6)
-            Text(label)
-            Spacer()
-            Text(claim.state.rawValue.uppercased())
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 7) {
+                Circle().fill(evidenceColor(claim.state)).frame(width: 6, height: 6)
+                Text(label)
+                Spacer()
+                Text(claim.timeBasis == .currentPopulation ? "NOW" : "HIST")
+                    .foregroundStyle(.tertiary)
+                Text(claim.state.rawValue.uppercased())
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            if let estimate = claim.estimate {
+                Text(String(
+                    format: "estimate %.3g  95%% [%.3g, %.3g]  n_eff %.1f%@",
+                    estimate.estimate,
+                    estimate.lower,
+                    estimate.upper,
+                    estimate.effectiveSampleCount,
+                    claim.nullUpperBound.map { String(format: "  null≤%.3g", $0) } ?? ""
+                ))
+                .font(.system(size: 7, weight: .regular, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+                .padding(.leading, 13)
+            }
         }
         .font(.system(size: 8, weight: .semibold, design: .monospaced))
         .foregroundStyle(.secondary)
@@ -1154,8 +1212,8 @@ struct ContentView: View {
         guard store.observationZoom >= 6, store.observationZoom < 18 else {
             return worldSummary
         }
-        let components = max(store.snapshot.organismCount, store.observableAgentCount)
-        return "\(store.snapshot.cellCount) persistent cells form \(components) membrane-connected component\(components == 1 ? "" : "s"); the noncausal observer resolves \(store.resolvedIndividualCount) persistent information-local maximum\(store.resolvedIndividualCount == 1 ? "" : "s"). Exposed perimeter is \(decimal(store.snapshot.meanExposedMembraneLength)); cell-generated force \(compactScientific(store.snapshot.meanCellGeneratedForce)) produces translation \(compactScientific(store.snapshot.meanOrganismSpeed))."
+        let components = store.observableAgentCount
+        return "\(store.snapshot.cellCount) persistent cells form \(components) committed membrane-connected component\(components == 1 ? "" : "s"); the noncausal observer resolves \(store.resolvedIndividualCount) partition\(store.resolvedIndividualCount == 1 ? "" : "s") with sustained energetic, boundary, mechanochemical, and endogenous evidence. Exposed perimeter is \(decimal(store.snapshot.meanExposedMembraneLength)); cell-generated force \(compactScientific(store.snapshot.meanCellGeneratedForce)) produces translation \(compactScientific(store.snapshot.meanOrganismSpeed))."
     }
 
     private var scientificDefinitionText: String {
@@ -1167,7 +1225,7 @@ struct ContentView: View {
 
     private var worldSummary: String {
         let zoom = store.observationZoom
-        let units = max(store.snapshot.organismCount, store.observableAgentCount)
+        let units = store.observableAgentCount
         if store.displayMode == .causality, zoom < 64 {
             let edgeState = store.mechanosensingBlocked ? "ablated (gain = 0)" : "active (gain = 1)"
             return "Mechanics→Ca* and Ca*→ERK* are factual-minus-single-edge-zero update differences. ERK*→traction and signaling ATP cost are direct equation terms. Mean values are \(causalRate(store.snapshot.meanMechanicsCalciumEffect)) ×10⁻³, \(causalRate(store.snapshot.meanCalciumERKEffect)) ×10⁻³, and \(scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000)) ×10⁻⁴ for the first three terms. Ca* and ERK* are dimensionless excitable-state variables, not resolved molecular concentrations. Mechanics gating is \(edgeState). Observational rows use predeclared one-sample-lag first-difference correlations with autocorrelation-adjusted 95% intervals; they are not causal effects."
@@ -1190,7 +1248,7 @@ struct ContentView: View {
         if zoom >= 6 {
             return units == 0
                 ? "No biological component is active. Founder nucleation remains driven by measured biomass, stored energy, membrane precursor, and catalyst concentrations."
-                : "Every nonempty membrane-connected component has an independent handle immediately after separation. IND = \(store.resolvedIndividualCount) is inferred from persistent conditional self-predictive information relative to block-shuffled nulls; it never unlocks survival, division, or reproduction."
+                : "Every nonempty membrane-connected component has an independent handle immediately after separation. Endogenous predictability is tested against block-shuffled nulls; IND = \(store.resolvedIndividualCount) additionally requires sustained energetic uptake, boundary repair, mechanochemical closure, and junction cooperation for multicellular partitions. Observer results never alter survival, division, or reproduction."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
         return "\(units) physical components and \(store.resolvedIndividualCount) observer-resolved individuals are present; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are resolved; occupied-field fraction is \(occupied). These measurements are distinct and none is a programmed fitness value."

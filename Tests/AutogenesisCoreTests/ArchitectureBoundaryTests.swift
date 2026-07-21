@@ -135,4 +135,34 @@ struct ArchitectureBoundaryTests {
         #expect(representation.contains("identity.programGeneration"))
         #expect(!representation.contains("UInt64(program.genomeHash)"))
     }
+
+    @Test
+    func clonalJunctionsTransportATPAndPayForTransport() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let transport = try #require(shader.range(of: "float sharingGain ="))
+        let mixedPrograms = try #require(shader.range(
+            of: "if (otherProgramIndex < maxHeritableProgramCount",
+            range: transport.upperBound..<shader.endIndex
+        ))
+        #expect(transport.lowerBound < mixedPrograms.lowerBound)
+        #expect(shader.contains("float sharingContactWeight"))
+        #expect(shader.contains("float junctionTransportWork = abs(atpSharingFlux)"))
+    }
+
+    @Test
+    func woundsSignalAndCollectiveMotionRequiresForceCoherence() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("float woundSignal = saturate(damage * 12.0)"))
+        #expect(shader.contains("cell.signaling.x = saturate"))
+        #expect(shader.contains("translationalMobility *= mix(0.10, 1.0, forceCoherence)"))
+        #expect(shader.contains("(membraneExposure - 0.5) * 0.18"))
+    }
 }

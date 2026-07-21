@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import AutogenesisCore
 
@@ -164,5 +165,80 @@ struct IndividualityObservationTests {
         #expect(distribution.energeticIndependence.standardDeviation > 0)
         #expect(distribution.energeticIndependence.fifthPercentile < 0.5)
         #expect(distribution.energeticIndependence.ninetyFifthPercentile > 0.5)
+    }
+
+    @Test
+    func predictableClumpWithoutBoundaryRepairNeverBecomesAutonomous() {
+        var observer = IndividualityObserverEngine()
+        var componentState = 0.24
+        var latest: IndividualityObserverResult?
+
+        for step in 0..<256 {
+            componentState = 0.96 * componentState +
+                sin(Double(step) * 0.37) * 0.004 + 0.006
+            let component = IndividualityCandidate(
+                observation: ComponentObservation(
+                    step: UInt64(step), candidateID: 7,
+                    partitionLevel: .membraneConnectedComponent, cellCount: 4,
+                    harvestedATP: 0.8, importedATP: 0.1,
+                    repairFlux: 0, membraneIntegrity: 0.9, exposedPerimeter: 1.2,
+                    damageFlux: 0.02, membraneTurnover: 0.01,
+                    strainToCalcium: componentState,
+                    calciumToERK: componentState,
+                    erkToTraction: componentState,
+                    tractionToStrain: componentState,
+                    junctionTransmission: 0.2, atpSharing: 0.2,
+                    rejection: 0, withinComponentReplicationAdvantage: 0,
+                    descendantRepresentation: 0, parentResemblance: 0
+                ),
+                positionX: 0.5, positionY: 0.5,
+                isSeparatedDescendant: false,
+                environmentalDependence: sin(Double(step) * 0.91) * 0.2
+            )
+            let cell = IndividualityCandidate(
+                observation: ComponentObservation(
+                    step: UInt64(step), candidateID: 70,
+                    partitionLevel: .cell, cellCount: 1,
+                    harvestedATP: 0.2, importedATP: 0,
+                    repairFlux: 0, membraneIntegrity: 0.9, exposedPerimeter: 0.3,
+                    damageFlux: 0, membraneTurnover: 0,
+                    strainToCalcium: 0, calciumToERK: 0,
+                    erkToTraction: 0, tractionToStrain: 0,
+                    junctionTransmission: 0, atpSharing: 0,
+                    rejection: 0, withinComponentReplicationAdvantage: 0,
+                    descendantRepresentation: 0, parentResemblance: 0
+                ),
+                positionX: 0, positionY: 0,
+                isSeparatedDescendant: false,
+                environmentalDependence: cos(Double(step) * 1.27),
+                parentComponentID: 7
+            )
+            latest = observer.observe(
+                [component, cell], evaluationStride: 1,
+                resamples: 32, maximumCandidatesPerLevel: 1
+            ) ?? latest
+        }
+
+        #expect(latest?.resolvedCollectiveCount == 0)
+        #expect(latest?.autonomyClaim.state != .supported)
+    }
+
+    @Test
+    func evolutionaryClaimsDeclareAccumulatedTimeBasis() {
+        let claims = EvolutionaryEvidence.evaluate(
+            selection: SelectionPartition(
+                betweenComponentSelection: 0,
+                withinComponentSelection: 0,
+                transmissionChange: 0,
+                covarianceSampleCount: 0
+            ),
+            maximumComponentDescentDepth: 0,
+            conservationValid: true
+        )
+
+        #expect(claims.physicalDescent.timeBasis == .accumulatedHistory)
+        #expect(claims.heritableVariation.timeBasis == .accumulatedHistory)
+        #expect(claims.differentialTransmission.timeBasis == .accumulatedHistory)
+        #expect(claims.darwinianEvolution.timeBasis == .accumulatedHistory)
     }
 }

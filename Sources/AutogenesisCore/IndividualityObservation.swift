@@ -1,6 +1,6 @@
 import Foundation
 
-public enum CandidatePartitionLevel: String, Codable, Sendable, Equatable, CaseIterable {
+public enum CandidatePartitionLevel: String, Codable, Sendable, Equatable, Hashable, CaseIterable {
     case cell
     case membraneConnectedComponent
 }
@@ -9,6 +9,11 @@ public enum EvidenceState: String, Codable, Sendable, Equatable {
     case supported
     case inconclusive
     case notSupported
+}
+
+public enum EvidenceTimeBasis: String, Codable, Sendable, Equatable {
+    case currentPopulation
+    case accumulatedHistory
 }
 
 public struct ConfidenceInterval: Codable, Sendable, Equatable {
@@ -267,21 +272,25 @@ public struct EvidenceClaim: Codable, Sendable, Equatable {
     public let estimate: ConfidenceInterval?
     public let nullUpperBound: Double?
     public let reason: String
+    public let timeBasis: EvidenceTimeBasis
 
     public init(
         state: EvidenceState,
         estimate: ConfidenceInterval?,
         nullUpperBound: Double?,
-        reason: String
+        reason: String,
+        timeBasis: EvidenceTimeBasis = .currentPopulation
     ) {
         self.state = state
         self.estimate = estimate
         self.nullUpperBound = nullUpperBound
         self.reason = reason
+        self.timeBasis = timeBasis
     }
 }
 
 public struct IndividualityEvidence: Codable, Sendable, Equatable {
+    public let endogenousPredictability: EvidenceClaim
     public let mechanochemicalAutonomy: EvidenceClaim
     public let physicalDescent: EvidenceClaim
     public let heritableVariation: EvidenceClaim
@@ -293,6 +302,7 @@ public struct IndividualityEvidence: Codable, Sendable, Equatable {
     public let observationWindows: Int
 
     public init(
+        endogenousPredictability: EvidenceClaim? = nil,
         mechanochemicalAutonomy: EvidenceClaim,
         physicalDescent: EvidenceClaim,
         heritableVariation: EvidenceClaim,
@@ -303,6 +313,7 @@ public struct IndividualityEvidence: Codable, Sendable, Equatable {
         autocorrelationTime: Double,
         observationWindows: Int
     ) {
+        self.endogenousPredictability = endogenousPredictability ?? mechanochemicalAutonomy
         self.mechanochemicalAutonomy = mechanochemicalAutonomy
         self.physicalDescent = physicalDescent
         self.heritableVariation = heritableVariation
@@ -315,29 +326,38 @@ public struct IndividualityEvidence: Codable, Sendable, Equatable {
     }
 
     public static let inconclusive = IndividualityEvidence(
-        mechanochemicalAutonomy: EvidenceClaim(
+        endogenousPredictability: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
             reason: "Insufficient autocorrelation-adjusted observations."
         ),
+        mechanochemicalAutonomy: EvidenceClaim(
+            state: .inconclusive, estimate: nil, nullUpperBound: nil,
+            reason: "Energetic, boundary, mechanochemical, and endogenous evidence are unresolved."
+        ),
         physicalDescent: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
-            reason: "No independently separated descendant sample."
+            reason: "No independently separated descendant sample.",
+            timeBasis: .accumulatedHistory
         ),
         heritableVariation: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
-            reason: "No inherited program variant has been transmitted to a separated component."
+            reason: "No inherited program variant has been transmitted to a separated component.",
+            timeBasis: .accumulatedHistory
         ),
         differentialTransmission: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
-            reason: "Differential program transmission has not been resolved statistically."
+            reason: "Differential program transmission has not been resolved statistically.",
+            timeBasis: .accumulatedHistory
         ),
         darwinianEvolution: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
-            reason: "Physical descent, heritable variation, and differential transmission must all be supported."
+            reason: "Physical descent, heritable variation, and differential transmission must all be supported.",
+            timeBasis: .accumulatedHistory
         ),
         collectiveLevelIndividuality: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
-            reason: "Between-component selection and collective heredity are unresolved."
+            reason: "Between-component selection and collective heredity are unresolved.",
+            timeBasis: .accumulatedHistory
         ),
         selection: SelectionPartition(
             betweenComponentSelection: 0,
@@ -369,7 +389,8 @@ public enum EvolutionaryEvidence {
             nullUpperBound: nil,
             reason: descentSupported
                 ? "Inherited programs remain represented after independent physical separation."
-                : "No independently separated descendant currently carries a transmitted program."
+                : "No independently separated descendant currently carries a transmitted program.",
+            timeBasis: .accumulatedHistory
         )
         let variationSupported = selection.transmittedVariantCount > 0
         let heritableVariation = EvidenceClaim(
@@ -378,7 +399,8 @@ public enum EvolutionaryEvidence {
             nullUpperBound: nil,
             reason: variationSupported
                 ? "At least one mutated program is represented in an independently separated descendant."
-                : "Mutation alone is insufficient; no variant has yet been transmitted through physical descent."
+                : "Mutation alone is insufficient; no variant has yet been transmitted through physical descent.",
+            timeBasis: .accumulatedHistory
         )
         let confidenceIntervals = [
             selection.betweenComponentConfidence,
@@ -400,7 +422,8 @@ public enum EvolutionaryEvidence {
                 ? "Conservation or ownership invariant failure invalidates selection inference."
                 : transmissionSupported
                     ? "A multilevel Price term has a nonzero 95% bootstrap interval across transmitted descendants."
-                    : "Differential transmission requires at least eight contributing parent-component samples and a nonzero 95% interval."
+                    : "Differential transmission requires at least eight contributing parent-component samples and a nonzero 95% interval.",
+            timeBasis: .accumulatedHistory
         )
         let darwinianSupported = descentSupported && variationSupported &&
             transmissionSupported && conservationValid
@@ -412,7 +435,8 @@ public enum EvolutionaryEvidence {
             nullUpperBound: 0,
             reason: darwinianSupported
                 ? "Physical descent, inherited variation, and differential transmission are independently supported."
-                : "Darwinian evolution is not claimed until descent, heritable variation, and differential transmission are all supported."
+                : "Darwinian evolution is not claimed until descent, heritable variation, and differential transmission are all supported.",
+            timeBasis: .accumulatedHistory
         )
         return (
             physicalDescent,
