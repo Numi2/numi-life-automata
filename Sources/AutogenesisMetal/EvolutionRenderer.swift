@@ -33,6 +33,7 @@ private struct HeadlessReadbackBuffers {
     let agentState: MTLBuffer
     let agentOccupancy: MTLBuffer
     let cellAggregates: MTLBuffer
+    let developmentalGenomes: MTLBuffer
     let programSlots: MTLBuffer
     let identityCounters: MTLBuffer
     let lineageEvents: MTLBuffer
@@ -64,7 +65,7 @@ extension EvolutionRenderer {
         guard let initialization = commandQueue.makeCommandBuffer() else {
             throw EvolutionRendererError.resourceAllocation("headless initialization")
         }
-        initialization.label = "Numi deterministic experiment initialization"
+        initialization.label = "Numi seeded experiment initialization"
         encodeInitialization(into: initialization, settings: runSettings)
         initialization.commit()
         initialization.waitUntilCompleted()
@@ -75,7 +76,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 4,
+            schemaVersion: 8,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -109,7 +110,7 @@ extension EvolutionRenderer {
             guard let commandBuffer = commandQueue.makeCommandBuffer() else {
                 throw EvolutionRendererError.resourceAllocation("headless simulation batch")
             }
-            commandBuffer.label = "Numi deterministic experiment batch"
+            commandBuffer.label = "Numi seeded experiment batch"
             var auditedInBatch = false
             for _ in 0..<encodedStepCount {
                 let completedStep = totalSteps + 1
@@ -296,6 +297,10 @@ extension EvolutionRenderer {
             agentState: sharedCopy(of: agentState, label: "Experiment agent state"),
             agentOccupancy: sharedCopy(of: agentOccupancy, label: "Experiment agent occupancy"),
             cellAggregates: sharedCopy(of: cellAggregates, label: "Experiment tissue aggregates"),
+            developmentalGenomes: sharedCopy(
+                of: developmentalGenomes,
+                label: "Experiment developmental genomes"
+            ),
             programSlots: sharedCopy(of: programSlots, label: "Experiment program slots"),
             identityCounters: sharedCopy(of: identityCounters, label: "Experiment identity counters"),
             lineageEvents: sharedCopy(of: lineageEvents, label: "Experiment lineage events"),
@@ -323,6 +328,7 @@ extension EvolutionRenderer {
                 (agentState, readback.agentState),
                 (agentOccupancy, readback.agentOccupancy),
                 (cellAggregates, readback.cellAggregates),
+                (developmentalGenomes, readback.developmentalGenomes),
                 (programSlots, readback.programSlots),
                 (identityCounters, readback.identityCounters),
                 (lineageEvents, readback.lineageEvents),
@@ -499,6 +505,7 @@ extension EvolutionRenderer {
             capacity: Self.maxAgentCount
         )
         let living = (0..<Self.maxAgentCount).filter { occupancy[$0] == 1 }
+        let descendants = living.filter { agents[$0].generation > 0 }
         let maximumLivingGeneration = living.map { agents[$0].generation }.max() ?? 0
         let livingCellCount = living.reduce(0) {
             $0 + max(Int(aggregates[$1].physiology.x.rounded()), 0)
@@ -512,6 +519,16 @@ extension EvolutionRenderer {
         let meanCells = Double(livingCellCount) * inverseOrganisms
         let largestTissueCellCount = living.reduce(into: 0) { largest, index in
             largest = max(largest, max(Int(aggregates[index].physiology.x.rounded()), 0))
+        }
+        let descendantCellCount = descendants.reduce(0) {
+            $0 + max(Int(aggregates[$1].physiology.x.rounded()), 0)
+        }
+        let largestDescendantTissueCellCount = descendants.reduce(into: 0) {
+            largest, index in
+            largest = max(largest, max(Int(aggregates[index].physiology.x.rounded()), 0))
+        }
+        let integratedDescendants = descendants.count {
+            agents[$0].lifeStage == AgentLifeStage.integratedOrganism.rawValue
         }
         let meanRadius = living.reduce(0.0) {
             $0 + Double(max(aggregates[$1].morphology.z, 0))
@@ -538,11 +555,45 @@ extension EvolutionRenderer {
                 return total + Double(value(aggregate)) * cellCount
             } * inverseCells
         }
+        let inverseDescendantCells = 1.0 / Double(max(descendantCellCount, 1))
+        func descendantCellWeightedMean(_ value: (CellAggregate) -> Float) -> Double {
+            descendants.reduce(0.0) { total, index in
+                let aggregate = aggregates[index]
+                let cellCount = Double(max(aggregate.physiology.x, 0))
+                return total + Double(value(aggregate)) * cellCount
+            } * inverseDescendantCells
+        }
 
         let slots = readback.programSlots.contents().bindMemory(
             to: ProgramSlotState.self,
             capacity: Self.maxHeritableProgramCount
         )
+        let developmental = readback.developmentalGenomes.contents().bindMemory(
+            to: DevelopmentalGenome.self,
+            capacity: Self.maxHeritableProgramCount
+        )
+        let maximumDetachmentScore = living.map {
+            Double(max(aggregates[$0].trophic.w, 0))
+        }.max() ?? 0
+        var detachmentThresholdTotal = 0.0
+        var effectiveDetachmentThresholdTotal = 0.0
+        var propaguleInvestmentTotal = 0.0
+        var inheritedReproductionSamples = 0
+        for index in living {
+            let programIndex = Int(agents[index].dominantProgramIndex)
+            guard programIndex < Self.maxHeritableProgramCount,
+                  slots[programIndex].occupied == 1,
+                  slots[programIndex].generation ==
+                    agents[index].dominantProgramGeneration else { continue }
+            let reproduction = developmental[programIndex].mechanochemistryB
+            detachmentThresholdTotal += Double(reproduction.z)
+            effectiveDetachmentThresholdTotal += Double(
+                reproduction.z * (1.18 - 0.46 * agents[index].social.w)
+            )
+            propaguleInvestmentTotal += Double(reproduction.w)
+            inheritedReproductionSamples += 1
+        }
+        let inverseReproductionSamples = 1.0 / Double(max(inheritedReproductionSamples, 1))
         let recycledProgramClaims = (0..<Self.maxHeritableProgramCount).reduce(UInt64(0)) {
             $0 + UInt64(slots[$1].generation > 1 ? slots[$1].generation - 1 : 0)
         }
@@ -571,6 +622,18 @@ extension EvolutionRenderer {
             integratedOrganisms: lifecycleCounts[3],
             maximumLivingGeneration: maximumLivingGeneration,
             largestTissueCellCount: largestTissueCellCount,
+            livingDescendants: descendants.count,
+            integratedDescendants: integratedDescendants,
+            descendantCellCount: descendantCellCount,
+            largestDescendantTissueCellCount: largestDescendantTissueCellCount,
+            meanDescendantCellATP: descendantCellWeightedMean { $0.physiology.y },
+            meanDescendantCellBiomass: descendantCellWeightedMean { $0.morphology.x },
+            meanDescendantCellCycleState: descendantCellWeightedMean { $0.morphology.y },
+            meanDescendantCellIntegrity: descendantCellWeightedMean { $0.physiology.z },
+            meanDescendantCellStress: descendantCellWeightedMean { $0.physiology.w },
+            descendantDividingCellFraction: descendantCellWeightedMean { $0.morphology.w },
+            meanDescendantCycleDrive: descendantCellWeightedMean { $0.causality.y },
+            meanDescendantContactBrake: descendantCellWeightedMean { $0.causality.z },
             births: births,
             deaths: deaths,
             fissions: fissions,
@@ -610,6 +673,13 @@ extension EvolutionRenderer {
             meanERKActivity: cellWeightedMean { $0.signaling.y },
             dividingCellFraction: cellWeightedMean { $0.morphology.w },
             meanCellTraction: cellWeightedMean { $0.tissueMotion.w },
+            maximumDetachmentScore: maximumDetachmentScore,
+            meanInheritedDetachmentThreshold:
+                detachmentThresholdTotal * inverseReproductionSamples,
+            meanEffectiveDetachmentThreshold:
+                effectiveDetachmentThresholdTotal * inverseReproductionSamples,
+            meanPropaguleInvestment:
+                propaguleInvestmentTotal * inverseReproductionSamples,
             meanFrequencyMatch: cellWeightedMean { $0.environment.w },
             meanMorphogenActivator: cellWeightedMean { $0.development.x },
             meanMorphogenInhibitor: cellWeightedMean { $0.development.y },
@@ -1042,6 +1112,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     static let quantumGridSize = 1_024
     static let epochSteps = 1_200
     static let damageStep = 600
+    private static let interactiveQuantumStride: UInt64 = 3
     private static let maxAgentCount = 384
     private static let maxCellCount = 9_216
     private static let maxHeritableProgramCount = 4_096
@@ -1850,6 +1921,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             for _ in 0..<max(frameSettings.stepsPerFrame, 1) {
                 encodeSimulationStep(into: commandBuffer, settings: frameSettings)
                 totalSteps &+= 1
+                if totalSteps.isMultiple(of: Self.interactiveQuantumStride) {
+                    encodeQuantumStep(into: commandBuffer, settings: frameSettings)
+                }
                 let epochPosition = Int(totalSteps % UInt64(Self.epochSteps))
                 if epochPosition == Self.damageStep {
                     encodeCheckpointAndDamage(
@@ -1875,7 +1949,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     break
                 }
             }
-            encodeQuantumStep(into: commandBuffer, settings: frameSettings)
             if let pendingMetricObservation {
                 encodeQuantumMeasurement(
                     into: commandBuffer,
@@ -2379,6 +2452,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 6)
         encoder.setBuffer(cellIdentities, offset: 0, index: 7)
         encoder.setBuffer(agentOccupancy, offset: 0, index: 8)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 9)
+        encoder.setBuffer(programSlots, offset: 0, index: 10)
         dispatchCells(encoder, pipeline: measureCellMembraneExposurePipeline)
         encoder.memoryBarrier(resources: [cellState, membraneVertices])
 

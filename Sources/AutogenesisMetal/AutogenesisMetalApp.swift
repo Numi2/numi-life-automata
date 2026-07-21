@@ -4,7 +4,10 @@ import SwiftUI
 
 @MainActor
 final class NumiAutomataAppDelegate: NSObject, NSApplicationDelegate {
+    private var simulationWindow: NSWindow?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        presentSimulationWindow()
         scheduleSimulationWindowPresentation()
     }
 
@@ -21,10 +24,23 @@ final class NumiAutomataAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func presentSimulationWindow() {
-        for window in NSApplication.shared.windows {
+        if simulationWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1240, height: 820),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Numi Automata"
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
             window.isRestorable = false
-            window.makeKeyAndOrderFront(nil)
+            window.minSize = NSSize(width: 900, height: 620)
+            window.contentView = NSHostingView(rootView: ContentView())
+            window.center()
+            simulationWindow = window
         }
+        simulationWindow?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
@@ -37,26 +53,13 @@ final class NumiAutomataAppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-struct NumiAutomataApp: App {
-    @NSApplicationDelegateAdaptor(NumiAutomataAppDelegate.self) private var appDelegate
-
-    var body: some Scene {
-        WindowGroup("Numi Automata") {
-            ContentView()
-        }
-        .restorationBehavior(.disabled)
-        .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1240, height: 820)
-    }
-}
-
 @main
 enum NumiAutomataEntrypoint {
     @MainActor
     static func main() {
         let arguments = CommandLine.arguments.dropFirst()
         guard let command = arguments.first else {
-            NumiAutomataApp.main()
+            runApplication()
             return
         }
         do {
@@ -66,11 +69,22 @@ enum NumiAutomataEntrypoint {
             case "causal-experiment":
                 try PairedCausalExperimentCLI.run(arguments: arguments.dropFirst())
             default:
-                NumiAutomataApp.main()
+                runApplication()
             }
         } catch {
             fputs("numi-experiment: \(error.localizedDescription)\n", stderr)
             exit(EXIT_FAILURE)
+        }
+    }
+
+    @MainActor
+    private static func runApplication() {
+        let application = NSApplication.shared
+        let delegate = NumiAutomataAppDelegate()
+        application.setActivationPolicy(.regular)
+        application.delegate = delegate
+        withExtendedLifetime(delegate) {
+            application.run()
         }
     }
 }

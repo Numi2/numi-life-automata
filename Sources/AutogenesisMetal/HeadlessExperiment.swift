@@ -221,6 +221,18 @@ struct ExperimentSample: Codable {
     let integratedOrganisms: Int
     let maximumLivingGeneration: UInt32
     let largestTissueCellCount: Int
+    let livingDescendants: Int
+    let integratedDescendants: Int
+    let descendantCellCount: Int
+    let largestDescendantTissueCellCount: Int
+    let meanDescendantCellATP: Double
+    let meanDescendantCellBiomass: Double
+    let meanDescendantCellCycleState: Double
+    let meanDescendantCellIntegrity: Double
+    let meanDescendantCellStress: Double
+    let descendantDividingCellFraction: Double
+    let meanDescendantCycleDrive: Double
+    let meanDescendantContactBrake: Double
     let births: UInt64
     let deaths: UInt64
     let fissions: UInt64
@@ -250,6 +262,10 @@ struct ExperimentSample: Codable {
     let meanERKActivity: Double
     let dividingCellFraction: Double
     let meanCellTraction: Double
+    let maximumDetachmentScore: Double
+    let meanInheritedDetachmentThreshold: Double
+    let meanEffectiveDetachmentThreshold: Double
+    let meanPropaguleInvestment: Double
     let meanFrequencyMatch: Double
     let meanMorphogenActivator: Double
     let meanMorphogenInhibitor: Double

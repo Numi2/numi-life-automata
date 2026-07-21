@@ -195,7 +195,7 @@ struct CellJunctionState {
 struct CellAggregate {
     // Active cell count, mean ATP, mean membrane integrity, mean stress.
     float4 physiology;
-    // Centroid, root-mean-square radius, dividing-cell fraction.
+    // Mean biomass, mean cell-cycle state, root-mean-square radius, dividing-cell fraction.
     float4 morphology;
     // Mean voltage, phase coherence, mean frequency, circular mean phase.
     float4 dynamics;
@@ -360,6 +360,27 @@ inline float cellularEnergySupport(float atp, float4 energetics) {
     return saturate(reserveSupport * 0.58 + fluxSupport * 0.42);
 }
 
+inline float detachmentReadinessScore(
+    float exposure,
+    float isolation,
+    float radialPosition,
+    float atp,
+    float integrity,
+    float adhesivePhenotype,
+    float propaguleInvestment
+) {
+    // A geometric mean keeps the inherited threshold on the same 0...1 scale as
+    // the five independent physical and physiological readiness factors.
+    float readinessProduct = saturate(exposure) * saturate(isolation) *
+        saturate(radialPosition) * saturate(atp) * saturate(integrity);
+    float readiness = pow(max(readinessProduct, 0.0000001), 0.20);
+    float adhesionRelease = mix(1.08, 0.72, saturate(adhesivePhenotype));
+    float investmentGain = mix(
+        0.72, 1.12, saturate(propaguleInvestment / 1.80)
+    );
+    return saturate(readiness * adhesionRelease * investmentGain);
+}
+
 inline float cellCycleDrive(
     float atp,
     float biomass,
@@ -404,7 +425,7 @@ inline DevelopmentalGenome emptyDevelopmentalGenome() {
     genome.actuatorBiasA = float4(-0.20, -0.08, -0.16, -0.05);
     genome.actuatorBiasB = float4(-0.22, -0.28, -0.30, -0.18);
     genome.mechanochemistryA = float4(1.0, 1.0, 1.0, 1.0);
-    genome.mechanochemistryB = float4(1.0, 1.0, 0.62, 1.0);
+    genome.mechanochemistryB = float4(1.0, 1.0, 0.42, 1.0);
     genome.morphogenKinetics = float4(0.34, 0.30, 0.22, 0.20);
     genome.morphogenTransport = float4(1.0, 1.0, 0.42, 0.34);
     return genome;
@@ -656,7 +677,7 @@ inline void initializeFounderRegulatoryGenome(
     genome.mechanochemistryB = float4(
         clamp(0.72 + agent.geneB.x * 0.54 + signedRandom(seed + 413u) * 0.10, 0.30, 2.20),
         clamp(0.64 + agent.geneA.z * 0.82 + signedRandom(seed + 417u) * 0.12, 0.20, 2.50),
-        clamp(0.50 + agent.geneA.y * 0.28 + signedRandom(seed + 421u) * 0.06, 0.38, 0.88),
+        clamp(0.24 + agent.geneA.y * 0.26 + signedRandom(seed + 421u) * 0.06, 0.18, 0.62),
         clamp(0.66 + agent.geneB.z * 0.62 + signedRandom(seed + 425u) * 0.10, 0.30, 1.80)
     );
     genome.morphogenKinetics = clamp(
@@ -753,7 +774,7 @@ inline void mutateDevelopmentalGenome(
         float2(0.12), float2(3.0)
     );
     child.mechanochemistryB.z = mutateScalar(
-        child.mechanochemistryB.z, seed + 715u, 0.004 + mutation * 0.42, 0.30, 0.94
+        child.mechanochemistryB.z, seed + 715u, 0.004 + mutation * 0.42, 0.12, 0.78
     );
     child.mechanochemistryB.w = mutateScalar(
         child.mechanochemistryB.w, seed + 717u, 0.010 + mutation * 1.15, 0.15, 2.5
@@ -2565,7 +2586,9 @@ inline uint seedOrganismCells(
     CellState founder = cells[cellIndex];
     CellAggregate aggregate;
     aggregate.physiology = float4(1.0, founder.physiology.x, founder.physiology.w, founder.signals.z);
-    aggregate.morphology = float4(0.0, 0.0, 0.0, 0.0);
+    aggregate.morphology = float4(
+        founder.physiology.y, founder.physiology.z, 0.0, 0.0
+    );
     aggregate.dynamics = float4(founder.dynamics.x, 1.0, founder.dynamics.w, founder.dynamics.z);
     aggregate.mechanics = float4(0.0, 0.0, 0.0, 0.0);
     aggregate.energetics = float4(0.0);
@@ -3091,7 +3114,7 @@ kernel void evolveAgents(
     }
     agent.age += 1.0;
     bool cellularFailure = cellAggregate.physiology.x < 0.5;
-    if (agent.age > 180000.0 || cellularFailure) {
+    if (cellularFailure) {
         recordLineageEvent(
             lineageEvents, identityCounters, 2u, agent,
             dominantProgramValid
@@ -3534,7 +3557,10 @@ kernel void assignCellComponentOwners(
         ? atomic_load_explicit(&componentCounts[primaryRoot], memory_order_relaxed) : 0u;
     float effectiveDetachmentThreshold = parentDevelopment.mechanochemistryB.z *
         mix(1.18, 0.72, parent.social.w);
-    if (primaryCount == 0u || meanATP < 0.48 || meanIntegrity < 0.58 ||
+    // Physical fragmentation may occur during development, but inherited owner
+    // identity is allocated only after the parent has sustained integration.
+    if (parentComponent.lifeStage < lifeStageIntegratedOrganism ||
+        primaryCount == 0u || meanATP < 0.18 || meanIntegrity < 0.46 ||
         detachment < effectiveDetachmentThreshold ||
         parent.tissueKinematics.w > 0.0) { return; }
 
@@ -4489,9 +4515,13 @@ kernel void evolveOrganismCells(
     float constructionWork = armorConstruction * 0.000070 +
         predatoryConstruction * 0.000060 + sensorConstruction * 0.000025 +
         locomotorConstruction * 0.000040;
+    float propagulePreparation = membraneExposure * motilityProgram *
+        development.mechanochemistryB.w * (1.0 - adhesiveProgram) *
+        smoothstep(0.16, 0.38, cell.physiology.x);
     float activeWork = (contractility * (0.000055 + fieldStrain * 0.000070) +
         abs(voltageDerivative) * 0.000070 + signalingCost + frequencyWork +
-        constructionWork + morphogenWork) * mix(0.16, 1.0, metabolicReadiness);
+        constructionWork + propagulePreparation * 0.000060 + morphogenWork) *
+        mix(0.16, 1.0, metabolicReadiness);
     float dissipation = externalStress * 0.00032 + fieldWaveSpeed * 0.000035 +
         dot(cell.velocity, cell.velocity) * 2.8 + barrierLoad *
             saturate(length(agent.velocity) * 860.0) * 0.00010;
@@ -4660,7 +4690,7 @@ kernel void evolveOrganismCells(
     activeTraction += boundaryNormal * exposure * contractility * tractionGain *
         (0.000014 + adhesiveProgram * 0.000026) * structuralDrag;
     float propaguleDrive = exposure * motilityProgram * development.mechanochemistryB.w *
-        (1.0 - adhesiveProgram) * smoothstep(0.56, 0.90, atp);
+        (1.0 - adhesiveProgram) * smoothstep(0.16, 0.38, atp);
     activeTraction += boundaryNormal * propaguleDrive * 0.00018 * structuralDrag;
     mechanicalForce += activeTraction + barrierForceLocal;
     float radialLength = length(cell.position);
@@ -4708,9 +4738,15 @@ kernel void evolveOrganismCells(
         netProgramContribution
     );
     float isolation = saturate(1.0 - contactCount / 0.72);
-    float detachmentScore = exposure * isolation * saturate(radialDistance / 0.62) *
-        saturate(cell.physiology.x) * saturate(cell.physiology.w) *
-        mix(1.18, 0.42, cell.phenotype.x) * development.mechanochemistryB.w;
+    float detachmentScore = detachmentReadinessScore(
+        exposure,
+        isolation,
+        radialDistance / 0.62,
+        cell.physiology.x,
+        cell.physiology.w,
+        cell.phenotype.x,
+        development.mechanochemistryB.w
+    );
     cell.tissueForce = float4(activeTraction + barrierForceLocal, 0.0, 0.0);
     cell.tissueGeometry.w = saturate(detachmentScore);
 
@@ -5030,9 +5066,15 @@ kernel void evolveCellMembranes(
     float2 previousBoundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
         ? normalize(cell.tissueGeometry.xy)
         : (length(cell.position) > 0.0001 ? normalize(cell.position) : float2(1.0, 0.0));
-    float detachmentScore = previousExposure * saturate(1.0 - cell.interaction.z) *
-        saturate(length(cell.position) / 0.62) * saturate(cell.physiology.x) *
-        saturate(cell.physiology.w) * mix(1.18, 0.42, cell.phenotype.x);
+    float detachmentScore = detachmentReadinessScore(
+        previousExposure,
+        1.0 - cell.interaction.z,
+        length(cell.position) / 0.62,
+        cell.physiology.x,
+        cell.physiology.w,
+        cell.phenotype.x,
+        1.0
+    );
     cell.tissueGeometry = float4(
         previousBoundaryNormal, previousExposure, saturate(detachmentScore)
     );
@@ -5907,6 +5949,8 @@ kernel void measureCellMembraneExposure(
     constant SimulationUniforms& uniforms [[buffer(6)]],
     device const CellIdentity* cellIdentities [[buffer(7)]],
     device const atomic_uint* agentOccupancy [[buffer(8)]],
+    device const DevelopmentalGenome* developmentalGenomes [[buffer(9)]],
+    device const ProgramSlotState* programSlots [[buffer(10)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxCellCount ||
@@ -6005,9 +6049,19 @@ kernel void measureCellMembraneExposure(
     float2 boundaryNormal = length(exposedNormal) > 0.0001
         ? normalize(exposedNormal)
         : (length(cell.position) > 0.0001 ? normalize(cell.position) : float2(1.0, 0.0));
-    float detachmentScore = exposure * saturate(1.0 - cell.interaction.z) *
-        saturate(length(cell.position) / 0.62) * saturate(cell.physiology.x) *
-        saturate(cell.physiology.w) * mix(1.18, 0.42, cell.phenotype.x);
+    uint programIndex = cellIdentities[gid].programIndex;
+    float propaguleInvestment = programSlotMatches(
+        programSlots, programIndex, cellIdentities[gid].programGeneration
+    ) ? developmentalGenomes[programIndex].mechanochemistryB.w : 0.0;
+    float detachmentScore = detachmentReadinessScore(
+        exposure,
+        1.0 - cell.interaction.z,
+        length(cell.position) / 0.62,
+        cell.physiology.x,
+        cell.physiology.w,
+        cell.phenotype.x,
+        propaguleInvestment
+    );
     cell.membrane.w = junctionLoad;
     cell.tissueGeometry = float4(
         boundaryNormal, exposure, saturate(detachmentScore)
@@ -6038,6 +6092,7 @@ kernel void divideAndReduceOrganismCells(
     if (owner >= maxAgentCount ||
         atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
 
+    AgentState agent = agents[owner];
     uint divisionParent = maxCellCount;
     float mostAdvancedCycle = 1.0;
     uint index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
@@ -6047,8 +6102,18 @@ kernel void divideAndReduceOrganismCells(
             cellIdentities[index].owner == owner) {
             CellState candidate = cells[index];
             float cycle = candidate.physiology.z;
+            uint candidateProgram = cellIdentities[index].programIndex;
+            float propaguleInvestment = candidateProgram < maxHeritableProgramCount
+                ? developmentalGenomes[candidateProgram].mechanochemistryB.w : 0.0;
+            float developmentalIntegritySupport =
+                agent.lifeStage < lifeStageIntegratedOrganism
+                    ? saturate(propaguleInvestment) : 0.0;
+            float divisionIntegrityThreshold = mix(
+                0.52, 0.32, developmentalIntegritySupport
+            );
             bool divisionCompetent = candidate.physiology.x >= 0.18 &&
-                candidate.physiology.y >= 0.42 && candidate.physiology.w >= 0.52 &&
+                candidate.physiology.y >= 0.42 &&
+                candidate.physiology.w >= divisionIntegrityThreshold &&
                 candidate.signals.z <= 0.68;
             if (divisionCompetent && cycle >= mostAdvancedCycle) {
                 mostAdvancedCycle = cycle;
@@ -6058,7 +6123,6 @@ kernel void divideAndReduceOrganismCells(
         index = nextIndex;
     }
 
-    AgentState agent = agents[owner];
     if (divisionParent != maxCellCount) {
         uint divisionSeed = hash32(
             owner * 2246822519u ^ divisionParent * 3266489917u ^ uniforms.step
@@ -6082,8 +6146,13 @@ kernel void divideAndReduceOrganismCells(
                 float2(parent.signals.x - parent.signals.y, parent.mechanics.y - 0.5) * 0.12
             );
             CellState child = parent;
-            parent.position -= axis * 0.095;
-            child.position += axis * 0.095;
+            // Cytokinesis starts with overlapping daughter membranes. The next
+            // contact pass must create a real junction before either cell can
+            // remain part of the tissue; placing the centers beyond their
+            // post-division membrane supports would cull one daughter as an
+            // unqualified detached component.
+            parent.position -= axis * 0.072;
+            child.position += axis * 0.072;
             parent.velocity -= axis * 0.00035;
             child.velocity += axis * 0.00035;
             parent.physiology.x *= 0.50;
@@ -6233,6 +6302,8 @@ kernel void divideAndReduceOrganismCells(
 
     float activeCount = 0.0;
     float atpTotal = 0.0;
+    float biomassTotal = 0.0;
+    float cycleTotal = 0.0;
     float integrityTotal = 0.0;
     float stressTotal = 0.0;
     float dividingCount = 0.0;
@@ -6297,6 +6368,8 @@ kernel void divideAndReduceOrganismCells(
             recognitionSampleCount += 1.0;
         }
         atpTotal += cell.physiology.x;
+        biomassTotal += cell.physiology.y;
+        cycleTotal += cell.physiology.z;
         integrityTotal += cell.physiology.w;
         stressTotal += cell.signals.z;
         dividingCount += cell.physiology.z >= 0.78 ? 1.0 : 0.0;
@@ -6513,7 +6586,7 @@ kernel void divideAndReduceOrganismCells(
         integrityTotal * inverseCount, stressTotal * inverseCount
     );
     aggregate.morphology = float4(
-        boundaryCentroid - cellCentroid,
+        biomassTotal * inverseCount, cycleTotal * inverseCount,
         sqrt(squaredRadius * inverseCount), dividingCount * inverseCount
     );
     float phaseCoherence = saturate(length(phaseTotal) * inverseCount);

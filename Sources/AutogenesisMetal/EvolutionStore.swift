@@ -418,7 +418,7 @@ final class EvolutionStore: ObservableObject {
     private static let spinorOrigin = SIMD2<Float>(repeating: 0.500_488_281_25)
 
     @Published var isRunning = true
-    @Published var stepsPerFrame = 3
+    @Published var stepsPerFrame = 6
     @Published var resourceFlux: Double = 1.0
     @Published var mutationScale: Double = 1.0
     @Published var transportScale: Double = 1.0
@@ -437,6 +437,10 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var autonomousCellCount = 0
     @Published private(set) var developingTissueCount = 0
     @Published private(set) var integratedOrganismCount = 0
+    @Published private(set) var maximumLivingLineageGeneration: UInt32 = 0
+    @Published private(set) var livingDescendantCount = 0
+    @Published private(set) var integratedDescendantCount = 0
+    @Published private(set) var livingDescendantCellCount = 0
     @Published private(set) var followedLifeStage: AgentLifeStage?
     @Published private(set) var followedHomeostasisProgress: Float = 0
     @Published private(set) var followedIntegrationProgress: Float = 0
@@ -461,7 +465,7 @@ final class EvolutionStore: ObservableObject {
 
     init() {
         if let rawSpeed = ProcessInfo.processInfo.environment["NUMI_INITIAL_SPEED"],
-           let speed = Int(rawSpeed), [1, 3, 6].contains(speed) {
+           let speed = Int(rawSpeed), [1, 3, 6, 24].contains(speed) {
             stepsPerFrame = speed
         }
         guard let rawMagnification = ProcessInfo.processInfo.environment[
@@ -512,6 +516,10 @@ final class EvolutionStore: ObservableObject {
         autonomousCellCount = 0
         developingTissueCount = 0
         integratedOrganismCount = 0
+        maximumLivingLineageGeneration = 0
+        livingDescendantCount = 0
+        integratedDescendantCount = 0
+        livingDescendantCellCount = 0
         followedLifeStage = nil
         followedHomeostasisProgress = 0
         followedIntegrationProgress = 0
@@ -638,6 +646,15 @@ final class EvolutionStore: ObservableObject {
         autonomousCellCount = agents.count { $0.lifeStage == .autonomousCell }
         developingTissueCount = agents.count { $0.lifeStage == .developingTissue }
         integratedOrganismCount = agents.count { $0.lifeStage == .integratedOrganism }
+        maximumLivingLineageGeneration = agents.map(\.generation).max() ?? 0
+        let livingDescendants = agents.filter { $0.generation > 0 }
+        livingDescendantCount = livingDescendants.count
+        integratedDescendantCount = livingDescendants.count {
+            $0.lifeStage == .integratedOrganism
+        }
+        livingDescendantCellCount = livingDescendants.reduce(0) {
+            $0 + max(Int(($1.morphology.x * 24).rounded()), 1)
+        }
 
         for agent in agents {
             let previousStage = lifeStageByBirthID[agent.birthID] ?? .protocell

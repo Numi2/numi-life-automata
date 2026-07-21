@@ -167,13 +167,14 @@ struct ContentView: View {
 
             Picker("Speed", selection: $store.stepsPerFrame) {
                 Text("1x").tag(1)
-                Text("2x").tag(3)
-                Text("4x").tag(6)
+                Text("3x").tag(3)
+                Text("6x").tag(6)
+                Text("24x").tag(24)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .frame(width: 86)
-            .help("Evolution speed")
+            .frame(width: 126)
+            .help("Exact biological solver steps per rendered frame")
 
             commandDivider
 
@@ -210,7 +211,11 @@ struct ContentView: View {
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 3) {
-                    statusValue("GEN", value: "\(store.snapshot.generation)")
+                    statusValue("STEP", value: compactStep(store.snapshot.totalSteps))
+                    statusValue(
+                        "LIN",
+                        value: "G\(store.maximumLivingLineageGeneration)"
+                    )
                     statusValue(
                         "ORG",
                         value: "\(store.integratedOrganismCount)/\(store.observableAgentCount)"
@@ -301,6 +306,12 @@ struct ContentView: View {
                 }
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
+
+                if store.observationZoom >= 6,
+                   store.observationZoom < 18,
+                   store.integratedOrganismCount > 0 || recordedFissionCount > 0 {
+                    evolutionAfterFormationPanel
+                }
 
                 if store.observationZoom < 64 {
                     lifecyclePanel
@@ -510,6 +521,77 @@ struct ContentView: View {
                     .tint(lifecycleColor(stage))
             }
         }
+    }
+
+    private var evolutionAfterFormationPanel: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            sectionLabel("EVOLUTION AFTER FORMATION")
+            HStack(spacing: 0) {
+                evolutionClockValue(
+                    "LINEAGE",
+                    "G\(store.maximumLivingLineageGeneration)"
+                )
+                evolutionClockValue("FISSIONS", "\(recordedFissionCount)")
+                evolutionClockValue("DESC", "\(store.livingDescendantCount)")
+                evolutionClockValue("D ORG", "\(store.integratedDescendantCount)")
+                evolutionClockValue("D CELLS", "\(store.livingDescendantCellCount)")
+            }
+
+            Text(evolutionaryStateSummary)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineSpacing(1.5)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Text("SCORE / INHERITED GATE")
+                ProgressView(value: min(detachmentReadinessRatio, 1))
+                    .progressViewStyle(.linear)
+                    .tint(recordedFissionCount > 0 ? .green : .orange)
+                Text(String(
+                    format: "%.3f / %.3f",
+                    store.snapshot.meanDetachmentScore,
+                    store.snapshot.meanDetachmentThreshold
+                ))
+            }
+            .font(.system(size: 7, weight: .semibold, design: .monospaced))
+            .foregroundStyle(.secondary)
+
+            Text("Solver steps are dimensionless. Lineage generation advances only after viable physical separation and inherited-program transmission; rendering speed never changes the integration step.")
+                .font(.system(size: 8, weight: .regular))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func evolutionClockValue(_ label: String, _ value: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            Text(label)
+                .font(.system(size: 6, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var recordedFissionCount: Int {
+        store.lineageBranches.count { $0.parentID != nil }
+    }
+
+    private var detachmentReadinessRatio: Double {
+        store.snapshot.meanDetachmentScore /
+            max(store.snapshot.meanDetachmentThreshold, 0.000_001)
+    }
+
+    private var evolutionaryStateSummary: String {
+        guard recordedFissionCount > 0 else {
+            return "The integrated-organism criterion is present, but Darwinian lineage evolution has not started: no viable membrane-disconnected component has yet transmitted an inherited program."
+        }
+        return "\(recordedFissionCount) physical fissions have produced \(store.livingDescendantCount) living descendants; \(store.integratedDescendantCount) satisfy the integrated-organism criterion and together contain \(store.livingDescendantCellCount) cells. Living lineage depth is G\(store.maximumLivingLineageGeneration), with \(store.snapshot.persistentCladeCount) persistent clades."
     }
 
     private var morphologyQualificationPanel: some View {
@@ -1133,6 +1215,16 @@ struct ContentView: View {
 
     private var ecologicalWork: Double {
         max(store.snapshot.auditedActiveWork + store.snapshot.auditedFrequencyWork, 0)
+    }
+
+    private func compactStep(_ step: UInt64) -> String {
+        if step >= 1_000_000 {
+            return String(format: "%.1fM", Double(step) / 1_000_000)
+        }
+        if step >= 1_000 {
+            return String(format: "%.1fk", Double(step) / 1_000)
+        }
+        return "\(step)"
     }
 
     private var zoomLabel: String {
