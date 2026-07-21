@@ -241,4 +241,70 @@ struct IndividualityObservationTests {
         #expect(claims.differentialTransmission.timeBasis == .accumulatedHistory)
         #expect(claims.darwinianEvolution.timeBasis == .accumulatedHistory)
     }
+
+    @Test
+    func schema11RuntimeTelemetryDecodesWithMetal4FieldDefaults() throws {
+        let legacyJSON = """
+        {
+          "scheduledStep": 1300,
+          "gpuCompletedStep": 1296,
+          "scientificallyCommittedStep": 1200,
+          "stepsPerSecond": 1177.86,
+          "unfinishedCommandBuffers": 3,
+          "maximumCommandBuffers": 3,
+          "checkpointStep": 1200,
+          "lastRestoredCheckpointStep": null,
+          "recoveryCount": 0,
+          "lastError": null
+        }
+        """
+        let telemetry = try JSONDecoder().decode(
+            RendererRuntimeTelemetry.self,
+            from: Data(legacyJSON.utf8)
+        )
+
+        #expect(telemetry.backendVersion == "Metal 3")
+        #expect(telemetry.recoveryEpoch == 0)
+        #expect(telemetry.phaseTimings.isEmpty)
+        #expect(telemetry.pipelineArchive == .unavailable)
+        #expect(telemetry.residency == .unavailable)
+    }
+
+    @Test
+    func schema12RuntimeTelemetryRoundTripsMetal4ExecutionState() throws {
+        let telemetry = RendererRuntimeTelemetry(
+            backendVersion: "Metal 4",
+            tuningProfile: .m4Optimized,
+            scheduledStep: 2_432,
+            gpuCompletedStep: 2_424,
+            scientificallyCommittedStep: 2_400,
+            stepsPerSecond: 1_002,
+            unfinishedCommandBuffers: 2,
+            maximumCommandBuffers: 3,
+            checkpointStep: 2_400,
+            lastRestoredCheckpointStep: 1_200,
+            recoveryCount: 1,
+            recoveryEpoch: 1,
+            cpuEncodeMilliseconds: 0.41,
+            totalGPUMilliseconds: 12.3,
+            phaseTimings: [.init(phase: "chemistry", gpuMilliseconds: 3.4)],
+            pipelineArchive: .init(
+                loaded: true, hits: 61, misses: 0, pipelineCount: 61,
+                compileMilliseconds: 5.5, error: nil
+            ),
+            residency: .init(
+                residentBytes: 256 * 1_024 * 1_024,
+                allocatorSlots: 3,
+                allocatorHighWatermark: 2,
+                uniformArenaHighWaterBytes: 128 * 1_024
+            ),
+            lastError: nil
+        )
+        let decoded = try JSONDecoder().decode(
+            RendererRuntimeTelemetry.self,
+            from: JSONEncoder().encode(telemetry)
+        )
+
+        #expect(decoded == telemetry)
+    }
 }

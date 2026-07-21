@@ -2,10 +2,9 @@
 set -euo pipefail
 
 root="${0:A:h:h}"
-air_file="$(mktemp -t autogenesis).air"
 swift_log="$(mktemp -t autogenesis-swift).log"
 swift_jobs="${NUMI_SWIFT_JOBS:-1}"
-trap 'rm -f "$air_file" "$swift_log"' EXIT
+trap 'rm -f "$swift_log"' EXIT
 
 run_swift_with_timestamp_retry() {
     : > "$swift_log"
@@ -21,12 +20,14 @@ run_swift_with_timestamp_retry() {
 }
 
 cd "$root"
-xcrun -sdk macosx metal -std=metal3.2 \
-    -c Sources/AutogenesisMetal/Shaders/Replicator.metal \
-    -o "$air_file"
+./Scripts/build-metal4-assets.sh
+test -s Sources/AutogenesisMetal/Shaders/Replicator.metallib
+test -s Sources/AutogenesisMetal/Shaders/Replicator.mtl4archive
 if [[ "${NUMI_SKIP_CLEAN:-0}" != "1" ]]; then
     swift package clean
 fi
 run_swift_with_timestamp_retry \
     swift build --product NumiAutomata --jobs "$swift_jobs"
+run_swift_with_timestamp_retry \
+    swift build -c release --product NumiAutomata --jobs "$swift_jobs"
 run_swift_with_timestamp_retry swift test --jobs "$swift_jobs"

@@ -740,6 +740,45 @@ struct ContentView: View {
                 )
                 evolutionClockValue("RECOVERIES", "\(store.runtimeTelemetry.recoveryCount)")
             }
+            HStack(spacing: 0) {
+                evolutionClockValue("BACKEND", store.runtimeTelemetry.backendVersion.uppercased())
+                evolutionClockValue(
+                    "PROFILE",
+                    store.runtimeTelemetry.tuningProfile == .m4Optimized ? "M4 OPT" : "GENERIC"
+                )
+                evolutionClockValue("EPOCH", "\(store.runtimeTelemetry.recoveryEpoch)")
+            }
+            HStack(spacing: 0) {
+                evolutionClockValue(
+                    "CPU ENCODE",
+                    String(format: "%.2f ms", store.runtimeTelemetry.cpuEncodeMilliseconds)
+                )
+                evolutionClockValue(
+                    "GPU TOTAL",
+                    String(format: "%.2f ms", store.runtimeTelemetry.totalGPUMilliseconds)
+                )
+                evolutionClockValue(
+                    "RESIDENT",
+                    String(
+                        format: "%.1f MB",
+                        Double(store.runtimeTelemetry.residency.residentBytes) / 1_048_576
+                    )
+                )
+            }
+            HStack(spacing: 0) {
+                evolutionClockValue(
+                    "ARCHIVE",
+                    store.runtimeTelemetry.pipelineArchive.loaded ? "READY" : "MISS"
+                )
+                evolutionClockValue(
+                    "HIT / MISS",
+                    "\(store.runtimeTelemetry.pipelineArchive.hits)/\(store.runtimeTelemetry.pipelineArchive.misses)"
+                )
+                evolutionClockValue(
+                    "ALLOCATOR",
+                    "\(store.runtimeTelemetry.residency.allocatorHighWatermark)/\(store.runtimeTelemetry.residency.allocatorSlots)"
+                )
+            }
             if let error = store.runtimeTelemetry.lastError {
                 Text(error)
                     .font(.system(size: 8, weight: .medium, design: .monospaced))

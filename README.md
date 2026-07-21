@@ -936,6 +936,16 @@ The observer therefore sees continuous scale and persistent positions. This is o
 
 ## Metal GPU architecture
 
+### Native Metal 4 execution
+
+The application requires macOS 26 and uses a Metal 4-only submission backend. `Metal4ExecutionContext` owns one `MTL4CommandQueue`, three reusable submission slots, one `MTL4CommandAllocator` per slot, GPU-addressed uniform arenas, stable and dynamic residency sets, and commit-feedback state. Admission is nonblocking and never permits more than three unfinished submissions. An allocator is reset only after its feedback handler has reported completion.
+
+Simulation fills, copies, and dispatches share one Metal 4 compute encoder per submission. Explicit pass barriers remain at measured read-after-write boundaries; duplicate barriers at logical encoder boundaries are suppressed when the preceding operation already established visibility. Render encoders consume the committed causal state through queue-stage barriers. Runtime telemetry separately reports scheduled, GPU-completed, and scientifically committed steps, CPU encoding time, GPU duration, phase counter samples, allocator utilization, residency, archive hits, and recovery epoch.
+
+Release builds load `Replicator.metallib`, compiled with `-std=metal4.0`, and `Replicator.mtl4archive`. The archive contains every compute and render descriptor used by the application, including static molecule, wave, and spinor fragment variants. Source compilation is a debug-only shader-development fallback. Release packaging fails when either AOT artifact is absent.
+
+Every `1,200` scientifically committed steps, the renderer alternates between two complete in-memory causal checkpoints. If a commit reports an error or the five-second completion watchdog observes three stalled submissions, submission stops, the epoch advances, and the queue, allocators, uniform arenas, timestamp heaps, residency bindings, and argument tables are rebuilt. The last complete checkpoint and matching CPU observer state are restored. Late callbacks from the abandoned epoch cannot commit observations or counters, and recovery never initializes a replacement world.
+
 ### Frame dependency graph
 
 ```mermaid
@@ -949,7 +959,8 @@ flowchart LR
     M0[mechanical field] --> CM
     CM -->|atomic contraction impulses| MF[mechanical forcing]
     CM --> MM[evolveCellMembranes]
-    MM --> HC[clearCellSpatialHash]
+    MM --> AC[compact active cells in ascending slot order]
+    AC --> HC[clear hash heads and active contact effects]
     HC --> HB[buildCellSpatialHash]
     HB --> HX[resolveMembraneContacts]
     HX --> HA[applyCellContactEffects]
@@ -967,7 +978,8 @@ flowchart LR
     MW --> M1[swap mechanical texture references]
     M1 -->|strain and vibration on next step| R
     M1 -->|mechanosensing| CM
-    W1 --> Q[evolveQuantumField]
+    W1 --> QC[prepare 193 squared quantum coupling]
+    QC --> Q[evolve 1024 squared spinor field]
     Q --> Q1[swap spinor texture references]
     W1 --> F[scale-specific field fragment]
     Q1 --> F
@@ -994,23 +1006,25 @@ flowchart LR
 | Reaction update | `193²` | `reactWorld` |
 | Founder scan | `193²` | `nucleateAutogenicFounder` |
 | Component-frame dynamics | Compacted living components, up to `9,216` | `evolveAgents` |
-| Cell energetics and electromechanics | `9,216` | `evolveOrganismCells` |
-| Deformable membrane mechanics | `9,216 x 12 vertices` | `evolveCellMembranes` |
-| Cell-contact hash clear | Center effects, `331,776` vertex-local effects, and `16,384` heads | `clearCellSpatialHash` |
-| Cell-contact hash insertion | `9,216` | `buildCellSpatialHash` |
-| Membrane-pair narrow phase | `9,216`, bounded hash traversal | `resolveMembraneContacts` |
-| Local contact application | `9,216` | `applyCellContactEffects` |
-| Physical edge exposure | `9,216`, bounded hash traversal | `measureCellMembraneExposure` |
-| Connectivity initialization and union | `9,216` | `initializeCellComponents`, `unionCellComponents` |
-| Root compression and segmented lists | `9,216` | `compressCellComponents`, `buildCellComponentLists` |
-| Component viability accumulation | `9,216` | `accumulateCellComponents` |
+| Stable-order active-cell compaction | `256` threads scanning `9,216` slots | `compactActiveCellsOrdered` |
+| Cell energetics and electromechanics | Compacted living cells | `evolveOrganismCells` |
+| Deformable membrane mechanics | Compacted living cells x 12 vertices | `evolveCellMembranes` |
+| Cell-contact reset | `16,384` hash heads plus compacted living-cell effects | `clearCellSpatialHash`, `clearActiveCellContactEffects` |
+| Cell-contact hash insertion | Compacted living cells | `buildCellSpatialHash` |
+| Membrane-pair narrow phase | Compacted living cells, bounded hash traversal | `resolveMembraneContacts` |
+| Local contact application | Compacted living cells | `applyCellContactEffects` |
+| Physical edge exposure | Compacted living cells, bounded hash traversal | `measureCellMembraneExposure` |
+| Connectivity initialization and union | Compacted living cells | `initializeCellComponents`, `unionCellComponents` |
+| Root compression and segmented lists | Compacted living cells | `compressCellComponents`, `buildCellComponentLists` |
+| Component viability accumulation | Compacted living cells | `accumulateCellComponents` |
 | Primary-component selection | Compacted living components, up to `9,216` | `selectPrimaryCellComponents` |
-| Component identity and reassignment | `9,216` | `assignCellComponentOwners`, `reassignCellComponents` |
+| Component identity and reassignment | Compacted living cells | `assignCellComponentOwners`, `reassignCellComponents` |
 | Cell division and tissue reduction | Compacted living components, up to `9,216` | `divideAndReduceOrganismCells` |
 | Mechanical wave update | `193²` | `evolveMechanicalField` |
-| Spinor update | `1024²` | `evolveQuantumField` |
+| Quantum coupling preparation | `193²` | `prepareQuantumCoupling` |
+| Spinor update | `1024²`, sampling prepared coupling | `evolveQuantumField` |
 | Measurement | `193²` / `1024²` | `measureWorld`, `measureQuantumField` |
-| Field rendering | One full-screen triangle | `quantumSurfaceFragment`, `cellularSurfaceFragment`, or `worldSurfaceFragment` |
+| Field rendering | One full-screen triangle, six scale-selected pipelines | ecology, morphology, cellular, molecule, wave, or spinor surface |
 | Visible-cell compaction | `9,216` candidate slots | `compactVisibleCells` |
 | Tissue-contour rendering | GPU-compacted living-cell count, forty-eight-segment membrane fans | `cellVertex`, `cellFragment` |
 | Bright-pass extraction | Quarter drawable dimensions | `bloomPrefilter` |
@@ -1022,10 +1036,15 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 ### GPU-specific implementation decisions
 
 - **Private simulation textures.** Reaction and spinor texture pairs use `MTLStorageMode.private`; only compact observation and reduction buffers are CPU-visible.
+- **Native Metal 4 submission.** Three reusable allocator slots encode through `MTL4CommandBuffer`, submit through `MTL4CommandQueue`, and retire through commit feedback. The CPU never blocks to admit a fourth unfinished submission.
+- **Argument-table binding.** Compute and render resources are bound by GPU address or resource ID through `MTL4ArgumentTable`; per-dispatch legacy encoder buffer and texture binding is absent.
+- **Explicit residency.** Causal buffers, textures, pipelines, checkpoint banks, readback rings, and uniform arenas occupy a stable residency set. Resizable render targets and presentation resources use separate dynamic sets.
+- **AOT pipeline archive.** `metal-tt` packages all captured Metal 4 descriptors. Runtime telemetry distinguishes archive hits from compiler fallback; the reference release reports zero misses.
 - **True ping-pong state.** The renderer swaps `MTLTexture` references after each update instead of blitting entire state textures back into fixed roles.
-- **Scoped barriers.** Cell topology and contact use barriers only between hash/list clear, insertion, narrow-phase accumulation, local application, union-find stages, owner reassignment, list reconstruction, and reduction. Each barrier names only resources read by the next dependent pass.
+- **Dependency barriers.** Cell topology and contact insert pass barriers only between hash/list clear, insertion, narrow-phase accumulation, local application, union-find stages, owner reassignment, list reconstruction, and reduction. Redundant logical-encoder barriers are suppressed.
 - **Consume-and-zero forcing.** Cells accumulate contraction impulses into a private signed fixed-point buffer. `evolveMechanicalField` uses relaxed atomic exchange to consume and clear each vector element in the same pass, eliminating a separate `193²` clear dispatch per simulation step.
 - **Power-of-two addressing.** The `1024²` spinor lattice uses integer masks instead of modulus for periodic neighbors.
+- **Prepared quantum coupling.** One `193²` `RGBA32Float` field stores coin and potential sine/cosine values. The `1024²` spinor update samples it instead of repeating trigonometry and biological-field reads for every quantum pixel.
 - **Modulo-free reaction neighbors.** The non-power-of-two `193²` reaction lattice precomputes left, right, up, and down coordinates once per site; cardinal and diagonal tables reuse them instead of executing twelve signed modulo operations per site and step.
 - **Sparse reaction-genome reads.** A zero-biomass neighbor has exactly zero occupancy, colonization pressure, prey opportunity, and attack contribution. `reactWorld` therefore skips its three genome-texture reads and hash calculation without changing the update equation.
 - **Private persistent individuals.** Agent, cell, regulatory, resonance, polygon, lineage, occupancy, and aggregate buffers remain GPU-private. The CPU receives periodic reductions and asynchronous observation copies.
@@ -1033,6 +1052,8 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Dominant-program cache.** Homogeneous cells use the inherited trait and recognition vectors already cached in their component's `AgentState`. Only a mixed-program cell whose program index differs from the component's dominant index reads the independent `96 B` program record.
 - **Linear HDR scene.** Scale-specialized field, cell, and organism fragments write unclamped values into a drawable-sized `RG11B10Float` target. Display transfer is deferred to the final composite.
 - **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; intermediate scales expose phase winding, density isolines, reaction channels, trait-dependent morphology, resource flux, and geological gradients.
+- **Static deep-scale fragments.** Molecule, wave, and spinor views use separate MSL 4.0 entry points instantiated from one scale template. Wave and spinor binaries contain no molecular-field path; the spinor binary selects nearest-lattice sampling without a runtime scale branch.
+- **Metal 4 counter heaps.** Sampled submissions timestamp chemistry, component mechanics, cell physiology, contact, topology, division, field mechanics, quantum evolution, rendering, and postprocessing without feeding timing data into causal kernels.
 - **Measured process chains.** Every observation scale exposes four compact observer nodes linking its measured input, state transition, and downstream output. These SwiftUI summaries read asynchronous reductions and never write simulation state.
 - **Exact deep-lattice sampling.** At `420x` and above, the spinor instrument uses nearest-cell `RGBA32Float` samples instead of blending adjacent lattice states. Wave-scale views retain linear filtering.
 - **Morphology from membrane construction.** The renderer contains no abdomen, leg, jaw, spine, or insect body primitive. Predatory protrusions, armor, sensory extensions, and locomotor extensions are visible only where exposed cells deform their simulated membrane vertices under the corresponding inherited regulatory output.
@@ -1052,6 +1073,21 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 These choices follow Metal's explicit resource, command-encoder, and synchronization model [7-9].
 
 ## Measured GPU optimization
+
+### Metal 4 migration acceptance measurement
+
+The reproducible headless reference command is:
+
+```bash
+.build/release/NumiAutomata experiment \
+  --steps 12000 --seed 8 --batch 32 \
+  --sample-every 12000 --audit-every 1200 --quantum-stride 3 \
+  --output /tmp/numi-metal4-reference.jsonl
+```
+
+On the development M4, migration runs completed all `12,000` steps at `757-1,002 steps/s` with invariant flags `0x0`; the lower endpoint was measured while another Metal simulator workload was active. The untouched pre-migration commit measured approximately `1,043 steps/s` under the same command. The proposed `1,750 steps/s` acceptance threshold is therefore not met and is not claimed. The migration establishes native Metal 4 execution, deterministic recovery, active-cell indirect dispatch, AOT archive coverage, and richer telemetry, but further isolated profiling is required before asserting a throughput improvement. Pipeline initialization reports `61` archive hits, zero misses, and approximately `5.6 ms` total lookup time on the reference installation.
+
+Historical frame traces below remain labeled by implementation stage. They are not evidence that the current Metal 4 graph is faster than the immediately preceding backend.
 
 ### State-transport optimization
 
@@ -1125,7 +1161,7 @@ These are single-device engineering traces, not cross-device benchmarks. The Xco
 ### Requirements
 
 - macOS `26` or newer, as declared in `Package.swift`.
-- A Metal-capable Mac.
+- Apple silicon with Metal 4 support (`M1` or newer).
 - Xcode command-line tools with Swift `6.2` package support or newer.
 
 ### Run
@@ -1184,7 +1220,7 @@ This run can take hours as cellular occupancy and contact density change. A term
 
 `--batch` controls command-buffer submission granularity, not the equations. `--quantum-stride 3` reproduces the default ratio of three biological updates per quantum update. Rendering, visible-cell compaction, bloom, and drawable presentation are omitted. Reaction chemistry, agents, cells, membranes, spatial hashes, contact, connectivity, fission/fusion, tissue reduction, mechanical waves, perturbation cadence, and quantum feedback use the same encoder functions as the interactive application.
 
-The schema-v11 JSONL stream contains a header, exact typed physical events, periodic samples, and a terminal summary. Evidence claims now declare `currentPopulation` or `accumulatedHistory` time basis and endogenous predictability is distinct from mechanochemical autonomy. Events carry a 64-bit program identity formed from the recyclable slot index and monotonically advancing slot generation, plus the exact parent handle when one exists; 32-bit genome hashes remain diagnostic fingerprints and are not used as lineage identity. Component births with a physical parent are additionally classified as fissions; cell divisions and program mutations have independent counters and event types. Samples report physical components, living cells, component-descent depth, program-replication generation, descendant representation, active and recycled program slots, membrane-derived morphology, junction count/load, cross-component contact, membrane breach, resisted attack, trophic transfer count and energy, fusion contact and successful fusion, signed energy residual, causal-loop fluxes, resolved cell/component partitions, cell- and component-level autonomy distributions, program cooperation/conflict, interval-specific multilevel transmission terms, and all invariant counters. No observer category is encoded as a causal state.
+The schema-v12 JSONL stream contains a header, exact typed physical events, periodic samples, and a terminal summary; schema-v11 telemetry remains decodable. Evidence claims declare `currentPopulation` or `accumulatedHistory` time basis and endogenous predictability is distinct from mechanochemical autonomy. Events carry a 64-bit program identity formed from the recyclable slot index and monotonically advancing slot generation, plus the exact parent handle when one exists; 32-bit genome hashes remain diagnostic fingerprints and are not used as lineage identity. Component births with a physical parent are additionally classified as fissions; cell divisions and program mutations have independent counters and event types. Samples report physical components, living cells, component-descent depth, program-replication generation, descendant representation, active and recycled program slots, membrane-derived morphology, junction count/load, cross-component contact, membrane breach, resisted attack, trophic transfer count and energy, fusion contact and successful fusion, signed energy residual, causal-loop fluxes, resolved cell/component partitions, cell- and component-level autonomy distributions, program cooperation/conflict, interval-specific multilevel transmission terms, Metal 4 execution telemetry, and all invariant counters. No observer category is encoded as a causal state.
 
 The terminal `IndividualityEvidence` report assigns explicit `supported`, `inconclusive`, or `notSupported` states independently. Conditional self-predictive information includes bootstrap confidence intervals, a block-shuffled null bound, empirical autocorrelation time, and effective observation-window count. Physical descent requires program representation after independent component separation. Heritable variation requires a mutated program to be transmitted into such a descendant. Differential transmission requires at least eight contributing parent-component samples and a nonzero 95% bootstrap interval for a multilevel Price term. Only their conjunction supports `darwinianEvolution`; fission alone never does. Program counts are read from generation-valid living-cell references. Growth inside a persistent parent component is excluded from reproductive output. The Price report partitions between-component selection, within-component selection, and transmission change, and estimates parent-descendant collective resemblance. Collective support additionally requires positive 95% intervals for between-component covariance and collective resemblance; no aggregate fitness score substitutes for this evidence.
 

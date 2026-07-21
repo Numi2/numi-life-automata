@@ -43,11 +43,17 @@ enum RecoveryProbeCLI {
         var targetStep: UInt64 = 2_640
         var faultStep: UInt64 = 1_800
         var allowConcurrent = false
+        var simulateStall = false
         var index = arguments.startIndex
         while index < arguments.endIndex {
             let option = arguments[index]
             if option == "--allow-concurrent" {
                 allowConcurrent = true
+                index = arguments.index(after: index)
+                continue
+            }
+            if option == "--stall" {
+                simulateStall = true
                 index = arguments.index(after: index)
                 continue
             }
@@ -71,8 +77,11 @@ enum RecoveryProbeCLI {
         let admissionLock = try ExperimentAdmissionLock.acquire(unless: allowConcurrent)
         defer { withExtendedLifetime(admissionLock) {} }
 
-        setenv("NUMI_SYNTHETIC_METAL_FAULT_STEP", String(faultStep), 1)
-        defer { unsetenv("NUMI_SYNTHETIC_METAL_FAULT_STEP") }
+        let faultVariable = simulateStall
+            ? "NUMI_SYNTHETIC_METAL_STALL_STEP"
+            : "NUMI_SYNTHETIC_METAL_FAULT_STEP"
+        setenv(faultVariable, String(faultStep), 1)
+        defer { unsetenv(faultVariable) }
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw EvolutionRendererError.noMetalDevice
         }

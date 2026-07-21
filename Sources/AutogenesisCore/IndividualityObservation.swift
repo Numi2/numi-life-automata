@@ -447,7 +447,84 @@ public enum EvolutionaryEvidence {
     }
 }
 
+public enum MetalDeviceTuningProfile: String, Codable, Sendable, Equatable {
+    case genericMetal4
+    case m4Optimized
+}
+
+public struct MetalPhaseTiming: Codable, Sendable, Equatable {
+    public let phase: String
+    public let gpuMilliseconds: Double
+
+    public init(phase: String, gpuMilliseconds: Double) {
+        self.phase = phase
+        self.gpuMilliseconds = gpuMilliseconds
+    }
+}
+
+public struct PipelineArchiveTelemetry: Codable, Sendable, Equatable {
+    public let loaded: Bool
+    public let hits: Int
+    public let misses: Int
+    public let pipelineCount: Int
+    public let compileMilliseconds: Double
+    public let error: String?
+
+    public init(
+        loaded: Bool,
+        hits: Int,
+        misses: Int,
+        pipelineCount: Int,
+        compileMilliseconds: Double,
+        error: String?
+    ) {
+        self.loaded = loaded
+        self.hits = hits
+        self.misses = misses
+        self.pipelineCount = pipelineCount
+        self.compileMilliseconds = compileMilliseconds
+        self.error = error
+    }
+
+    public static let unavailable = PipelineArchiveTelemetry(
+        loaded: false,
+        hits: 0,
+        misses: 0,
+        pipelineCount: 0,
+        compileMilliseconds: 0,
+        error: nil
+    )
+}
+
+public struct ResidencyTelemetry: Codable, Sendable, Equatable {
+    public let residentBytes: UInt64
+    public let allocatorSlots: Int
+    public let allocatorHighWatermark: Int
+    public let uniformArenaHighWaterBytes: Int
+
+    public init(
+        residentBytes: UInt64,
+        allocatorSlots: Int,
+        allocatorHighWatermark: Int,
+        uniformArenaHighWaterBytes: Int
+    ) {
+        self.residentBytes = residentBytes
+        self.allocatorSlots = allocatorSlots
+        self.allocatorHighWatermark = allocatorHighWatermark
+        self.uniformArenaHighWaterBytes = uniformArenaHighWaterBytes
+    }
+
+    public static let unavailable = ResidencyTelemetry(
+        residentBytes: 0,
+        allocatorSlots: 3,
+        allocatorHighWatermark: 0,
+        uniformArenaHighWaterBytes: 0
+    )
+}
+
 public struct RendererRuntimeTelemetry: Codable, Sendable, Equatable {
+    public let backendVersion: String
+    public let tuningProfile: MetalDeviceTuningProfile
     public let scheduledStep: UInt64
     public let gpuCompletedStep: UInt64
     public let scientificallyCommittedStep: UInt64
@@ -457,9 +534,17 @@ public struct RendererRuntimeTelemetry: Codable, Sendable, Equatable {
     public let checkpointStep: UInt64
     public let lastRestoredCheckpointStep: UInt64?
     public let recoveryCount: UInt32
+    public let recoveryEpoch: UInt64
+    public let cpuEncodeMilliseconds: Double
+    public let totalGPUMilliseconds: Double
+    public let phaseTimings: [MetalPhaseTiming]
+    public let pipelineArchive: PipelineArchiveTelemetry
+    public let residency: ResidencyTelemetry
     public let lastError: String?
 
     public init(
+        backendVersion: String = "Metal 4",
+        tuningProfile: MetalDeviceTuningProfile = .genericMetal4,
         scheduledStep: UInt64,
         gpuCompletedStep: UInt64,
         scientificallyCommittedStep: UInt64,
@@ -469,8 +554,16 @@ public struct RendererRuntimeTelemetry: Codable, Sendable, Equatable {
         checkpointStep: UInt64,
         lastRestoredCheckpointStep: UInt64?,
         recoveryCount: UInt32,
+        recoveryEpoch: UInt64 = 0,
+        cpuEncodeMilliseconds: Double = 0,
+        totalGPUMilliseconds: Double = 0,
+        phaseTimings: [MetalPhaseTiming] = [],
+        pipelineArchive: PipelineArchiveTelemetry = .unavailable,
+        residency: ResidencyTelemetry = .unavailable,
         lastError: String?
     ) {
+        self.backendVersion = backendVersion
+        self.tuningProfile = tuningProfile
         self.scheduledStep = scheduledStep
         self.gpuCompletedStep = gpuCompletedStep
         self.scientificallyCommittedStep = scientificallyCommittedStep
@@ -480,7 +573,71 @@ public struct RendererRuntimeTelemetry: Codable, Sendable, Equatable {
         self.checkpointStep = checkpointStep
         self.lastRestoredCheckpointStep = lastRestoredCheckpointStep
         self.recoveryCount = recoveryCount
+        self.recoveryEpoch = recoveryEpoch
+        self.cpuEncodeMilliseconds = cpuEncodeMilliseconds
+        self.totalGPUMilliseconds = totalGPUMilliseconds
+        self.phaseTimings = phaseTimings
+        self.pipelineArchive = pipelineArchive
+        self.residency = residency
         self.lastError = lastError
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case backendVersion, tuningProfile, scheduledStep, gpuCompletedStep
+        case scientificallyCommittedStep, stepsPerSecond, unfinishedCommandBuffers
+        case maximumCommandBuffers, checkpointStep, lastRestoredCheckpointStep
+        case recoveryCount, recoveryEpoch, cpuEncodeMilliseconds, totalGPUMilliseconds
+        case phaseTimings, pipelineArchive, residency, lastError
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        backendVersion = try container.decodeIfPresent(String.self, forKey: .backendVersion)
+            ?? "Metal 3"
+        tuningProfile = try container.decodeIfPresent(
+            MetalDeviceTuningProfile.self,
+            forKey: .tuningProfile
+        ) ?? .genericMetal4
+        scheduledStep = try container.decode(UInt64.self, forKey: .scheduledStep)
+        gpuCompletedStep = try container.decode(UInt64.self, forKey: .gpuCompletedStep)
+        scientificallyCommittedStep = try container.decode(
+            UInt64.self,
+            forKey: .scientificallyCommittedStep
+        )
+        stepsPerSecond = try container.decode(Double.self, forKey: .stepsPerSecond)
+        unfinishedCommandBuffers = try container.decode(
+            Int.self,
+            forKey: .unfinishedCommandBuffers
+        )
+        maximumCommandBuffers = try container.decode(Int.self, forKey: .maximumCommandBuffers)
+        checkpointStep = try container.decode(UInt64.self, forKey: .checkpointStep)
+        lastRestoredCheckpointStep = try container.decodeIfPresent(
+            UInt64.self,
+            forKey: .lastRestoredCheckpointStep
+        )
+        recoveryCount = try container.decode(UInt32.self, forKey: .recoveryCount)
+        recoveryEpoch = try container.decodeIfPresent(UInt64.self, forKey: .recoveryEpoch) ?? 0
+        cpuEncodeMilliseconds = try container.decodeIfPresent(
+            Double.self,
+            forKey: .cpuEncodeMilliseconds
+        ) ?? 0
+        totalGPUMilliseconds = try container.decodeIfPresent(
+            Double.self,
+            forKey: .totalGPUMilliseconds
+        ) ?? 0
+        phaseTimings = try container.decodeIfPresent(
+            [MetalPhaseTiming].self,
+            forKey: .phaseTimings
+        ) ?? []
+        pipelineArchive = try container.decodeIfPresent(
+            PipelineArchiveTelemetry.self,
+            forKey: .pipelineArchive
+        ) ?? .unavailable
+        residency = try container.decodeIfPresent(
+            ResidencyTelemetry.self,
+            forKey: .residency
+        ) ?? .unavailable
+        lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
     }
 
     public static let idle = RendererRuntimeTelemetry(

@@ -48,6 +48,15 @@ trap 'rm -rf "$temporary_root"' EXIT
 
 print "Building Numi Automata (release)..."
 cd "$root"
+./Scripts/build-metal4-assets.sh
+if [[ ! -s Sources/AutogenesisMetal/Shaders/Replicator.metallib ]]; then
+    print -u2 "error: ahead-of-time Metal 4 shader library was not produced"
+    exit 1
+fi
+if [[ ! -s Sources/AutogenesisMetal/Shaders/Replicator.mtl4archive ]]; then
+    print -u2 "error: ahead-of-time Metal 4 pipeline archive was not produced"
+    exit 1
+fi
 swift build -c release --product "$executable_name" --jobs 4
 binary_directory="$(swift build -c release --show-bin-path)"
 

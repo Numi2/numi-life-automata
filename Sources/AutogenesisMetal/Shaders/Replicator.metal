@@ -1272,6 +1272,17 @@ inline float4 quantumCoin(float4 spinor, float theta) {
     );
 }
 
+inline float4 quantumCoinPrepared(float4 spinor, float2 coin) {
+    float2 a = spinor.xy;
+    float2 b = spinor.zw;
+    return float4(
+        coin.x * a.x + coin.y * b.y,
+        coin.x * a.y - coin.y * b.x,
+        coin.y * a.y + coin.x * b.x,
+        -coin.y * a.x + coin.x * b.y
+    );
+}
+
 kernel void initializeQuantumField(
     texture2d<float, access::write> quantumOut [[texture(0)]],
     constant SimulationUniforms& uniforms [[buffer(0)]],
@@ -1298,12 +1309,31 @@ kernel void initializeQuantumField(
     quantumOut.write(float4(superposition * 0.9238795, superposition * 0.3826834), gid);
 }
 
+kernel void prepareQuantumCoupling(
+    texture2d_array<float, access::read> state [[texture(0)]],
+    texture2d_array<float, access::read> genomeA [[texture(1)]],
+    texture2d_array<float, access::read> ecology [[texture(2)]],
+    texture2d<float, access::write> coupling [[texture(3)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) { return; }
+    float4 localState = state.read(gid, 0);
+    float4 localGenome = genomeA.read(gid, 0);
+    float4 localEcology = ecology.read(gid, 0);
+    float theta = 0.18 + 0.16 * saturate(localState.w * 4.0) +
+        0.06 * localGenome.y;
+    float potential = 0.012 * (
+        localState.x + localEcology.x * 0.8 + localState.y * 2.2 +
+        localState.w * 3.0 + localEcology.z * 1.4
+    );
+    coupling.write(float4(cos(theta), sin(theta), cos(potential), sin(potential)), gid);
+}
+
 kernel void evolveQuantumField(
     texture2d<float, access::read> quantumIn [[texture(0)]],
-    texture2d_array<float, access::read> state [[texture(1)]],
-    texture2d_array<float, access::read> genomeA [[texture(2)]],
-    texture2d_array<float, access::read> ecology [[texture(3)]],
-    texture2d<float, access::write> quantumOut [[texture(4)]],
+    texture2d<float, access::read> coupling [[texture(1)]],
+    texture2d<float, access::write> quantumOut [[texture(2)]],
     constant SimulationUniforms& uniforms [[buffer(0)]],
     constant uint& quantumStep [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]
@@ -1324,28 +1354,19 @@ kernel void evolveQuantumField(
         sourceB * biologicalSize / quantumGridSize,
         biologicalMax
     );
-    float4 stateA = state.read(bioA, 0);
-    float4 stateB = state.read(bioB, 0);
-    float4 geneAValue = genomeA.read(bioA, 0);
-    float4 geneBValue = genomeA.read(bioB, 0);
-    float thetaA = 0.18 + 0.16 * saturate(stateA.w * 4.0) + 0.06 * geneAValue.y;
-    float thetaB = 0.18 + 0.16 * saturate(stateB.w * 4.0) + 0.06 * geneBValue.y;
-    float4 coinA = quantumCoin(quantumIn.read(sourceA), thetaA);
-    float4 coinB = quantumCoin(quantumIn.read(sourceB), thetaB);
+    float4 couplingA = coupling.read(bioA);
+    float4 couplingB = coupling.read(bioB);
+    float4 coinA = quantumCoinPrepared(quantumIn.read(sourceA), couplingA.xy);
+    float4 coinB = quantumCoinPrepared(quantumIn.read(sourceB), couplingB.xy);
     float4 shifted = float4(coinA.xy, coinB.zw);
 
     uint2 bio = min(
         gid * biologicalSize / quantumGridSize,
         biologicalMax
     );
-    float4 localState = state.read(bio, 0);
-    float4 localEcology = ecology.read(bio, 0);
-    float potential = 0.012 * (
-        localState.x + localEcology.x * 0.8 + localState.y * 2.2 +
-        localState.w * 3.0 + localEcology.z * 1.4
-    );
-    float phaseCosine = cos(potential);
-    float phaseSine = sin(potential);
+    float2 phase = coupling.read(bio).zw;
+    float phaseCosine = phase.x;
+    float phaseSine = phase.y;
     shifted = float4(
         phaseCosine * shifted.x + phaseSine * shifted.y,
         phaseCosine * shifted.y - phaseSine * shifted.x,
@@ -2993,8 +3014,12 @@ kernel void collectCellObservations(
     constant SimulationUniforms& uniforms [[buffer(8)]],
     device const DevelopmentalGenome* developmentalGenomes [[buffer(9)]],
     device const ProgramSlotState* programSlots [[buffer(10)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     CellIdentity identity = cellIdentities[gid];
@@ -3352,38 +3377,20 @@ kernel void initializeCellComponents(
     device atomic_uint* componentPrograms [[buffer(7)]],
     device atomic_uint* componentCellHeads [[buffer(8)]],
     device uint* componentCellNext [[buffer(9)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
-    if (gid < maxAgentCount) {
-        atomic_store_explicit(
-            &ownerPrimaryRoots[gid], emptySpatialHashEntry, memory_order_relaxed
-        );
-    }
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
-    atomic_store_explicit(&componentCounts[gid], 0u, memory_order_relaxed);
-    atomic_store_explicit(&componentOwners[gid], emptySpatialHashEntry, memory_order_relaxed);
-    atomic_store_explicit(&componentPrograms[gid], 0u, memory_order_relaxed);
-    atomic_store_explicit(
-        &componentCellHeads[gid], emptySpatialHashEntry, memory_order_relaxed
-    );
-    componentCellNext[gid] = emptySpatialHashEntry;
-    for (uint channel = 0u; channel < 5u; ++channel) {
-        atomic_store_explicit(
-            &componentAccumulation[gid * 5u + channel], 0, memory_order_relaxed
-        );
-    }
     CellIdentity identity = cellIdentities[gid];
-    if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u ||
-        identity.owner >= maxAgentCount) {
-        atomic_store_explicit(
-            &componentParents[gid], emptySpatialHashEntry, memory_order_relaxed
-        );
-        identity.componentRoot = emptySpatialHashEntry;
-    } else {
+    if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) != 0u &&
+        identity.owner < maxAgentCount) {
         atomic_store_explicit(&componentParents[gid], gid, memory_order_relaxed);
         identity.componentRoot = gid;
+        cellIdentities[gid] = identity;
     }
-    cellIdentities[gid] = identity;
 }
 
 kernel void unionCellComponents(
@@ -3399,8 +3406,12 @@ kernel void unionCellComponents(
     constant SimulationUniforms& uniforms [[buffer(9)]],
     device const HeritableProgram* heritablePrograms [[buffer(10)]],
     device atomic_uint* identityCounters [[buffer(11)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     uint owner = cellIdentities[gid].owner;
@@ -3536,8 +3547,12 @@ kernel void compressCellComponents(
     device const atomic_uint* cellOccupancy [[buffer(0)]],
     device atomic_uint* componentParents [[buffer(1)]],
     device CellIdentity* cellIdentities [[buffer(2)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     uint root = findCellComponentRoot(componentParents, gid);
@@ -3552,8 +3567,12 @@ kernel void buildCellComponentLists(
     device const CellIdentity* cellIdentities [[buffer(1)]],
     device atomic_uint* componentCellHeads [[buffer(2)]],
     device uint* componentCellNext [[buffer(3)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) {
         if (gid < maxCellCount) { componentCellNext[gid] = emptySpatialHashEntry; }
@@ -3576,8 +3595,12 @@ kernel void accumulateCellComponents(
     device atomic_uint* componentCounts [[buffer(3)]],
     device atomic_int* componentAccumulation [[buffer(4)]],
     device atomic_uint* componentOwners [[buffer(5)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     uint root = cellIdentities[gid].componentRoot;
@@ -3687,8 +3710,12 @@ kernel void assignCellComponentOwners(
     device const atomic_uint* componentCellHeads [[buffer(20)]],
     device const uint* componentCellNext [[buffer(21)]],
     device ProgramSlotState* programSlots [[buffer(22)]],
-    uint root [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint root = activeCellIndices[compactIndex];
     if (root >= maxCellCount) { return; }
     uint componentCount = atomic_load_explicit(&componentCounts[root], memory_order_relaxed);
     if (componentCount == 0u) { return; }
@@ -3915,8 +3942,12 @@ kernel void reassignCellComponents(
     device CellJunctionState* junctionStates [[buffer(12)]],
     device const atomic_uint* ownerCellHeads [[buffer(13)]],
     device const uint* ownerCellNext [[buffer(14)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     CellIdentity identity = cellIdentities[gid];
@@ -4167,13 +4198,17 @@ kernel void evolveOrganismCells(
     device atomic_uint* cellEnergyExchange [[buffer(20)]],
     device atomic_int* energyAudit [[buffer(21)]],
     device CellJunctionState* cellJunctions [[buffer(22)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
     texture2d_array<float, access::read> state [[texture(0)]],
     texture2d_array<float, access::read> ecology [[texture(1)]],
     texture2d_array<float, access::read> environment [[texture(2)]],
     texture2d_array<float, access::read> events [[texture(3)]],
     texture2d_array<float, access::read> mechanicalField [[texture(4)]],
-    uint gid [[thread_position_in_grid]]
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
     CellIdentity cellIdentity = cellIdentities[gid];
     uint owner = cellIdentity.owner;
@@ -4990,8 +5025,12 @@ kernel void evolveCellMembranes(
     device const AgentState* agents [[buffer(6)]],
     device const HeritableProgram* heritablePrograms [[buffer(7)]],
     device const ProgramSlotState* programSlots [[buffer(8)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
 
@@ -5268,22 +5307,33 @@ kernel void evolveCellMembranes(
 
 kernel void clearCellSpatialHash(
     device atomic_uint* hashHeads [[buffer(0)]],
-    device atomic_int* contactEffects [[buffer(1)]],
-    device atomic_uint* ownerCellHeads [[buffer(2)]],
-    device atomic_int* membraneContactEffects [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid < cellSpatialHashBucketCount) {
         atomic_store_explicit(&hashHeads[gid], emptySpatialHashEntry, memory_order_relaxed);
     }
-    if (gid < maxCellCount * 4u) {
-        atomic_store_explicit(&contactEffects[gid], 0, memory_order_relaxed);
+}
+
+kernel void clearActiveCellContactEffects(
+    device atomic_int* contactEffects [[buffer(0)]],
+    device atomic_int* membraneContactEffects [[buffer(1)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint cellIndex = activeCellIndices[compactIndex];
+    if (cellIndex >= maxCellCount) { return; }
+    for (uint channel = 0u; channel < 4u; ++channel) {
+        atomic_store_explicit(
+            &contactEffects[cellIndex * 4u + channel], 0, memory_order_relaxed
+        );
     }
-    if (gid < maxCellCount * membraneVertexCount * 3u) {
-        atomic_store_explicit(&membraneContactEffects[gid], 0, memory_order_relaxed);
-    }
-    if (gid < maxAgentCount) {
-        atomic_store_explicit(&ownerCellHeads[gid], emptySpatialHashEntry, memory_order_relaxed);
+    uint membraneBase = cellIndex * membraneVertexCount * 3u;
+    for (uint channel = 0u; channel < membraneVertexCount * 3u; ++channel) {
+        atomic_store_explicit(
+            &membraneContactEffects[membraneBase + channel], 0, memory_order_relaxed
+        );
     }
 }
 
@@ -5337,8 +5387,12 @@ kernel void buildOwnerCellLists(
     device const CellIdentity* cellIdentities [[buffer(2)]],
     device atomic_uint* ownerCellHeads [[buffer(3)]],
     device atomic_uint* ownerCellNext [[buffer(4)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
     uint owner = cellIdentities[gid].owner;
     if (owner >= maxAgentCount ||
@@ -5363,8 +5417,12 @@ kernel void buildCellSpatialHash(
     device const CellIdentity* cellIdentities [[buffer(7)]],
     device atomic_uint* ownerCellHeads [[buffer(8)]],
     device atomic_uint* ownerCellNext [[buffer(9)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
     uint owner = cellIdentities[gid].owner;
     if (owner >= maxAgentCount ||
@@ -5516,8 +5574,12 @@ kernel void resolveMembraneContacts(
     device const ProgramSlotState* programSlots [[buffer(13)]],
     device atomic_int* energyAudit [[buffer(14)]],
     device atomic_uint* identityCounters [[buffer(15)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     uint owner = cellIdentities[gid].owner;
@@ -5804,8 +5866,12 @@ kernel void applyCellContactEffects(
     device const CellIdentity* cellIdentities [[buffer(5)]],
     device atomic_int* membraneContactEffects [[buffer(6)]],
     device atomic_int* energyAudit [[buffer(7)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
     int rawX = atomic_exchange_explicit(&contactEffects[gid * 4u], 0, memory_order_relaxed);
     int rawY = atomic_exchange_explicit(&contactEffects[gid * 4u + 1u], 0, memory_order_relaxed);
@@ -5927,8 +5993,12 @@ kernel void clearInvariantScratch(
 kernel void auditContactMomentum(
     device const atomic_int* contactEffects [[buffer(0)]],
     device atomic_int* scratch [[buffer(1)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
     atomic_fetch_add_explicit(
         &scratch[0], atomic_load_explicit(&contactEffects[gid * 4u], memory_order_relaxed),
@@ -6176,8 +6246,12 @@ kernel void measureCellMembraneExposure(
     device const atomic_uint* agentOccupancy [[buffer(8)]],
     device const DevelopmentalGenome* developmentalGenomes [[buffer(9)]],
     device const ProgramSlotState* programSlots [[buffer(10)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     uint owner = cellIdentities[gid].owner;
@@ -7016,6 +7090,49 @@ kernel void prepareActiveComponentDispatch(
     dispatchArguments[2] = 1u;
 }
 
+kernel void compactActiveCellsOrdered(
+    device const atomic_uint* cellOccupancy [[buffer(0)]],
+    device uint* activeCellIndices [[buffer(1)]],
+    device atomic_uint* activeCellCount [[buffer(2)]],
+    device uint* dispatchArguments [[buffer(3)]],
+    uint threadIndex [[thread_index_in_threadgroup]],
+    uint threadCount [[threads_per_threadgroup]]
+) {
+    threadgroup uint localCounts[256];
+    threadgroup uint localOffsets[256];
+    uint chunkSize = (maxCellCount + threadCount - 1u) / threadCount;
+    uint start = min(threadIndex * chunkSize, maxCellCount);
+    uint end = min(start + chunkSize, maxCellCount);
+    uint localCount = 0u;
+    for (uint cellIndex = start; cellIndex < end; ++cellIndex) {
+        if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) != 0u) {
+            localCount += 1u;
+        }
+    }
+    localCounts[threadIndex] = localCount;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (threadIndex == 0u) {
+        uint prefix = 0u;
+        for (uint index = 0u; index < threadCount; ++index) {
+            localOffsets[index] = prefix;
+            prefix += localCounts[index];
+        }
+        atomic_store_explicit(activeCellCount, prefix, memory_order_relaxed);
+        dispatchArguments[0] = (prefix + 63u) / 64u;
+        dispatchArguments[1] = 1u;
+        dispatchArguments[2] = 1u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint output = localOffsets[threadIndex];
+    for (uint cellIndex = start; cellIndex < end; ++cellIndex) {
+        if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) != 0u) {
+            activeCellIndices[output++] = cellIndex;
+        }
+    }
+}
+
 kernel void expandAgents(
     device AgentState* agents [[buffer(0)]],
     device atomic_uint* occupancy [[buffer(1)]],
@@ -7035,8 +7152,12 @@ kernel void compactVisibleCells(
     device atomic_uint* drawArguments [[buffer(3)]],
     constant SimulationUniforms& uniforms [[buffer(4)]],
     device const CellIdentity* cellIdentities [[buffer(5)]],
-    uint gid [[thread_position_in_grid]]
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
         atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
     uint owner = cellIdentities[gid].owner;
@@ -7154,6 +7275,10 @@ fragment float4 compositeFragment(
     float3 linearBloom = uniforms.bloomIntensity > 0.001
         ? float3(bloom.sample(linearSampler, input.uv).rgb)
         : float3(0.0);
+    if (!all(isfinite(linearScene))) { linearScene = float3(0.0); }
+    if (!all(isfinite(linearBloom))) { linearBloom = float3(0.0); }
+    linearScene = clamp(linearScene, 0.0, 16.0);
+    linearBloom = clamp(linearBloom, 0.0, 16.0);
     float3 hdr = linearScene * uniforms.exposure + linearBloom * uniforms.bloomIntensity;
 
     float peak = max(max(hdr.r, hdr.g), hdr.b);
@@ -7295,7 +7420,7 @@ inline float3 molecularReactionVisualization(
 ) {
     const float3 resourceAColor = float3(0.015, 0.56, 1.0);
     const float3 resourceBColor = float3(0.48, 0.12, 1.0);
-    const float3 catalystColor = float3(1.0, 0.035, 0.62);
+    const float3 catalystColor = float3(0.02, 0.92, 0.74);
     const float3 energyColor = float3(1.0, 0.68, 0.025);
     const float3 membraneColor = float3(0.03, 1.0, 0.58);
     const float3 detritusColor = float3(1.0, 0.30, 0.025);
@@ -7482,7 +7607,7 @@ inline float3 molecularReactionVisualization(
         color += float3(1.0, 0.12, 0.035) * saturate(geneA.x) * 0.34;
         color += float3(0.04, 0.94, 0.58) * saturate(geneA.y) * 0.31;
         color += float3(0.08, 0.42, 1.0) * saturate(geneA.z) * 0.28;
-        color += float3(0.94, 0.06, 0.72) * saturate(geneC.w) * 0.34;
+        color += float3(0.94, 0.46, 0.04) * saturate(geneC.w) * 0.34;
         color *= 0.72 + fieldContour * 0.44;
     } else if (displayMode == 3u) {
         color = float3(0.002, 0.004, 0.009) +
@@ -7574,7 +7699,11 @@ vertex CellRasterData cellVertex(
     uint instanceID [[instance_id]]
 ) {
     uint cellIndex = visibleCellIndices[instanceID];
+    CellRasterData output = {};
+    output.position = float4(3.0, 3.0, 0.0, 1.0);
+    if (cellIndex >= maxCellCount) { return output; }
     uint owner = cellIdentities[cellIndex].owner;
+    if (owner >= maxAgentCount) { return output; }
     AgentState agent = agents[owner];
     CellState cell = cells[cellIndex];
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
@@ -7590,12 +7719,23 @@ vertex CellRasterData cellVertex(
     float2 cellCenter = cellWorldPosition(agent, cell.position, uniforms);
     uint triangle = vertexID / 3u;
     uint triangleVertex = vertexID % 3u;
-    uint membraneSample = triangleVertex == 1u
-        ? triangle
-        : (triangleVertex == 2u ? triangle + 1u : 0u);
+    float2 membraneStart = smoothMembranePosition(membraneVertices, cellIndex, triangle);
+    float2 membraneEnd = smoothMembranePosition(membraneVertices, cellIndex, triangle + 1u);
+    uint membraneSample = triangleVertex == 2u ? triangle + 1u : triangle;
     float2 membranePosition = triangleVertex == 0u
         ? float2(0.0)
-        : smoothMembranePosition(membraneVertices, cellIndex, membraneSample);
+        : (triangleVertex == 1u ? membraneStart : membraneEnd);
+    float startRadius = length(membraneStart);
+    float endRadius = length(membraneEnd);
+    float membraneEdgeLength = length(membraneEnd - membraneStart);
+    float signedTriangleArea = membraneStart.x * membraneEnd.y -
+        membraneStart.y * membraneEnd.x;
+    bool finiteGeometry = all(isfinite(cellCenter)) &&
+        all(isfinite(membraneStart)) && all(isfinite(membraneEnd)) &&
+        all(cellCenter >= float2(-0.05)) && all(cellCenter <= float2(1.05)) &&
+        startRadius >= 0.025 && endRadius >= 0.025 &&
+        startRadius <= 0.30 && endRadius <= 0.30 &&
+        membraneEdgeLength <= 0.08 && signedTriangleArea > 0.0000001;
     float2 worldPosition = cellCenter +
         heading * membranePosition.x * worldUnit +
         lateral * membranePosition.y * worldUnit;
@@ -7603,14 +7743,14 @@ vertex CellRasterData cellVertex(
     float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
     float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
         max(uniforms.cameraZoom, 0.000000001) / viewScale;
-    bool occupied = owner < maxAgentCount && cellIndex < maxCellCount &&
-        agentOccupancy[owner] != 0u && cellOccupancy[cellIndex] != 0u && visibility > 0.001;
+    bool occupied = agentOccupancy[owner] != 0u && cellOccupancy[cellIndex] != 0u &&
+        finiteGeometry && visibility > 0.001;
 
-    CellRasterData output;
     output.position = occupied
         ? float4(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0)
         : float4(3.0, 3.0, 0.0, 1.0);
-    float nominalRadius = clamp(sqrt(max(cell.membrane.x, 0.010) / M_PI_F), 0.085, 0.18);
+    float membraneArea = isfinite(cell.membrane.x) ? max(cell.membrane.x, 0.010) : 0.010;
+    float nominalRadius = clamp(sqrt(membraneArea / M_PI_F), 0.085, 0.18);
     output.local = membranePosition / nominalRadius;
     output.physiology = cell.physiology;
     output.phenotype = cell.phenotype;
@@ -8075,16 +8215,17 @@ fragment float4 cellFragment(
     return float4(max(color, 0.0) * input.visibility, alpha);
 }
 
-fragment float4 quantumSurfaceFragment(
-    RasterData input [[stage_in]],
-    texture2d<float, access::sample> quantum [[texture(0)]],
-    texture2d_array<float, access::sample> state [[texture(1)]],
-    texture2d_array<float, access::sample> ecology [[texture(2)]],
-    texture2d_array<float, access::sample> environment [[texture(3)]],
-    texture2d_array<float, access::sample> mechanicalField [[texture(4)]],
-    texture2d_array<float, access::sample> genomeA [[texture(5)]],
-    texture2d_array<float, access::sample> genomeC [[texture(6)]],
-    constant SimulationUniforms& uniforms [[buffer(0)]]
+template <ushort renderScaleIndex>
+float4 quantumSurfaceForScale(
+    RasterData input,
+    texture2d<float, access::sample> quantum,
+    texture2d_array<float, access::sample> state,
+    texture2d_array<float, access::sample> ecology,
+    texture2d_array<float, access::sample> environment,
+    texture2d_array<float, access::sample> mechanicalField,
+    texture2d_array<float, access::sample> genomeA,
+    texture2d_array<float, access::sample> genomeC,
+    constant SimulationUniforms& uniforms
 ) {
     constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::linear);
     constexpr sampler quantumCellSampler(coord::normalized, address::repeat, filter::nearest);
@@ -8097,7 +8238,7 @@ fragment float4 quantumSurfaceFragment(
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
 
     float2 quantumTexel = 1.0 / float(quantumGridSize);
-    bool resolvesLatticeCells = observationZoom >= 420.0;
+    bool resolvesLatticeCells = renderScaleIndex == 5u;
     float4 wave = resolvesLatticeCells
         ? quantum.sample(quantumCellSampler, uv)
         : quantum.sample(quantumSampler, uv);
@@ -8118,7 +8259,8 @@ fragment float4 quantumSurfaceFragment(
     );
     float currentMagnitude = length(current);
     float currentStrength = saturate(currentMagnitude * 950000.0);
-    float latticeReveal = smoothstep(420.0, 900.0, observationZoom);
+    float latticeReveal = renderScaleIndex == 5u
+        ? smoothstep(420.0, 900.0, observationZoom) : 0.0;
     if (latticeReveal >= 0.999) {
         float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
         return float4(max(spinorTile, 0.0) * 1.16, 1.0);
@@ -8160,13 +8302,13 @@ fragment float4 quantumSurfaceFragment(
     float vortexCore = smoothstep(0.55, 0.92, phaseWinding) *
         (1.0 - smoothstep(0.025, 0.28, density));
     waveColor += float3(0.38, 0.92, 1.0) * densityIsoline * density * 0.065;
-    waveColor += float3(1.0, 0.08, 0.72) * vortexCore * 1.65;
+    waveColor += float3(0.72, 0.88, 1.0) * vortexCore * 1.42;
     // The continuous wave view is radiometric, not a filled contour map. Keep
     // low-amplitude regions dark so probability, current, and phase remain separable.
     waveColor *= mix(0.15, 0.45, smoothstep(320.0, 420.0, observationZoom));
 
     // Wave and spinor views do not pay for molecular-field sampling or glyph synthesis.
-    if (observationZoom >= 176.0) {
+    if (renderScaleIndex >= 4u) {
         float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
         float3 quantumOnlyColor = mix(waveColor, spinorTile, latticeReveal);
         if (observationZoom < 512.0) {
@@ -8268,6 +8410,29 @@ fragment float4 quantumSurfaceFragment(
     return float4(max(color, 0.0) * 1.16, 1.0);
 }
 
+#define NUMI_QUANTUM_SURFACE(NAME, SCALE) \
+fragment float4 NAME( \
+    RasterData input [[stage_in]], \
+    texture2d<float, access::sample> quantum [[texture(0)]], \
+    texture2d_array<float, access::sample> state [[texture(1)]], \
+    texture2d_array<float, access::sample> ecology [[texture(2)]], \
+    texture2d_array<float, access::sample> environment [[texture(3)]], \
+    texture2d_array<float, access::sample> mechanicalField [[texture(4)]], \
+    texture2d_array<float, access::sample> genomeA [[texture(5)]], \
+    texture2d_array<float, access::sample> genomeC [[texture(6)]], \
+    constant SimulationUniforms& uniforms [[buffer(0)]] \
+) { \
+    return quantumSurfaceForScale<SCALE>( \
+        input, quantum, state, ecology, environment, mechanicalField, \
+        genomeA, genomeC, uniforms \
+    ); \
+}
+
+NUMI_QUANTUM_SURFACE(molecularSurfaceFragment, 3u)
+NUMI_QUANTUM_SURFACE(waveSurfaceFragment, 4u)
+NUMI_QUANTUM_SURFACE(spinorSurfaceFragment, 5u)
+#undef NUMI_QUANTUM_SURFACE
+
 fragment float4 worldSurfaceFragment(
     RasterData input [[stage_in]],
     texture2d_array<float, access::sample> state [[texture(0)]],
@@ -8288,7 +8453,6 @@ fragment float4 worldSurfaceFragment(
     float4 cell = state.sample(fieldSampler, uv, 0);
     float4 chemistry = ecology.sample(fieldSampler, uv, 0);
     float4 geology = environment.sample(fieldSampler, uv, 0);
-    float4 biologicalEvents = events.sample(fieldSampler, uv, 0);
     float4 localMechanical = mechanicalField.sample(fieldSampler, uv, 0);
     float terrain = visualNoise(uv * 43.0);
     float fineTerrain = visualNoise(uv * 97.0 + float2(17.0, 31.0));
@@ -8388,7 +8552,7 @@ fragment float4 worldSurfaceFragment(
         color += mix(float3(0.02, 0.44, 0.92), float3(0.06, 0.92, 0.54),
             saturate(resourceA / max(resourceA + resourceB, 0.001))) *
             resourceIsoline * resourceFlux * 0.045;
-        color += mix(float3(0.02, 0.50, 1.0), float3(0.94, 0.08, 0.62),
+        color += mix(float3(0.02, 0.50, 1.0), float3(0.94, 0.48, 0.06),
             frequencyCoordinate) * vibration * 0.055;
     } else if (uniforms.displayMode == 3) {
         color = float3(0.002, 0.006, 0.010);
@@ -8418,17 +8582,6 @@ fragment float4 worldSurfaceFragment(
             resourceIsoline * resourceFlux * (1.0 - rock) * 0.085;
         color += float3(0.72, 0.12, 0.94) * ecotone * (1.0 - rock) * 0.10;
         color += frequencyColor * frequencyBand * (1.0 - rock * 0.72) * 0.045;
-    }
-
-    if (uniforms.displayMode == 0) {
-        float birth = pow(saturate(biologicalEvents.x), 2.2);
-        float mutation = pow(saturate(biologicalEvents.y), 2.0);
-        float conflict = pow(saturate(biologicalEvents.z), 2.1);
-        float death = pow(saturate(biologicalEvents.w), 2.0);
-        color += float3(0.00, 0.96, 0.80) * birth * 0.48;
-        color += float3(0.96, 0.08, 0.72) * mutation * 0.42;
-        color += float3(1.00, 0.08, 0.018) * conflict * 0.58;
-        color += float3(0.42, 0.14, 0.96) * death * 0.46;
     }
 
     if (uniforms.displayMode != 2) {
@@ -8466,7 +8619,6 @@ fragment float4 cellularSurfaceFragment(
     float4 localState = state.sample(fieldSampler, uv, 0);
     float4 localEcology = ecology.sample(fieldSampler, uv, 0);
     float4 localEnvironment = environment.sample(fieldSampler, uv, 0);
-    float4 localEvents = events.sample(fieldSampler, uv, 0);
     float4 localMechanical = mechanicalField.sample(fieldSampler, uv, 0);
     float4 mechanicalRight = mechanicalField.sample(fieldSampler, uv + float2(texel.x, 0.0), 0);
     float4 mechanicalUp = mechanicalField.sample(fieldSampler, uv + float2(0.0, texel.y), 0);
@@ -8495,16 +8647,12 @@ fragment float4 cellularSurfaceFragment(
     color += float3(0.15, 0.055, 0.015) * saturate(localEcology.x * 0.66);
     color += float3(0.018, 0.14, 0.10) * saturate(localState.w * 1.8);
     color += float3(0.12, 0.18, 0.20) * matrixStrain * 0.18;
-    color += mix(float3(0.025, 0.46, 1.0), float3(1.0, 0.08, 0.64),
+    color += mix(float3(0.025, 0.46, 1.0), float3(1.0, 0.46, 0.06),
         saturate(waveAngle / (2.0 * M_PI_F) + 0.5)) * waveFront * waveSpeed * 0.52;
     color += float3(0.06, 0.88, 0.76) * mechanicalStrain * (0.18 + waveFront * 0.34);
     color += mix(float3(0.01, 0.28, 0.48), float3(0.02, 0.58, 0.32), potential) *
         potentialContour * 0.050;
     color += float3(0.84, 0.11, 0.025) * saturate(localEcology.z + localEnvironment.z) * 0.22;
-    color += float3(0.00, 0.76, 0.64) * pow(saturate(localEvents.x), 2.2) * 0.24;
-    color += float3(0.92, 0.06, 0.66) * pow(saturate(localEvents.y), 2.0) * 0.22;
-    color += float3(0.96, 0.06, 0.018) * pow(saturate(localEvents.z), 2.0) * 0.30;
-    color += float3(0.38, 0.10, 0.88) * pow(saturate(localEvents.w), 2.0) * 0.24;
     if (uniforms.displayMode == 5) {
         float mechanicsGain = saturate(uniforms.intervention.x);
         float storedEnergy = saturate(localState.z * 12.0);

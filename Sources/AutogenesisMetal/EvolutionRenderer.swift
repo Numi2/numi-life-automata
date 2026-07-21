@@ -102,7 +102,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 11,
+            schemaVersion: 12,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -357,7 +357,7 @@ extension EvolutionRenderer {
             buffer.label = label
             return buffer
         }
-        return try HeadlessReadbackBuffers(
+        let readback = try HeadlessReadbackBuffers(
             agentState: sharedCopy(of: agentState, label: "Experiment agent state"),
             agentOccupancy: sharedCopy(of: agentOccupancy, label: "Experiment agent occupancy"),
             cellAggregates: sharedCopy(of: cellAggregates, label: "Experiment tissue aggregates"),
@@ -382,11 +382,20 @@ extension EvolutionRenderer {
             energyAudit: sharedCopy(of: energyAudit, label: "Experiment energy audit"),
             invariantState: sharedCopy(of: invariantState, label: "Experiment invariant state")
         )
+        commandQueue.register([
+            readback.agentState, readback.agentOccupancy, readback.cellAggregates,
+            readback.cellState, readback.cellOccupancy, readback.cellIdentities,
+            readback.heritablePrograms, readback.programInteractions,
+            readback.developmentalGenomes, readback.programSlots,
+            readback.identityCounters, readback.lineageEvents, readback.energyAudit,
+            readback.invariantState
+        ])
+        return readback
     }
 
     private func encodeHeadlessReadback(
         _ readback: HeadlessReadbackBuffers,
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         full: Bool
     ) {
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
@@ -1569,15 +1578,20 @@ private struct BrushEvent: Sendable {
 enum EvolutionRendererError: LocalizedError {
     case noMetalDevice
     case missingShader
+    case missingCompiledShader
     case missingFunction(String)
     case resourceAllocation(String)
+    case executionFailure(String)
 
     var errorDescription: String? {
         switch self {
         case .noMetalDevice: "This Mac does not expose a Metal device."
         case .missingShader: "The Numi Automata Metal source is missing from the app bundle."
+        case .missingCompiledShader:
+            "The release app is missing its ahead-of-time Metal 4 shader library."
         case let .missingFunction(name): "The Metal function \(name) could not be loaded."
         case let .resourceAllocation(name): "Metal could not allocate \(name)."
+        case let .executionFailure(message): "Metal 4 execution failed: \(message)"
         }
     }
 }
@@ -1619,7 +1633,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let gpuTimingEnabled = ProcessInfo.processInfo.environment["NUMI_GPU_TIMING"] == "1"
 
     private let device: MTLDevice
-    private var commandQueue: MTLCommandQueue
+    private let tuningProfile: MetalDeviceTuningProfile
+    private var commandQueue: Metal4ExecutionContext
     private let initializePipeline: MTLComputePipelineState
     private let initializeQuantumPipeline: MTLComputePipelineState
     private let expandWorldPipeline: MTLComputePipelineState
@@ -1628,6 +1643,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let expandMechanicalPipeline: MTLComputePipelineState
     private let evolveMechanicalPipeline: MTLComputePipelineState
     private let reactionPipeline: MTLComputePipelineState
+    private let quantumCouplingPipeline: MTLComputePipelineState
     private let quantumPipeline: MTLComputePipelineState
     private let damagePipeline: MTLComputePipelineState
     private let brushPipeline: MTLComputePipelineState
@@ -1644,9 +1660,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let resetActiveComponentDispatchPipeline: MTLComputePipelineState
     private let compactActiveComponentsPipeline: MTLComputePipelineState
     private let prepareActiveComponentDispatchPipeline: MTLComputePipelineState
+    private let compactActiveCellsPipeline: MTLComputePipelineState
     private let evolveCellPipeline: MTLComputePipelineState
     private let evolveMembranePipeline: MTLComputePipelineState
     private let clearCellSpatialHashPipeline: MTLComputePipelineState
+    private let clearActiveCellContactEffectsPipeline: MTLComputePipelineState
     private let buildCellSpatialHashPipeline: MTLComputePipelineState
     private let clearOwnerCellListsPipeline: MTLComputePipelineState
     private let buildOwnerCellListsPipeline: MTLComputePipelineState
@@ -1668,13 +1686,12 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let accumulateSimulationInvariantsPipeline: MTLComputePipelineState
     private let finalizeSimulationInvariantsPipeline: MTLComputePipelineState
     private let compactCellRenderPipeline: MTLComputePipelineState
-    private let renderPipeline: MTLRenderPipelineState
-    private let cellularSurfacePipeline: MTLRenderPipelineState
-    private let quantumRenderPipeline: MTLRenderPipelineState
+    private let scaleSurfacePipelines: [MTLRenderPipelineState]
     private let cellRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
     private let bloomBlurPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
+    private let pipelineBuildTelemetry: Metal4PipelineBuildTelemetry
     private var sceneColor: MTLTexture?
     private var bloomTextureA: MTLTexture?
     private var bloomTextureB: MTLTexture?
@@ -1698,6 +1715,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var reactionMechanicalState: MTLTexture
     private var quantumState: MTLTexture
     private var reactionQuantumState: MTLTexture
+    private let quantumCoupling: MTLTexture
     private var agentState: MTLBuffer
     private var reactionAgentState: MTLBuffer
     private let agentOccupancy: MTLBuffer
@@ -1742,6 +1760,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let activeComponentIndices: MTLBuffer
     private let activeComponentCount: MTLBuffer
     private let activeComponentDispatchArguments: MTLBuffer
+    private let activeCellIndices: MTLBuffer
+    private let activeCellCount: MTLBuffer
+    private let activeCellDispatchArguments: MTLBuffer
     private let identityCounters: MTLBuffer
     private let lineageEvents: MTLBuffer
     private let mechanicalForcing: MTLBuffer
@@ -1787,6 +1808,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var telemetrySampleTime = CFAbsoluteTimeGetCurrent()
     private var telemetrySampleStep: UInt64 = 0
     private var measuredStepsPerSecond = 0.0
+    private var lastCPUEncodeMilliseconds = 0.0
+    private var lastTotalGPUMilliseconds = 0.0
+    private var lastPhaseTimings: [MetalPhaseTiming] = []
     private var checkpointStep: UInt64 = 0
     private var lastRestoredCheckpointStep: UInt64?
     private var submissionFaulted = false
@@ -1794,6 +1818,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         "NUMI_SYNTHETIC_METAL_FAULT_STEP"
     ].flatMap(UInt64.init)
     private var syntheticFaultInjected = false
+    private let syntheticStallStep = ProcessInfo.processInfo.environment[
+        "NUMI_SYNTHETIC_METAL_STALL_STEP"
+    ].flatMap(UInt64.init)
+    private var syntheticStallInjected = false
     private var watchdogTimer: Timer?
     private var quantumStep: UInt32 = 0
     private var generation: UInt32 = 0
@@ -1828,208 +1856,101 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         guard let device = view.device ?? MTLCreateSystemDefaultDevice() else {
             throw EvolutionRendererError.noMetalDevice
         }
-        guard let commandQueue = device.makeCommandQueue(maxCommandBufferCount: 3) else {
-            throw EvolutionRendererError.resourceAllocation("the command queue")
-        }
+        let commandQueue = try Metal4ExecutionContext(device: device)
         self.device = device
+        tuningProfile = device.name.localizedCaseInsensitiveContains("M4")
+            ? .m4Optimized
+            : .genericMetal4
         self.commandQueue = commandQueue
         view.device = device
 
         let library = try Self.makeLibrary(device: device)
-        initializePipeline = try Self.computePipeline(named: "initializeWorld", library: library, device: device)
-        initializeQuantumPipeline = try Self.computePipeline(named: "initializeQuantumField", library: library, device: device)
-        expandWorldPipeline = try Self.computePipeline(named: "expandWorld", library: library, device: device)
-        expandQuantumPipeline = try Self.computePipeline(named: "expandQuantumField", library: library, device: device)
-        initializeMechanicalPipeline = try Self.computePipeline(
-            named: "initializeMechanicalField", library: library, device: device
+        let pipelineFactory = try Metal4PipelineFactory(device: device, library: library)
+        initializePipeline = try pipelineFactory.makeComputePipeline(named: "initializeWorld")
+        initializeQuantumPipeline = try pipelineFactory.makeComputePipeline(named: "initializeQuantumField")
+        expandWorldPipeline = try pipelineFactory.makeComputePipeline(named: "expandWorld")
+        expandQuantumPipeline = try pipelineFactory.makeComputePipeline(named: "expandQuantumField")
+        initializeMechanicalPipeline = try pipelineFactory.makeComputePipeline(named: "initializeMechanicalField")
+        expandMechanicalPipeline = try pipelineFactory.makeComputePipeline(named: "expandMechanicalField")
+        evolveMechanicalPipeline = try pipelineFactory.makeComputePipeline(named: "evolveMechanicalField")
+        reactionPipeline = try pipelineFactory.makeComputePipeline(named: "reactWorld")
+        quantumCouplingPipeline = try pipelineFactory.makeComputePipeline(named: "prepareQuantumCoupling")
+        quantumPipeline = try pipelineFactory.makeComputePipeline(named: "evolveQuantumField")
+        damagePipeline = try pipelineFactory.makeComputePipeline(named: "damageWorld")
+        brushPipeline = try pipelineFactory.makeComputePipeline(named: "applyBrush")
+        measurementPipeline = try pipelineFactory.makeComputePipeline(named: "measureWorld")
+        quantumMeasurementPipeline = try pipelineFactory.makeComputePipeline(named: "measureQuantumField")
+        initializeAgentPipeline = try pipelineFactory.makeComputePipeline(named: "initializeAgents")
+        nucleateFounderPipeline = try pipelineFactory.makeComputePipeline(named: "nucleateAutogenicFounder")
+        evolveAgentPipeline = try pipelineFactory.makeComputePipeline(named: "evolveAgents")
+        injectFounderPipeline = try pipelineFactory.makeComputePipeline(named: "injectFounder")
+        expandAgentPipeline = try pipelineFactory.makeComputePipeline(named: "expandAgents")
+        collectAgentObservationPipeline = try pipelineFactory.makeComputePipeline(named: "collectAgentObservations")
+        collectCellObservationPipeline = try pipelineFactory.makeComputePipeline(named: "collectCellObservations")
+        collectProgramMetricPipeline = try pipelineFactory.makeComputePipeline(named: "collectProgramMetricRecords")
+        resetActiveComponentDispatchPipeline = try pipelineFactory.makeComputePipeline(named: "resetActiveComponentDispatch")
+        compactActiveComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "compactActiveComponents")
+        prepareActiveComponentDispatchPipeline = try pipelineFactory.makeComputePipeline(named: "prepareActiveComponentDispatch")
+        compactActiveCellsPipeline = try pipelineFactory.makeComputePipeline(named: "compactActiveCellsOrdered")
+        evolveCellPipeline = try pipelineFactory.makeComputePipeline(named: "evolveOrganismCells")
+        evolveMembranePipeline = try pipelineFactory.makeComputePipeline(named: "evolveCellMembranes")
+        clearCellSpatialHashPipeline = try pipelineFactory.makeComputePipeline(named: "clearCellSpatialHash")
+        clearActiveCellContactEffectsPipeline = try pipelineFactory.makeComputePipeline(
+            named: "clearActiveCellContactEffects"
         )
-        expandMechanicalPipeline = try Self.computePipeline(
-            named: "expandMechanicalField", library: library, device: device
-        )
-        evolveMechanicalPipeline = try Self.computePipeline(
-            named: "evolveMechanicalField", library: library, device: device
-        )
-        reactionPipeline = try Self.computePipeline(named: "reactWorld", library: library, device: device)
-        quantumPipeline = try Self.computePipeline(named: "evolveQuantumField", library: library, device: device)
-        damagePipeline = try Self.computePipeline(named: "damageWorld", library: library, device: device)
-        brushPipeline = try Self.computePipeline(named: "applyBrush", library: library, device: device)
-        measurementPipeline = try Self.computePipeline(named: "measureWorld", library: library, device: device)
-        quantumMeasurementPipeline = try Self.computePipeline(named: "measureQuantumField", library: library, device: device)
-        initializeAgentPipeline = try Self.computePipeline(named: "initializeAgents", library: library, device: device)
-        nucleateFounderPipeline = try Self.computePipeline(named: "nucleateAutogenicFounder", library: library, device: device)
-        evolveAgentPipeline = try Self.computePipeline(named: "evolveAgents", library: library, device: device)
-        injectFounderPipeline = try Self.computePipeline(named: "injectFounder", library: library, device: device)
-        expandAgentPipeline = try Self.computePipeline(named: "expandAgents", library: library, device: device)
-        collectAgentObservationPipeline = try Self.computePipeline(
-            named: "collectAgentObservations",
-            library: library,
-            device: device
-        )
-        collectCellObservationPipeline = try Self.computePipeline(
-            named: "collectCellObservations",
-            library: library,
-            device: device
-        )
-        collectProgramMetricPipeline = try Self.computePipeline(
-            named: "collectProgramMetricRecords",
-            library: library,
-            device: device
-        )
-        resetActiveComponentDispatchPipeline = try Self.computePipeline(
-            named: "resetActiveComponentDispatch", library: library, device: device
-        )
-        compactActiveComponentsPipeline = try Self.computePipeline(
-            named: "compactActiveComponents", library: library, device: device
-        )
-        prepareActiveComponentDispatchPipeline = try Self.computePipeline(
-            named: "prepareActiveComponentDispatch", library: library, device: device
-        )
-        evolveCellPipeline = try Self.computePipeline(
-            named: "evolveOrganismCells",
-            library: library,
-            device: device
-        )
-        evolveMembranePipeline = try Self.computePipeline(
-            named: "evolveCellMembranes",
-            library: library,
-            device: device
-        )
-        clearCellSpatialHashPipeline = try Self.computePipeline(
-            named: "clearCellSpatialHash", library: library, device: device
-        )
-        buildCellSpatialHashPipeline = try Self.computePipeline(
-            named: "buildCellSpatialHash", library: library, device: device
-        )
-        clearOwnerCellListsPipeline = try Self.computePipeline(
-            named: "clearOwnerCellLists", library: library, device: device
-        )
-        buildOwnerCellListsPipeline = try Self.computePipeline(
-            named: "buildOwnerCellLists", library: library, device: device
-        )
-        resolveCellContactsPipeline = try Self.computePipeline(
-            named: "resolveMembraneContacts", library: library, device: device
-        )
-        applyCellContactEffectsPipeline = try Self.computePipeline(
-            named: "applyCellContactEffects", library: library, device: device
-        )
-        measureCellMembraneExposurePipeline = try Self.computePipeline(
-            named: "measureCellMembraneExposure", library: library, device: device
-        )
-        initializeCellComponentsPipeline = try Self.computePipeline(
-            named: "initializeCellComponents", library: library, device: device
-        )
-        unionCellComponentsPipeline = try Self.computePipeline(
-            named: "unionCellComponents", library: library, device: device
-        )
-        compressCellComponentsPipeline = try Self.computePipeline(
-            named: "compressCellComponents", library: library, device: device
-        )
-        buildCellComponentListsPipeline = try Self.computePipeline(
-            named: "buildCellComponentLists", library: library, device: device
-        )
-        accumulateCellComponentsPipeline = try Self.computePipeline(
-            named: "accumulateCellComponents", library: library, device: device
-        )
-        selectPrimaryCellComponentsPipeline = try Self.computePipeline(
-            named: "selectPrimaryCellComponents", library: library, device: device
-        )
-        assignCellComponentOwnersPipeline = try Self.computePipeline(
-            named: "assignCellComponentOwners", library: library, device: device
-        )
-        reassignCellComponentsPipeline = try Self.computePipeline(
-            named: "reassignCellComponents", library: library, device: device
-        )
-        divideAndReduceCellPipeline = try Self.computePipeline(
-            named: "divideAndReduceOrganismCells",
-            library: library,
-            device: device
-        )
-        initializeInvariantPipeline = try Self.computePipeline(
-            named: "initializeInvariantAudit", library: library, device: device
-        )
-        clearInvariantScratchPipeline = try Self.computePipeline(
-            named: "clearInvariantScratch", library: library, device: device
-        )
-        auditContactMomentumPipeline = try Self.computePipeline(
-            named: "auditContactMomentum", library: library, device: device
-        )
-        accumulateSimulationInvariantsPipeline = try Self.computePipeline(
-            named: "accumulateSimulationInvariants", library: library, device: device
-        )
-        finalizeSimulationInvariantsPipeline = try Self.computePipeline(
-            named: "finalizeSimulationInvariants", library: library, device: device
-        )
-        compactCellRenderPipeline = try Self.computePipeline(
-            named: "compactVisibleCells",
-            library: library,
-            device: device
-        )
-        bloomPrefilterPipeline = try Self.computePipeline(named: "bloomPrefilter", library: library, device: device)
-        bloomBlurPipeline = try Self.computePipeline(named: "blurBloom", library: library, device: device)
+        buildCellSpatialHashPipeline = try pipelineFactory.makeComputePipeline(named: "buildCellSpatialHash")
+        clearOwnerCellListsPipeline = try pipelineFactory.makeComputePipeline(named: "clearOwnerCellLists")
+        buildOwnerCellListsPipeline = try pipelineFactory.makeComputePipeline(named: "buildOwnerCellLists")
+        resolveCellContactsPipeline = try pipelineFactory.makeComputePipeline(named: "resolveMembraneContacts")
+        applyCellContactEffectsPipeline = try pipelineFactory.makeComputePipeline(named: "applyCellContactEffects")
+        measureCellMembraneExposurePipeline = try pipelineFactory.makeComputePipeline(named: "measureCellMembraneExposure")
+        initializeCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "initializeCellComponents")
+        unionCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "unionCellComponents")
+        compressCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "compressCellComponents")
+        buildCellComponentListsPipeline = try pipelineFactory.makeComputePipeline(named: "buildCellComponentLists")
+        accumulateCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "accumulateCellComponents")
+        selectPrimaryCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "selectPrimaryCellComponents")
+        assignCellComponentOwnersPipeline = try pipelineFactory.makeComputePipeline(named: "assignCellComponentOwners")
+        reassignCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "reassignCellComponents")
+        divideAndReduceCellPipeline = try pipelineFactory.makeComputePipeline(named: "divideAndReduceOrganismCells")
+        initializeInvariantPipeline = try pipelineFactory.makeComputePipeline(named: "initializeInvariantAudit")
+        clearInvariantScratchPipeline = try pipelineFactory.makeComputePipeline(named: "clearInvariantScratch")
+        auditContactMomentumPipeline = try pipelineFactory.makeComputePipeline(named: "auditContactMomentum")
+        accumulateSimulationInvariantsPipeline = try pipelineFactory.makeComputePipeline(named: "accumulateSimulationInvariants")
+        finalizeSimulationInvariantsPipeline = try pipelineFactory.makeComputePipeline(named: "finalizeSimulationInvariants")
+        compactCellRenderPipeline = try pipelineFactory.makeComputePipeline(named: "compactVisibleCells")
+        bloomPrefilterPipeline = try pipelineFactory.makeComputePipeline(named: "bloomPrefilter")
+        bloomBlurPipeline = try pipelineFactory.makeComputePipeline(named: "blurBloom")
 
-        guard let vertex = library.makeFunction(name: "fullscreenVertex") else {
-            throw EvolutionRendererError.missingFunction("fullscreenVertex")
+        scaleSurfacePipelines = try [
+            ("Ecological field renderer", "worldSurfaceFragment"),
+            ("Morphology field renderer", "worldSurfaceFragment"),
+            ("Cellular tissue renderer", "cellularSurfaceFragment"),
+            ("Molecular reaction renderer", "molecularSurfaceFragment"),
+            ("Wave-observable renderer", "waveSurfaceFragment"),
+            ("Spinor lattice renderer", "spinorSurfaceFragment")
+        ].map { specification in
+            try pipelineFactory.makeRenderPipeline(
+                label: specification.0,
+                vertex: "fullscreenVertex",
+                fragment: specification.1,
+                pixelFormat: .rg11b10Float
+            )
         }
-        guard let fragment = library.makeFunction(name: "worldSurfaceFragment") else {
-            throw EvolutionRendererError.missingFunction("worldSurfaceFragment")
-        }
-        let renderDescriptor = MTLRenderPipelineDescriptor()
-        renderDescriptor.label = "Numi Automata world renderer"
-        renderDescriptor.vertexFunction = vertex
-        renderDescriptor.fragmentFunction = fragment
-        renderDescriptor.colorAttachments[0].pixelFormat = .rg11b10Float
-        renderPipeline = try device.makeRenderPipelineState(descriptor: renderDescriptor)
-
-        guard let cellularFragment = library.makeFunction(name: "cellularSurfaceFragment") else {
-            throw EvolutionRendererError.missingFunction("cellularSurfaceFragment")
-        }
-        let cellularSurfaceDescriptor = MTLRenderPipelineDescriptor()
-        cellularSurfaceDescriptor.label = "Extracellular chemistry renderer"
-        cellularSurfaceDescriptor.vertexFunction = vertex
-        cellularSurfaceDescriptor.fragmentFunction = cellularFragment
-        cellularSurfaceDescriptor.colorAttachments[0].pixelFormat = .rg11b10Float
-        cellularSurfacePipeline = try device.makeRenderPipelineState(descriptor: cellularSurfaceDescriptor)
-
-        guard let quantumFragment = library.makeFunction(name: "quantumSurfaceFragment") else {
-            throw EvolutionRendererError.missingFunction("quantumSurfaceFragment")
-        }
-        let quantumRenderDescriptor = MTLRenderPipelineDescriptor()
-        quantumRenderDescriptor.label = "Spinor and wave-observable renderer"
-        quantumRenderDescriptor.vertexFunction = vertex
-        quantumRenderDescriptor.fragmentFunction = quantumFragment
-        quantumRenderDescriptor.colorAttachments[0].pixelFormat = .rg11b10Float
-        quantumRenderPipeline = try device.makeRenderPipelineState(descriptor: quantumRenderDescriptor)
-
-        guard let cellVertex = library.makeFunction(name: "cellVertex") else {
-            throw EvolutionRendererError.missingFunction("cellVertex")
-        }
-        guard let cellFragment = library.makeFunction(name: "cellFragment") else {
-            throw EvolutionRendererError.missingFunction("cellFragment")
-        }
-        let cellRenderDescriptor = MTLRenderPipelineDescriptor()
-        cellRenderDescriptor.label = "Persistent multicellular renderer"
-        cellRenderDescriptor.vertexFunction = cellVertex
-        cellRenderDescriptor.fragmentFunction = cellFragment
-        let cellAttachment = cellRenderDescriptor.colorAttachments[0]!
-        cellAttachment.pixelFormat = .rg11b10Float
-        cellAttachment.isBlendingEnabled = true
-        cellAttachment.rgbBlendOperation = .add
-        cellAttachment.alphaBlendOperation = .add
-        cellAttachment.sourceRGBBlendFactor = .sourceAlpha
-        cellAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
-        cellAttachment.sourceAlphaBlendFactor = .one
-        cellAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        cellRenderPipeline = try device.makeRenderPipelineState(descriptor: cellRenderDescriptor)
-
-        guard let compositeFragment = library.makeFunction(name: "compositeFragment") else {
-            throw EvolutionRendererError.missingFunction("compositeFragment")
-        }
-        let compositeDescriptor = MTLRenderPipelineDescriptor()
-        compositeDescriptor.label = "HDR bloom and tone-mapping composite"
-        compositeDescriptor.vertexFunction = vertex
-        compositeDescriptor.fragmentFunction = compositeFragment
-        compositeDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm_srgb
-        compositePipeline = try device.makeRenderPipelineState(descriptor: compositeDescriptor)
+        cellRenderPipeline = try pipelineFactory.makeRenderPipeline(
+            label: "Persistent multicellular renderer",
+            vertex: "cellVertex",
+            fragment: "cellFragment",
+            pixelFormat: .rg11b10Float,
+            blending: true
+        )
+        compositePipeline = try pipelineFactory.makeRenderPipeline(
+            label: "HDR bloom and tone-mapping composite",
+            vertex: "fullscreenVertex",
+            fragment: "compositeFragment",
+            pixelFormat: .bgra8Unorm_srgb
+        )
+        pipelineBuildTelemetry = pipelineFactory.finalize()
 
         state = try Self.makeWorldTexture(device: device, label: "Living state")
         reactionState = try Self.makeWorldTexture(device: device, label: "Reaction state")
@@ -2050,6 +1971,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         reactionMechanicalState = try Self.makeWorldTexture(device: device, label: "Reaction extracellular mechanics")
         quantumState = try Self.makeQuantumTexture(device: device, label: "Quantum wavefunction")
         reactionQuantumState = try Self.makeQuantumTexture(device: device, label: "Reaction quantum wavefunction")
+        quantumCoupling = try Self.makeQuantumCouplingTexture(
+            device: device,
+            label: "Biology-to-spinor coupling coefficients"
+        )
 
         let agentStateLength = Self.maxAgentCount * MemoryLayout<AgentState>.stride
         guard let agentState = device.makeBuffer(length: agentStateLength, options: .storageModePrivate),
@@ -2112,6 +2037,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let activeComponentIndexLength = Self.maxAgentCount * MemoryLayout<UInt32>.stride
         let activeComponentCountLength = MemoryLayout<UInt32>.stride
         let activeComponentDispatchLength = 3 * MemoryLayout<UInt32>.stride
+        let activeCellIndexLength = Self.maxCellCount * MemoryLayout<UInt32>.stride
+        let activeCellCountLength = MemoryLayout<UInt32>.stride
+        let activeCellDispatchLength = 3 * MemoryLayout<UInt32>.stride
         let identityCounterLength = Self.identityCounterCount * MemoryLayout<UInt32>.stride
         let lineageEventLength = Self.lineageEventCapacity * MemoryLayout<LineageEventRecord>.stride
         let mechanicalForcingLength = Self.gridSize * Self.gridSize * Self.worldCount * 2 *
@@ -2220,6 +2148,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 length: activeComponentDispatchLength,
                 options: .storageModePrivate
               ),
+              let activeCellIndices = device.makeBuffer(
+                length: activeCellIndexLength,
+                options: .storageModePrivate
+              ),
+              let activeCellCount = device.makeBuffer(
+                length: activeCellCountLength,
+                options: .storageModePrivate
+              ),
+              let activeCellDispatchArguments = device.makeBuffer(
+                length: activeCellDispatchLength,
+                options: .storageModePrivate
+              ),
               let identityCounters = device.makeBuffer(length: identityCounterLength, options: .storageModePrivate),
               let lineageEvents = device.makeBuffer(length: lineageEventLength, options: .storageModePrivate),
               let mechanicalForcing = device.makeBuffer(
@@ -2269,6 +2209,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         activeComponentIndices.label = "Compacted active component handles"
         activeComponentCount.label = "Active component count"
         activeComponentDispatchArguments.label = "Indirect active component dispatch arguments"
+        activeCellIndices.label = "Ordered living-cell indices"
+        activeCellCount.label = "Living-cell count"
+        activeCellDispatchArguments.label = "Indirect living-cell dispatch arguments"
         let drawArguments = cellDrawArguments.contents().bindMemory(to: UInt32.self, capacity: 4)
         drawArguments[0] = UInt32(
             Self.membraneVertexCount * Self.membraneRenderSubdivision * 3
@@ -2320,6 +2263,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.activeComponentIndices = activeComponentIndices
         self.activeComponentCount = activeComponentCount
         self.activeComponentDispatchArguments = activeComponentDispatchArguments
+        self.activeCellIndices = activeCellIndices
+        self.activeCellCount = activeCellCount
+        self.activeCellDispatchArguments = activeCellDispatchArguments
         self.identityCounters = identityCounters
         self.lineageEvents = lineageEvents
         self.mechanicalForcing = mechanicalForcing
@@ -2417,8 +2363,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         view.preferredFramesPerSecond = 60
         view.enableSetNeedsDisplay = false
         view.isPaused = false
+        registerMetal4Residency(view: view)
         try initializeSimulation()
         recoveryCheckpointBanks = try makeRecoveryCheckpointBanks()
+        commandQueue.register(recoveryCheckpointBanks.flatMap { bank in
+            bank.textures.map { $0 as any MTLAllocation } +
+                bank.buffers.map { $0 as any MTLAllocation }
+        })
         try captureInitialRecoveryCheckpoint()
         watchdogTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
             [weak self] _ in
@@ -2444,6 +2395,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     func draw(in view: MTKView) {
+        let encodingStartedAt = CFAbsoluteTimeGetCurrent()
         let frameSettings: RendererSettings
         stateLock.lock()
         frameSettings = settings
@@ -2454,13 +2406,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             publishRuntimeTelemetry()
             return
         }
-        let descriptor = MTLCommandBufferDescriptor()
-        descriptor.errorOptions = .encoderExecutionStatus
-        guard let commandBuffer = commandQueue.makeCommandBuffer(descriptor: descriptor) else {
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             handleSubmissionFailure("Metal declined command-buffer allocation.")
             return
         }
         commandBuffer.label = "Numi Automata frame"
+        if frameSerial.isMultiple(of: 60) {
+            commandBuffer.enablePhaseTiming()
+        }
+        commandBuffer.writeTimestamp(ending: "submission start")
         var pendingCheckpoint: PendingRecoveryCheckpoint?
         var resetEncoded = false
 
@@ -2472,6 +2426,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             lastRestoredCheckpointStep = nil
             recoveryCount = 0
             syntheticFaultInjected = false
+            syntheticStallInjected = false
             lastMetalError = nil
             quantumStep = 0
             generation = 0
@@ -2561,6 +2516,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
 
         encodeRender(view: view, into: commandBuffer, settings: frameSettings)
+        commandBuffer.writeTimestamp(ending: "scene + postprocess")
         if let pendingMetricObservation {
             attachMetricObservation(pendingMetricObservation, to: commandBuffer)
         }
@@ -2568,19 +2524,33 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let submittedStep = totalSteps
         let submittedEpoch = submissionEpoch
         let submittedCheckpoint = pendingCheckpoint
+        lastCPUEncodeMilliseconds = max(
+            CFAbsoluteTimeGetCurrent() - encodingStartedAt,
+            0
+        ) * 1_000
         unfinishedCommandBuffers += 1
         commandBuffer.addCompletedHandler { [weak self, submittedCheckpoint] buffer in
             let status = buffer.status
+            let gpuMilliseconds = max(buffer.gpuEndTime - buffer.gpuStartTime, 0) * 1_000
+            let phaseTimings = buffer.phaseSamples.map {
+                MetalPhaseTiming(phase: $0.phase, gpuMilliseconds: $0.milliseconds)
+            }
             let errorDescription = buffer.error.map { error in
                 "\(error.localizedDescription) [\(String(describing: error))]"
             }
             Task { @MainActor [weak self] in
-                self?.completeSubmission(
+                guard let self,
+                      !self.shouldSuppressCompletionForSyntheticStall(
+                        submittedStep: submittedStep
+                      ) else { return }
+                self.completeSubmission(
                     status: status,
                     errorDescription: errorDescription,
                     submittedStep: submittedStep,
                     epoch: submittedEpoch,
-                    checkpoint: submittedCheckpoint
+                    checkpoint: submittedCheckpoint,
+                    gpuMilliseconds: gpuMilliseconds,
+                    phaseTimings: phaseTimings
                 )
             }
         }
@@ -2588,9 +2558,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         publishRuntimeTelemetry()
     }
 
+    private func shouldSuppressCompletionForSyntheticStall(
+        submittedStep: UInt64
+    ) -> Bool {
+        if syntheticStallInjected { return recoveryCount == 0 }
+        guard let syntheticStallStep,
+              submittedStep >= syntheticStallStep else { return false }
+        syntheticStallInjected = true
+        return true
+    }
+
     private func attachMetricObservation(
         _ pending: PendingMetricObservation,
-        to commandBuffer: MTLCommandBuffer
+        to commandBuffer: Metal4CommandBufferContext
     ) {
         commandBuffer.addCompletedHandler { [weak self] buffer in
             let succeeded = buffer.status == .completed && buffer.error == nil
@@ -2605,11 +2585,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func completeSubmission(
-        status: MTLCommandBufferStatus,
+        status: Metal4CommandStatus,
         errorDescription: String?,
         submittedStep: UInt64,
         epoch: UInt64,
-        checkpoint: PendingRecoveryCheckpoint?
+        checkpoint: PendingRecoveryCheckpoint?,
+        gpuMilliseconds: Double,
+        phaseTimings: [MetalPhaseTiming]
     ) {
         unfinishedCommandBuffers = max(unfinishedCommandBuffers - 1, 0)
         lastCompletionTime = CFAbsoluteTimeGetCurrent()
@@ -2621,6 +2603,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             return
         }
         if status == .completed, errorDescription == nil {
+            lastTotalGPUMilliseconds = gpuMilliseconds
+            lastPhaseTimings = phaseTimings
             if let syntheticFaultStep,
                submittedStep >= syntheticFaultStep,
                !syntheticFaultInjected {
@@ -2646,12 +2630,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         publishRuntimeTelemetry()
     }
 
-    private func handleSubmissionFailure(_ message: String) {
+    private func handleSubmissionFailure(
+        _ message: String,
+        abandonInFlight: Bool = false
+    ) {
         guard !submissionFaulted else { return }
         submissionFaulted = true
         submissionEpoch &+= 1
         recoveryCount &+= 1
         lastMetalError = message
+        if abandonInFlight {
+            unfinishedCommandBuffers = 0
+        }
         if unfinishedCommandBuffers == 0 {
             restoreLatestRecoveryCheckpoint()
         }
@@ -2662,7 +2652,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         guard unfinishedCommandBuffers > 0,
               CFAbsoluteTimeGetCurrent() - lastCompletionTime > 5 else { return }
         handleSubmissionFailure(
-            "Metal completion watchdog exceeded 5 seconds with \(unfinishedCommandBuffers) unfinished buffers. Submission stopped without replacing the world."
+            "Metal completion watchdog exceeded 5 seconds with \(unfinishedCommandBuffers) unfinished buffers; abandoning the stalled epoch and restoring the latest causal checkpoint.",
+            abandonInFlight: true
         )
     }
 
@@ -2678,6 +2669,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
     private func publishRuntimeTelemetry() {
         onRuntimeTelemetry?(RendererRuntimeTelemetry(
+            backendVersion: "Metal 4",
+            tuningProfile: tuningProfile,
             scheduledStep: totalSteps,
             gpuCompletedStep: gpuCompletedSteps,
             scientificallyCommittedStep: scientificallyCommittedSteps,
@@ -2687,6 +2680,24 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             checkpointStep: checkpointStep,
             lastRestoredCheckpointStep: lastRestoredCheckpointStep,
             recoveryCount: recoveryCount,
+            recoveryEpoch: submissionEpoch,
+            cpuEncodeMilliseconds: lastCPUEncodeMilliseconds,
+            totalGPUMilliseconds: lastTotalGPUMilliseconds,
+            phaseTimings: lastPhaseTimings,
+            pipelineArchive: PipelineArchiveTelemetry(
+                loaded: pipelineBuildTelemetry.archiveLoaded,
+                hits: pipelineBuildTelemetry.archiveHits,
+                misses: pipelineBuildTelemetry.archiveMisses,
+                pipelineCount: pipelineBuildTelemetry.pipelineCount,
+                compileMilliseconds: pipelineBuildTelemetry.compilationMilliseconds,
+                error: pipelineBuildTelemetry.archiveErrorDescription
+            ),
+            residency: ResidencyTelemetry(
+                residentBytes: commandQueue.residentBytes,
+                allocatorSlots: Metal4ExecutionContext.maximumInFlightSubmissions,
+                allocatorHighWatermark: commandQueue.allocatorHighWatermark,
+                uniformArenaHighWaterBytes: commandQueue.uniformArenaHighWaterBytes
+            ),
             lastError: lastMetalError
         ))
     }
@@ -2712,6 +2723,70 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             energyAudit, invariantState, invariantScratch, identityCounters, lineageEvents,
             mechanicalForcing
         ]
+    }
+
+    private func registerMetal4Residency(view: MTKView) {
+        let pipelines: [any MTLAllocation] = [
+            initializePipeline, initializeQuantumPipeline, expandWorldPipeline,
+            expandQuantumPipeline, initializeMechanicalPipeline, expandMechanicalPipeline,
+            evolveMechanicalPipeline, reactionPipeline, quantumCouplingPipeline,
+            quantumPipeline, damagePipeline,
+            brushPipeline, measurementPipeline, quantumMeasurementPipeline,
+            initializeAgentPipeline, nucleateFounderPipeline, evolveAgentPipeline,
+            injectFounderPipeline, expandAgentPipeline, collectAgentObservationPipeline,
+            collectCellObservationPipeline, collectProgramMetricPipeline,
+            resetActiveComponentDispatchPipeline, compactActiveComponentsPipeline,
+            prepareActiveComponentDispatchPipeline, compactActiveCellsPipeline,
+            evolveCellPipeline,
+            evolveMembranePipeline, clearCellSpatialHashPipeline,
+            clearActiveCellContactEffectsPipeline,
+            buildCellSpatialHashPipeline, clearOwnerCellListsPipeline,
+            buildOwnerCellListsPipeline, resolveCellContactsPipeline,
+            applyCellContactEffectsPipeline, measureCellMembraneExposurePipeline,
+            initializeCellComponentsPipeline, unionCellComponentsPipeline,
+            compressCellComponentsPipeline, buildCellComponentListsPipeline,
+            accumulateCellComponentsPipeline, selectPrimaryCellComponentsPipeline,
+            assignCellComponentOwnersPipeline, reassignCellComponentsPipeline,
+            divideAndReduceCellPipeline, initializeInvariantPipeline,
+            clearInvariantScratchPipeline, auditContactMomentumPipeline,
+            accumulateSimulationInvariantsPipeline, finalizeSimulationInvariantsPipeline,
+            compactCellRenderPipeline, cellRenderPipeline, bloomPrefilterPipeline,
+            bloomBlurPipeline, compositePipeline
+        ]
+        let textures: [any MTLAllocation] = [
+            state, reactionState, genomeA, reactionGenomeA, genomeB, reactionGenomeB,
+            ecology, reactionEcology, genomeC, reactionGenomeC, checkpointState,
+            eventState, reactionEventState, environmentState, reactionEnvironmentState,
+            mechanicalState, reactionMechanicalState, quantumState, reactionQuantumState,
+            quantumCoupling
+        ]
+        var buffers = checkpointBufferSources()
+        buffers.append(contentsOf: [
+            reactionAgentState, reactionCellState, visibleCellIndices, cellDrawArguments,
+            activeComponentIndices, activeComponentCount, activeComponentDispatchArguments,
+            activeCellIndices, activeCellCount, activeCellDispatchArguments
+        ])
+        buffers.append(contentsOf: agentObservationBuffers)
+        buffers.append(contentsOf: cellObservationBuffers)
+        buffers.append(contentsOf: lineageEventObservationBuffers)
+        buffers.append(contentsOf: identityCounterObservationBuffers)
+        for slot in metricReadbackSlots {
+            buffers.append(contentsOf: [
+                slot.metrics, slot.quantumNorm, slot.agentState, slot.agentOccupancy,
+                slot.cellAggregates, slot.programRecords, slot.identityCounters,
+                slot.energyAudit
+            ])
+        }
+        commandQueue.register(
+            pipelines + scaleSurfacePipelines.map { $0 as any MTLAllocation } +
+                textures + buffers.map { $0 as any MTLAllocation }
+        )
+        if let layer = view.layer as? CAMetalLayer {
+            commandQueue.registerPresentationResidency(layer.residencySet)
+        }
+        if #available(macOS 26.4, *) {
+            commandQueue.registerPresentationResidency(view.residencySet)
+        }
     }
 
     private func makeRecoveryCheckpointBanks() throws -> [RecoveryCheckpointBank] {
@@ -2782,7 +2857,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         checkpointStep = totalSteps
     }
 
-    private func encodeRecoveryCheckpoint(into commandBuffer: MTLCommandBuffer, slot: Int) {
+    private func encodeRecoveryCheckpoint(into commandBuffer: Metal4CommandBufferContext, slot: Int) {
         guard recoveryCheckpointBanks.indices.contains(slot),
               let blit = commandBuffer.makeBlitCommandEncoder() else { return }
         blit.label = "Capture causal recovery checkpoint"
@@ -2806,7 +2881,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private func copyTexture(
         _ source: MTLTexture,
         to destination: MTLTexture,
-        with blit: MTLBlitCommandEncoder
+        with blit: Metal4BlitCommandEncoderAdapter
     ) {
         for slice in 0..<source.arrayLength {
             for level in 0..<source.mipmapLevelCount {
@@ -2834,8 +2909,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               let selected = recoveryCheckpointBanks.enumerated().compactMap({ index, bank in
                 bank.metadata.map { (index, $0) }
               }).max(by: { $0.1.step < $1.1.step }) else { return }
-        guard let nextQueue = device.makeCommandQueue(maxCommandBufferCount: 3),
-              let commandBuffer = nextQueue.makeCommandBuffer(),
+        do {
+            try commandQueue.rebuildQueueAndAllocators()
+        } catch {
+            lastMetalError = (lastMetalError ?? "Metal failure") +
+                " Recovery queue reconstruction failed: \(error.localizedDescription)."
+            return
+        }
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let blit = commandBuffer.makeBlitCommandEncoder() else {
             lastMetalError = (lastMetalError ?? "Metal failure") +
                 " Recovery resource allocation failed."
@@ -2882,7 +2963,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             return
         }
 
-        commandQueue = nextQueue
         let metadata = selected.1
         totalSteps = metadata.step
         gpuCompletedSteps = metadata.step
@@ -2918,7 +2998,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
     }
 
-    private func attachGPUTiming(to commandBuffer: MTLCommandBuffer) {
+    private func attachGPUTiming(to commandBuffer: Metal4CommandBufferContext) {
         guard Self.gpuTimingEnabled else { return }
         commandBuffer.addCompletedHandler { buffer in
             let milliseconds = max(buffer.gpuEndTime - buffer.gpuStartTime, 0) * 1_000
@@ -2938,7 +3018,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         appliedResetToken = settings.resetToken
     }
 
-    private func encodeInitialization(into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
+    private func encodeInitialization(into commandBuffer: Metal4CommandBufferContext, settings: RendererSettings) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Initialize prebiotic chemistry"
         var uniforms = makeUniforms(settings: settings)
@@ -2982,7 +3062,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         copyAllSlices(from: state, to: checkpointState, commandBuffer: commandBuffer)
     }
 
-    private func encodeInvariantInitialization(into commandBuffer: MTLCommandBuffer) {
+    private func encodeInvariantInitialization(into commandBuffer: Metal4CommandBufferContext) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Initialize invariant enforcement"
         encoder.setComputePipelineState(initializeInvariantPipeline)
@@ -3000,7 +3080,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeAgentInitialization(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings
     ) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -3043,7 +3123,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeFounderInjection(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings,
         position: SIMD2<Float>
     ) {
@@ -3080,7 +3160,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeQuantumInitialization(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings
     ) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -3094,7 +3174,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeWorldExpansion(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings,
         level: UInt32
     ) {
@@ -3146,7 +3226,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         copyAllSlices(from: state, to: checkpointState, commandBuffer: commandBuffer)
     }
 
-    private func encodeAgentExpansion(into commandBuffer: MTLCommandBuffer) {
+    private func encodeAgentExpansion(into commandBuffer: Metal4CommandBufferContext) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Keep organisms fixed in the expanding world"
         encoder.setComputePipelineState(expandAgentPipeline)
@@ -3157,7 +3237,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeSimulationStep(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings,
         auditInvariants: Bool = false
     ) {
@@ -3188,6 +3268,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellEnergyExchange, offset: 0, index: 1)
         dispatchWorlds(encoder, pipeline: reactionPipeline)
         encoder.endEncoding()
+        commandBuffer.writeTimestamp(ending: "chemistry")
         swapWorldReactionState()
         encodeAgentStep(
             into: commandBuffer,
@@ -3200,7 +3281,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeAgentStep(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings,
         auditInvariants: Bool
     ) {
@@ -3265,6 +3346,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         ])
         swap(&agentState, &reactionAgentState)
         encoder.endEncoding()
+        commandBuffer.writeTimestamp(ending: "component mechanics")
         encodeCellStep(
             into: commandBuffer,
             settings: settings,
@@ -3273,7 +3355,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeCellStep(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings,
         auditInvariants: Bool
     ) {
@@ -3285,6 +3367,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Cell energetics, electrophysiology, oscillators, and mechanical waves"
         var uniforms = makeUniforms(settings: settings)
+        encodeActiveCellCompaction(encoder)
         encoder.setComputePipelineState(evolveCellPipeline)
         encoder.setBuffer(agentState, offset: 0, index: 0)
         encoder.setBuffer(agentOccupancy, offset: 0, index: 1)
@@ -3334,6 +3417,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         dispatchCells(encoder, pipeline: evolveMembranePipeline)
         encoder.memoryBarrier(resources: [reactionCellState, membraneVertices])
         swap(&cellState, &reactionCellState)
+        encoder.writeTimestamp(ending: "cell physiology")
 
         encodeCellNeighborhoodIndex(encoder, uniforms: &uniforms)
 
@@ -3379,6 +3463,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(energyAudit, offset: 0, index: 7)
         dispatchCells(encoder, pipeline: applyCellContactEffectsPipeline)
         encoder.memoryBarrier(resources: [cellState, membraneVertices, energyAudit])
+        encoder.writeTimestamp(ending: "contact")
 
         encoder.setComputePipelineState(measureCellMembraneExposurePipeline)
         encoder.setBuffer(agentState, offset: 0, index: 0)
@@ -3398,6 +3483,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encodeCellConnectivity(encoder, uniforms: &uniforms)
         encodeActiveComponentCompaction(encoder)
         encodeOwnerCellLists(encoder)
+        encoder.writeTimestamp(ending: "topology")
 
         encoder.setComputePipelineState(divideAndReduceCellPipeline)
         encoder.setBuffer(agentState, offset: 0, index: 0)
@@ -3432,6 +3518,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             regulatoryNodes, regulatoryEdges, resonanceGenomes, heritablePrograms,
             lineageEvents, cellJunctions
         ])
+        encoder.writeTimestamp(ending: "division + reduction")
 
         encoder.setComputePipelineState(evolveMechanicalPipeline)
         encoder.setTexture(mechanicalState, index: 0)
@@ -3440,11 +3527,12 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(mechanicalForcing, offset: 0, index: 0)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 1)
         dispatchWorlds(encoder, pipeline: evolveMechanicalPipeline)
+        encoder.writeTimestamp(ending: "field mechanics")
         encoder.endEncoding()
         swap(&mechanicalState, &reactionMechanicalState)
     }
 
-    private func encodeInvariantScratchReset(into commandBuffer: MTLCommandBuffer) {
+    private func encodeInvariantScratchReset(into commandBuffer: Metal4CommandBufferContext) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Reset invariant reduction scratch"
         encoder.setComputePipelineState(clearInvariantScratchPipeline)
@@ -3461,7 +3549,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeSimulationInvariantAudit(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings
     ) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -3509,31 +3597,33 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeCellNeighborhoodIndex(
-        _ encoder: MTLComputeCommandEncoder,
+        _ encoder: Metal4ComputeCommandEncoderAdapter,
         uniforms: inout SimulationUniforms
     ) {
         encoder.setComputePipelineState(clearCellSpatialHashPipeline)
         encoder.setBuffer(cellSpatialHashHeads, offset: 0, index: 0)
-        encoder.setBuffer(cellContactEffects, offset: 0, index: 1)
-        encoder.setBuffer(ownerCellHeads, offset: 0, index: 2)
-        encoder.setBuffer(membraneContactEffects, offset: 0, index: 3)
         encoder.dispatchThreads(
-            MTLSize(
-                width: max(
-                    Self.cellSpatialHashBucketCount,
-                    Self.maxCellCount * Self.membraneVertexCount * 3
-                ),
-                height: 1,
-                depth: 1
-            ),
+            MTLSize(width: Self.cellSpatialHashBucketCount, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(
                 width: min(clearCellSpatialHashPipeline.maxTotalThreadsPerThreadgroup, 256),
                 height: 1,
                 depth: 1
             )
         )
+        encoder.memoryBarrier(resources: [cellSpatialHashHeads])
+
+        encoder.setComputePipelineState(clearActiveCellContactEffectsPipeline)
+        encoder.setBuffer(cellContactEffects, offset: 0, index: 0)
+        encoder.setBuffer(membraneContactEffects, offset: 0, index: 1)
+        dispatchCells(encoder, pipeline: clearActiveCellContactEffectsPipeline)
+
+        encoder.setComputePipelineState(clearOwnerCellListsPipeline)
+        encoder.setBuffer(ownerCellHeads, offset: 0, index: 0)
+        encoder.setBuffer(activeComponentIndices, offset: 0, index: 1)
+        encoder.setBuffer(activeComponentCount, offset: 0, index: 2)
+        dispatchActiveComponents(encoder, pipeline: clearOwnerCellListsPipeline)
         encoder.memoryBarrier(resources: [
-            cellSpatialHashHeads, cellContactEffects, membraneContactEffects, ownerCellHeads
+            cellContactEffects, membraneContactEffects, ownerCellHeads
         ])
 
         encoder.setComputePipelineState(buildCellSpatialHashPipeline)
@@ -3554,9 +3644,22 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeCellConnectivity(
-        _ encoder: MTLComputeCommandEncoder,
+        _ encoder: Metal4ComputeCommandEncoderAdapter,
         uniforms: inout SimulationUniforms
     ) {
+        encoder.fill(buffer: cellComponentParents, value: 0xff)
+        encoder.fill(buffer: cellComponentCounts, value: 0)
+        encoder.fill(buffer: cellComponentAccumulation, value: 0)
+        encoder.fill(buffer: cellComponentOwners, value: 0xff)
+        encoder.fill(buffer: ownerPrimaryRoots, value: 0xff)
+        encoder.fill(buffer: cellComponentPrograms, value: 0)
+        encoder.fill(buffer: componentCellHeads, value: 0xff)
+        encoder.fill(buffer: componentCellNext, value: 0xff)
+        encoder.memoryBarrier(resources: [
+            cellComponentParents, cellComponentCounts, cellComponentAccumulation,
+            cellComponentOwners, ownerPrimaryRoots, cellComponentPrograms,
+            componentCellHeads, componentCellNext
+        ])
         encoder.setComputePipelineState(initializeCellComponentsPipeline)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 0)
         encoder.setBuffer(cellIdentities, offset: 0, index: 1)
@@ -3686,7 +3789,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         ])
     }
 
-    private func encodeOwnerCellLists(_ encoder: MTLComputeCommandEncoder) {
+    private func encodeOwnerCellLists(_ encoder: Metal4ComputeCommandEncoderAdapter) {
         encoder.setComputePipelineState(clearOwnerCellListsPipeline)
         encoder.setBuffer(ownerCellHeads, offset: 0, index: 0)
         encoder.setBuffer(activeComponentIndices, offset: 0, index: 1)
@@ -3704,27 +3807,35 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.memoryBarrier(resources: [ownerCellHeads, ownerCellNext])
     }
 
-    private func encodeQuantumStep(into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
+    private func encodeQuantumStep(into commandBuffer: Metal4CommandBufferContext, settings: RendererSettings) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Unitary 2D quantum walk"
         var uniforms = makeUniforms(settings: settings)
+        encoder.setComputePipelineState(quantumCouplingPipeline)
+        encoder.setTexture(state, index: 0)
+        encoder.setTexture(genomeA, index: 1)
+        encoder.setTexture(ecology, index: 2)
+        encoder.setTexture(quantumCoupling, index: 3)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
+        dispatch2D(encoder, pipeline: quantumCouplingPipeline)
+        encoder.memoryBarrier(resources: [quantumCoupling])
+
         encoder.setComputePipelineState(quantumPipeline)
         encoder.setTexture(quantumState, index: 0)
-        encoder.setTexture(state, index: 1)
-        encoder.setTexture(genomeA, index: 2)
-        encoder.setTexture(ecology, index: 3)
-        encoder.setTexture(reactionQuantumState, index: 4)
+        encoder.setTexture(quantumCoupling, index: 1)
+        encoder.setTexture(reactionQuantumState, index: 2)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
         var step = quantumStep
         encoder.setBytes(&step, length: MemoryLayout<UInt32>.stride, index: 1)
         dispatchQuantum(encoder, pipeline: quantumPipeline)
+        encoder.writeTimestamp(ending: "quantum")
         encoder.endEncoding()
 
         swap(&quantumState, &reactionQuantumState)
         quantumStep &+= 1
     }
 
-    private func encodeQuantumMeasurement(into commandBuffer: MTLCommandBuffer, slot: MetricReadbackSlot) {
+    private func encodeQuantumMeasurement(into commandBuffer: Metal4CommandBufferContext, slot: MetricReadbackSlot) {
         if let blit = commandBuffer.makeBlitCommandEncoder() {
             blit.label = "Reset quantum norm reduction"
             blit.fill(buffer: slot.quantumNorm, range: 0..<slot.quantumNorm.length, value: 0)
@@ -3740,7 +3851,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeCheckpointAndDamage(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings,
         applyDamage: Bool
     ) {
@@ -3759,7 +3870,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeMeasurements(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings,
         slot: MetricReadbackSlot
     ) {
@@ -3838,7 +3949,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
     }
 
-    private func encodeBrush(_ brush: BrushEvent, into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
+    private func encodeBrush(_ brush: BrushEvent, into commandBuffer: Metal4CommandBufferContext, settings: RendererSettings) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Laboratory intervention"
         var uniforms = makeUniforms(
@@ -3861,7 +3972,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeVisibleCellCompaction(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings
     ) {
         if let blit = commandBuffer.makeBlitCommandEncoder() {
@@ -3875,6 +3986,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Compact visible living cells"
+        if !settings.isRunning {
+            encodeActiveCellCompaction(encoder)
+        }
         var uniforms = makeUniforms(settings: settings)
         encoder.setComputePipelineState(compactCellRenderPipeline)
         encoder.setBuffer(agentOccupancy, offset: 0, index: 0)
@@ -3887,20 +4001,24 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.endEncoding()
     }
 
-    private func encodeRender(view: MTKView, into commandBuffer: MTLCommandBuffer, settings: RendererSettings) {
+    private func encodeRender(view: MTKView, into commandBuffer: Metal4CommandBufferContext, settings: RendererSettings) {
         guard let drawable = view.currentDrawable,
-              let drawableDescriptor = view.currentRenderPassDescriptor,
-              ensureRenderTargets(width: drawable.texture.width, height: drawable.texture.height),
+              commandBuffer.claimPresentation(drawable) else { return }
+        let drawableTexture = drawable.texture
+        guard ensureRenderTargets(width: drawableTexture.width, height: drawableTexture.height),
               let sceneColor,
               let bloomTextureA,
-              let bloomTextureB else { return }
+              let bloomTextureB else {
+            commandBuffer.cancelPresentation()
+            return
+        }
 
         let observationZoom = settings.cameraZoom / max(settings.worldScale, 1)
         if observationZoom > 0.35, observationZoom < 180 {
             encodeVisibleCellCompaction(into: commandBuffer, settings: settings)
         }
 
-        let sceneDescriptor = MTLRenderPassDescriptor()
+        let sceneDescriptor = MTL4RenderPassDescriptor()
         let sceneAttachment = sceneDescriptor.colorAttachments[0]!
         sceneAttachment.texture = sceneColor
         sceneAttachment.loadAction = .clear
@@ -3909,24 +4027,28 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: sceneDescriptor) else { return }
         encoder.label = "Render linear HDR simulation state"
         var uniforms = makeUniforms(settings: settings)
-        if observationZoom >= 64 {
-            encoder.setRenderPipelineState(quantumRenderPipeline)
+        let renderScale = observationZoom >= 512 ? 5 :
+            (observationZoom >= 160 ? 4 :
+                (observationZoom >= 64 ? 3 :
+                    (observationZoom >= 18 ? 2 : (observationZoom >= 6 ? 1 : 0))))
+        encoder.setRenderPipelineState(scaleSurfacePipelines[renderScale])
+        if renderScale >= 3 {
             encoder.setFragmentTexture(quantumState, index: 0)
             encoder.setFragmentTexture(state, index: 1)
             encoder.setFragmentTexture(ecology, index: 2)
-            encoder.setFragmentTexture(environmentState, index: 3)
-            encoder.setFragmentTexture(mechanicalState, index: 4)
             encoder.setFragmentTexture(genomeA, index: 5)
-            encoder.setFragmentTexture(genomeC, index: 6)
-        } else if observationZoom >= 18 {
-            encoder.setRenderPipelineState(cellularSurfacePipeline)
+            if renderScale == 3 {
+                encoder.setFragmentTexture(environmentState, index: 3)
+                encoder.setFragmentTexture(mechanicalState, index: 4)
+                encoder.setFragmentTexture(genomeC, index: 6)
+            }
+        } else if renderScale == 2 {
             encoder.setFragmentTexture(state, index: 0)
             encoder.setFragmentTexture(ecology, index: 1)
             encoder.setFragmentTexture(environmentState, index: 2)
             encoder.setFragmentTexture(eventState, index: 3)
             encoder.setFragmentTexture(mechanicalState, index: 4)
         } else {
-            encoder.setRenderPipelineState(renderPipeline)
             encoder.setFragmentTexture(state, index: 0)
             encoder.setFragmentTexture(ecology, index: 1)
             encoder.setFragmentTexture(environmentState, index: 2)
@@ -3934,7 +4056,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             encoder.setFragmentTexture(mechanicalState, index: 4)
         }
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.drawPrimitives(type: MTLPrimitiveType.triangle, vertexStart: 0, vertexCount: 3)
 
         if observationZoom > 0.35, observationZoom < 180 {
             encoder.setRenderPipelineState(cellRenderPipeline)
@@ -3951,7 +4073,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
             encoder.drawPrimitives(
-                type: .triangle,
+                type: MTLPrimitiveType.triangle,
                 indirectBuffer: cellDrawArguments,
                 indirectBufferOffset: 0
             )
@@ -3985,7 +4107,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             )
         }
 
-        guard let compositeEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: drawableDescriptor) else { return }
+        let drawableDescriptor = MTL4RenderPassDescriptor()
+        let drawableAttachment = drawableDescriptor.colorAttachments[0]!
+        drawableAttachment.texture = drawableTexture
+        drawableAttachment.loadAction = .dontCare
+        drawableAttachment.storeAction = .store
+        guard let compositeEncoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: drawableDescriptor
+        ) else { return }
         compositeEncoder.label = "Composite HDR scene into display gamut"
         compositeEncoder.setRenderPipelineState(compositePipeline)
         compositeEncoder.setFragmentTexture(sceneColor, index: 0)
@@ -3995,7 +4124,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             length: MemoryLayout<PostProcessUniforms>.stride,
             index: 0
         )
-        compositeEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        compositeEncoder.drawPrimitives(
+            type: MTLPrimitiveType.triangle,
+            vertexStart: 0,
+            vertexCount: 3
+        )
         compositeEncoder.endEncoding()
         let observationInterval = settings.trackedAgentID == .max
             ? Self.agentObservationIntervalFrames
@@ -4003,7 +4136,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         if frameSerial.isMultiple(of: observationInterval) {
             encodeAgentObservation(into: commandBuffer, settings: settings)
         }
-        commandBuffer.present(drawable)
     }
 
     private func encodeBloom(
@@ -4011,7 +4143,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         textureA: MTLTexture,
         textureB: MTLTexture,
         uniforms: inout PostProcessUniforms,
-        into commandBuffer: MTLCommandBuffer
+        into commandBuffer: Metal4CommandBufferContext
     ) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Quarter-resolution HDR bloom"
@@ -4077,12 +4209,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         sceneColor = nextScene
         bloomTextureA = nextBloomA
         bloomTextureB = nextBloomB
+        commandQueue.replaceDynamicAllocations([nextScene, nextBloomA, nextBloomB])
         renderTargetSize = size
         return true
     }
 
     private func encodeAgentObservation(
-        into commandBuffer: MTLCommandBuffer,
+        into commandBuffer: Metal4CommandBufferContext,
         settings: RendererSettings
     ) {
         guard let slot = agentObservationRingState.acquire() else { return }
@@ -4822,7 +4955,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
     }
 
-    private func dispatchWorlds(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
+    private func dispatchWorlds(_ encoder: Metal4ComputeCommandEncoderAdapter, pipeline: MTLComputePipelineState) {
         let threadgroup = threadsPerThreadgroup2D(pipeline: pipeline, gridWidth: Self.gridSize)
         encoder.dispatchThreads(
             MTLSize(width: Self.gridSize, height: Self.gridSize, depth: Self.worldCount),
@@ -4830,7 +4963,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
     }
 
-    private func dispatch2D(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
+    private func dispatch2D(_ encoder: Metal4ComputeCommandEncoderAdapter, pipeline: MTLComputePipelineState) {
         let threadgroup = threadsPerThreadgroup2D(pipeline: pipeline, gridWidth: Self.gridSize)
         encoder.dispatchThreads(
             MTLSize(width: Self.gridSize, height: Self.gridSize, depth: 1),
@@ -4838,7 +4971,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
     }
 
-    private func dispatchQuantum(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
+    private func dispatchQuantum(_ encoder: Metal4ComputeCommandEncoderAdapter, pipeline: MTLComputePipelineState) {
         let threadgroup = threadsPerThreadgroup2D(pipeline: pipeline, gridWidth: Self.quantumGridSize)
         encoder.dispatchThreads(
             MTLSize(width: Self.quantumGridSize, height: Self.quantumGridSize, depth: 1),
@@ -4846,7 +4979,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
     }
 
-    private func dispatchAgents(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
+    private func dispatchAgents(_ encoder: Metal4ComputeCommandEncoderAdapter, pipeline: MTLComputePipelineState) {
         let width = threadsPerThreadgroup1D(pipeline: pipeline, count: Self.maxAgentCount)
         encoder.dispatchThreads(
             MTLSize(width: Self.maxAgentCount, height: 1, depth: 1),
@@ -4854,7 +4987,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
     }
 
-    private func encodeActiveComponentCompaction(_ encoder: MTLComputeCommandEncoder) {
+    private func encodeActiveComponentCompaction(_ encoder: Metal4ComputeCommandEncoderAdapter) {
         encoder.setComputePipelineState(resetActiveComponentDispatchPipeline)
         encoder.setBuffer(activeComponentCount, offset: 0, index: 0)
         encoder.setBuffer(activeComponentDispatchArguments, offset: 0, index: 1)
@@ -4881,8 +5014,25 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.memoryBarrier(resources: [activeComponentDispatchArguments])
     }
 
+    private func encodeActiveCellCompaction(_ encoder: Metal4ComputeCommandEncoderAdapter) {
+        encoder.setComputePipelineState(compactActiveCellsPipeline)
+        encoder.setBuffer(cellOccupancy, offset: 0, index: 0)
+        encoder.setBuffer(activeCellIndices, offset: 0, index: 1)
+        encoder.setBuffer(activeCellCount, offset: 0, index: 2)
+        encoder.setBuffer(activeCellDispatchArguments, offset: 0, index: 3)
+        encoder.dispatchThreads(
+            MTLSize(width: 256, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+        )
+        encoder.memoryBarrier(resources: [
+            activeCellIndices, activeCellCount, activeCellDispatchArguments
+        ])
+        encoder.setBuffer(activeCellCount, offset: 0, index: 29)
+        encoder.setBuffer(activeCellIndices, offset: 0, index: 30)
+    }
+
     private func dispatchActiveComponents(
-        _ encoder: MTLComputeCommandEncoder,
+        _ encoder: Metal4ComputeCommandEncoderAdapter,
         pipeline: MTLComputePipelineState
     ) {
         precondition(
@@ -4896,16 +5046,20 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
     }
 
-    private func dispatchCells(_ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState) {
-        let width = threadsPerThreadgroup1D(pipeline: pipeline, count: Self.maxCellCount)
-        encoder.dispatchThreads(
-            MTLSize(width: Self.maxCellCount, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1)
+    private func dispatchCells(_ encoder: Metal4ComputeCommandEncoderAdapter, pipeline: MTLComputePipelineState) {
+        precondition(
+            pipeline.maxTotalThreadsPerThreadgroup >= 64,
+            "Living-cell kernels require a 64-thread group"
+        )
+        encoder.dispatchThreadgroups(
+            indirectBuffer: activeCellDispatchArguments,
+            indirectBufferOffset: 0,
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
         )
     }
 
     private func dispatchTexture(
-        _ encoder: MTLComputeCommandEncoder,
+        _ encoder: Metal4ComputeCommandEncoderAdapter,
         pipeline: MTLComputePipelineState,
         texture: MTLTexture
     ) {
@@ -4922,7 +5076,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     ) -> MTLSize {
         let width = max(1, min(pipeline.threadExecutionWidth, gridWidth))
         let availableRows = max(1, pipeline.maxTotalThreadsPerThreadgroup / width)
-        return MTLSize(width: width, height: min(availableRows, 8), depth: 1)
+        let preferredRows = tuningProfile == .m4Optimized ? 8 : 4
+        return MTLSize(width: width, height: min(availableRows, preferredRows), depth: 1)
     }
 
     private func threadsPerThreadgroup1D(
@@ -4930,13 +5085,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         count: Int
     ) -> Int {
         let executionWidth = max(pipeline.threadExecutionWidth, 1)
-        let limit = max(1, min(pipeline.maxTotalThreadsPerThreadgroup, min(count, 256)))
+        let profileLimit = tuningProfile == .m4Optimized ? 256 : 128
+        let limit = max(1, min(
+            pipeline.maxTotalThreadsPerThreadgroup,
+            min(count, profileLimit)
+        ))
         return limit >= executionWidth
             ? max(executionWidth, (limit / executionWidth) * executionWidth)
             : limit
     }
 
-    private func copyAllSlices(from source: MTLTexture, to destination: MTLTexture, commandBuffer: MTLCommandBuffer) {
+    private func copyAllSlices(from source: MTLTexture, to destination: MTLTexture, commandBuffer: Metal4CommandBufferContext) {
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { return }
         for slice in 0..<Self.worldCount {
             copySlice(from: source, sourceSlice: slice, to: destination, destinationSlice: slice, encoder: blit)
@@ -4958,7 +5117,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         sourceSlice: Int,
         to destination: MTLTexture,
         destinationSlice: Int,
-        encoder: MTLBlitCommandEncoder
+        encoder: Metal4BlitCommandEncoderAdapter
     ) {
         encoder.copy(
             from: source,
@@ -4978,6 +5137,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             .map { $0.appendingPathComponent("NumiAutomata_NumiAutomata.bundle", isDirectory: true) }
             .flatMap(Bundle.init(url:))
 
+        if let metallibURL = packagedResourceBundle?.url(
+            forResource: "Replicator",
+            withExtension: "metallib",
+            subdirectory: "Shaders"
+        ) ?? Bundle.module.url(
+            forResource: "Replicator",
+            withExtension: "metallib",
+            subdirectory: "Shaders"
+        ) {
+            return try device.makeLibrary(URL: metallibURL)
+        }
+
+#if DEBUG
         guard let url = packagedResourceBundle?.url(
             forResource: "Replicator",
             withExtension: "metal",
@@ -4991,17 +5163,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         let source = try String(contentsOf: url, encoding: .utf8)
         return try device.makeLibrary(source: source, options: nil)
-    }
-
-    private static func computePipeline(
-        named name: String,
-        library: MTLLibrary,
-        device: MTLDevice
-    ) throws -> MTLComputePipelineState {
-        guard let function = library.makeFunction(name: name) else {
-            throw EvolutionRendererError.missingFunction(name)
-        }
-        return try device.makeComputePipelineState(function: function)
+#else
+        throw EvolutionRendererError.missingCompiledShader
+#endif
     }
 
     private static func makeWorldTexture(device: MTLDevice, label: String) throws -> MTLTexture {
@@ -5026,6 +5190,25 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             pixelFormat: .rgba32Float,
             width: quantumGridSize,
             height: quantumGridSize,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            throw EvolutionRendererError.resourceAllocation(label)
+        }
+        texture.label = label
+        return texture
+    }
+
+    private static func makeQuantumCouplingTexture(
+        device: MTLDevice,
+        label: String
+    ) throws -> MTLTexture {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float,
+            width: gridSize,
+            height: gridSize,
             mipmapped: false
         )
         descriptor.storageMode = .private

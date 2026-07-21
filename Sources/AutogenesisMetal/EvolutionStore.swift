@@ -833,9 +833,6 @@ final class EvolutionStore: ObservableObject {
             individualityEvidence = .inconclusive
         }
         runtimeTelemetry = telemetry
-        if let error = telemetry.lastError {
-            errorMessage = error
-        }
     }
 
     private func updateIndividualityObserver(

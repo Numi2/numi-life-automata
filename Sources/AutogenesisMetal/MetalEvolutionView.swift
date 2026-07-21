@@ -265,11 +265,11 @@ struct MetalEvolutionView: NSViewRepresentable {
         func startBackgroundTick(for view: InteractiveMetalView) {
             backgroundTimer?.invalidate()
             let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) {
-                [weak self, weak view] _ in
-                Task { @MainActor [weak self, weak view] in
-                    guard let self, let view,
+                [weak view] _ in
+                Task { @MainActor [weak view] in
+                    guard let view,
                           view.window?.occlusionState.contains(.visible) != true else { return }
-                    self.renderer?.draw(in: view)
+                    view.draw()
                 }
             }
             backgroundTimer = timer
