@@ -165,6 +165,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanInheritedTractionGain: Double = 0
     var meanDetachmentThreshold: Double = 0
     var meanPropaguleInvestment: Double = 0
+    var meanJunctionAdhesion: Double = 0
+    var meanJunctionCorticalTension: Double = 0
+    var meanJunctionDamping: Double = 0
+    var meanJunctionPermeability: Double = 0
+    var meanToxinTolerance: Double = 0
+    var meanDetritalScavenging: Double = 0
+    var meanShearAnchoring: Double = 0
+    var meanStarvationQuiescence: Double = 0
     var meanCellsPerOrganism: Double = 0
     var largestTissueCellCount: Int = 0
     var cellPoolUtilization: Double = 0
@@ -285,6 +293,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
         meanInheritedTractionGain: Double = 0,
         meanDetachmentThreshold: Double = 0,
         meanPropaguleInvestment: Double = 0,
+        meanJunctionAdhesion: Double = 0,
+        meanJunctionCorticalTension: Double = 0,
+        meanJunctionDamping: Double = 0,
+        meanJunctionPermeability: Double = 0,
+        meanToxinTolerance: Double = 0,
+        meanDetritalScavenging: Double = 0,
+        meanShearAnchoring: Double = 0,
+        meanStarvationQuiescence: Double = 0,
         meanCellsPerOrganism: Double = 0,
         largestTissueCellCount: Int = 0,
         cellPoolUtilization: Double = 0,
@@ -396,6 +412,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.meanInheritedTractionGain = meanInheritedTractionGain
         self.meanDetachmentThreshold = meanDetachmentThreshold
         self.meanPropaguleInvestment = meanPropaguleInvestment
+        self.meanJunctionAdhesion = meanJunctionAdhesion
+        self.meanJunctionCorticalTension = meanJunctionCorticalTension
+        self.meanJunctionDamping = meanJunctionDamping
+        self.meanJunctionPermeability = meanJunctionPermeability
+        self.meanToxinTolerance = meanToxinTolerance
+        self.meanDetritalScavenging = meanDetritalScavenging
+        self.meanShearAnchoring = meanShearAnchoring
+        self.meanStarvationQuiescence = meanStarvationQuiescence
         self.meanCellsPerOrganism = meanCellsPerOrganism
         self.largestTissueCellCount = largestTissueCellCount
         self.cellPoolUtilization = cellPoolUtilization
@@ -978,6 +1002,7 @@ final class EvolutionStore: ObservableObject {
         let evolutionary = EvolutionaryEvidence.evaluate(
             selection: currentSelection,
             maximumComponentDescentDepth: agents.map(\.componentDescentDepth).max() ?? 0,
+            livingSeparatedDescendantCount: livingDescendantCount,
             conservationValid: runtimeTelemetry.lastError == nil
         )
         let collectiveSupport = currentSelection.covarianceSampleCount >= 8 &&

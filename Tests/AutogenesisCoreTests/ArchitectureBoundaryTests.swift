@@ -119,6 +119,24 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func activeLocalDetachmentPreventsImmediateRefusion() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains(
+            "max(cell.tissueGeometry.w, other.tissueGeometry.w) < 0.32"
+        ))
+        #expect(shader.contains(
+            "(0.00018 + detachmentRelease * 0.00012)"
+        ))
+        #expect(shader.contains("float localDetachmentGate = 1.0 - smoothstep"))
+        #expect(shader.contains("float compressiveContactGate = 1.0 - smoothstep"))
+        #expect(shader.contains("localDetachmentGate * compressiveContactGate"))
+    }
+
+    @Test
     func selectionUsesGenerationTaggedProgramIdentityRatherThanGenomeHash() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
@@ -151,6 +169,53 @@ struct ArchitectureBoundaryTests {
         #expect(transport.lowerBound < mixedPrograms.lowerBound)
         #expect(shader.contains("float sharingContactWeight"))
         #expect(shader.contains("float junctionTransportWork = abs(atpSharingFlux)"))
+    }
+
+    @Test
+    func junctionMaterialIsInheritedRemodeledAndEnergeticallyPaid() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("float4 junctionMaterial;"))
+        #expect(shader.contains("float4 ecologicalResponse;"))
+        #expect(shader.contains("float4 material;"))
+        #expect(shader.contains("float4 remodeling;"))
+        #expect(shader.contains("junctionMaterial.z * maturity"))
+        #expect(shader.contains("float junctionMaterialWork ="))
+        #expect(shader.contains("updatedRemodeling.y = mix"))
+        #expect(shader.contains("metabolicInvestment * pairAdhesion"))
+    }
+
+    @Test
+    func developmentalRegulationUsesSixteenLocalSensorsWithoutNamedCellTypes() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("float regulatorySensors[16]"))
+        #expect(shader.contains("node.sensorIndex < 16u"))
+        #expect(shader.contains("genome.topology = uint4(12u, 20u"))
+        for forbidden in ["sensorCell", "muscleCell", "armorCell", "germCell"] {
+            #expect(!shader.contains(forbidden))
+        }
+    }
+
+    @Test
+    func ecologicalTraitsActThroughLocalPhysicsAndCarryWorkCosts() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("float toxinTolerance = development.ecologicalResponse.x"))
+        #expect(shader.contains("float detritalScavenging = development.ecologicalResponse.y"))
+        #expect(shader.contains("float shearAnchoring = development.ecologicalResponse.z"))
+        #expect(shader.contains("float starvationQuiescence = development.ecologicalResponse.w"))
+        #expect(shader.contains("float ecologicalResponseWork ="))
+        #expect(shader.contains("(1.0 - starvationQuiescence * 0.88)"))
     }
 
     @Test

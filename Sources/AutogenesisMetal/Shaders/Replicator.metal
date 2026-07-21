@@ -189,6 +189,10 @@ struct CellJunctionState {
     float strength;
     float age;
     float load;
+    // Normal stiffness, viscous damping, transport permeability, cortical tension.
+    float4 material;
+    // Target rest distance, strain memory, ATP investment, polarity alignment.
+    float4 remodeling;
 };
 
 struct CellAggregate {
@@ -252,6 +256,10 @@ struct DevelopmentalGenome {
     float4 morphogenKinetics;
     // Receptor sensitivity A/B and junction diffusivity A/B.
     float4 morphogenTransport;
+    // Junction adhesion expression, cortical tension, viscous damping, permeability.
+    float4 junctionMaterial;
+    // Toxin tolerance, detrital scavenging, shear anchoring, starvation quiescence.
+    float4 ecologicalResponse;
 };
 
 struct RegulatoryNode {
@@ -460,6 +468,8 @@ inline DevelopmentalGenome emptyDevelopmentalGenome() {
     genome.mechanochemistryB = float4(1.0, 1.0, 0.42, 1.0);
     genome.morphogenKinetics = float4(0.34, 0.30, 0.22, 0.20);
     genome.morphogenTransport = float4(1.0, 1.0, 0.42, 0.34);
+    genome.junctionMaterial = float4(0.72, 0.42, 0.46, 0.52);
+    genome.ecologicalResponse = float4(0.28, 0.24, 0.30, 0.36);
     return genome;
 }
 
@@ -648,6 +658,14 @@ inline uint agentGenomeHash(
         as_type<uint>(development.morphogenKinetics.w));
     value = hash32(value ^ as_type<uint>(development.morphogenTransport.y) ^
         as_type<uint>(development.morphogenTransport.z));
+    value = hash32(value ^ as_type<uint>(development.junctionMaterial.x) ^
+        hash32(as_type<uint>(development.junctionMaterial.y)) ^
+        hash32(as_type<uint>(development.junctionMaterial.z)) ^
+        as_type<uint>(development.junctionMaterial.w));
+    value = hash32(value ^ as_type<uint>(development.ecologicalResponse.x) ^
+        hash32(as_type<uint>(development.ecologicalResponse.y)) ^
+        hash32(as_type<uint>(development.ecologicalResponse.z)) ^
+        as_type<uint>(development.ecologicalResponse.w));
     return value;
 }
 
@@ -669,15 +687,18 @@ inline void initializeFounderRegulatoryGenome(
         edges[edgeBase + index] = emptyRegulatoryEdge();
     }
 
-    for (uint index = 0u; index < 8u; ++index) {
+    for (uint index = 0u; index < 12u; ++index) {
         RegulatoryNode node = emptyRegulatoryNode();
         node.bias = -0.42 + random01(seed + index * 17u) * 0.54;
         node.responseRate = clamp(0.012 + random01(seed + index * 19u + 1u) * 0.050, 0.004, 0.095);
         node.sensorWeight = 0.52 + random01(seed + index * 23u + 2u) * 0.92;
-        if (index == 2u || index == 3u) { node.sensorWeight *= -0.72; }
+        if (index == 2u || index == 3u || index == 10u) { node.sensorWeight *= -0.72; }
         node.outputWeight = 0.72 + random01(seed + index * 29u + 3u) * 0.52;
         node.sensorIndex = index;
-        node.actuatorMask = 1u << index;
+        node.actuatorMask = 1u << (index & 7u);
+        if (index >= 8u) {
+            node.actuatorMask = 1u << (hash32(seed + 37u * index) & 7u);
+        }
         if (index == 0u) { node.actuatorMask |= 1u << 4u; }
         if (index == 2u) { node.actuatorMask |= 1u << 7u; }
         node.innovationID = atomic_fetch_add_explicit(&identityCounters[1], 1u, memory_order_relaxed);
@@ -685,10 +706,10 @@ inline void initializeFounderRegulatoryGenome(
         nodes[nodeBase + index] = node;
     }
 
-    for (uint index = 0u; index < 14u; ++index) {
+    for (uint index = 0u; index < 20u; ++index) {
         RegulatoryEdge edge = emptyRegulatoryEdge();
-        edge.source = index % 8u;
-        edge.target = (index * 3u + 1u) % 8u;
+        edge.source = index % 12u;
+        edge.target = (index * 5u + 1u) % 12u;
         edge.weight = signedRandom(seed + 101u + index * 7u) * 1.18;
         if (index < 4u) { edge.weight = 0.42 + random01(seed + 201u + index) * 0.72; }
         edge.plasticity = signedRandom(seed + 301u + index) * 0.025;
@@ -698,7 +719,7 @@ inline void initializeFounderRegulatoryGenome(
     }
 
     DevelopmentalGenome genome = emptyDevelopmentalGenome();
-    genome.topology = uint4(8u, 14u, 0u, 0u);
+    genome.topology = uint4(12u, 20u, 0u, 0u);
     genome.mutation.z = 0.010 + agent.geneB.y * 0.26;
     genome.mutation.w = 0.016 + agent.geneB.y * 0.38;
     genome.actuatorBiasA += randomSigned4(seed + 401u) * 0.08;
@@ -735,6 +756,24 @@ inline void initializeFounderRegulatoryGenome(
             0.16 + agent.geneA.z * 0.55
         ) + randomSigned4(seed + 433u) * 0.075,
         float4(0.05), float4(1.80)
+    );
+    genome.junctionMaterial = clamp(
+        float4(
+            0.38 + agent.geneA.y * 0.62,
+            0.22 + agent.geneA.z * 0.56,
+            0.20 + agent.geneB.x * 0.58,
+            0.24 + agent.social.y * 0.62
+        ) + randomSigned4(seed + 437u) * 0.08,
+        float4(0.05), float4(1.40)
+    );
+    genome.ecologicalResponse = clamp(
+        float4(
+            0.12 + agent.geneA.w * 0.58,
+            0.10 + agent.geneC.z * 0.64,
+            0.10 + agent.geneA.z * 0.60,
+            0.14 + agent.geneB.x * 0.58
+        ) + randomSigned4(seed + 441u) * 0.08,
+        float4(0.0), float4(1.0)
     );
     genomes[programIndex] = genome;
     genome.topology.z = topologyHash(nodes, edges, programIndex);
@@ -803,6 +842,8 @@ inline void mutateDevelopmentalGenome(
     float4 oldMechanochemistryB = child.mechanochemistryB;
     float4 oldMorphogenKinetics = child.morphogenKinetics;
     float4 oldMorphogenTransport = child.morphogenTransport;
+    float4 oldJunctionMaterial = child.junctionMaterial;
+    float4 oldEcologicalResponse = child.ecologicalResponse;
     child.mechanochemistryA = clamp(
         child.mechanochemistryA + randomSigned4(seed + 709u) * (0.010 + mutation * 1.25),
         float4(0.12), float4(3.0)
@@ -831,10 +872,20 @@ inline void mutateDevelopmentalGenome(
             (0.008 + mutation * 0.95),
         float2(0.015), float2(1.80)
     );
+    child.junctionMaterial = clamp(
+        child.junctionMaterial + randomSigned4(seed + 724u) * (0.008 + mutation * 1.08),
+        float4(0.035), float4(1.60)
+    );
+    child.ecologicalResponse = clamp(
+        child.ecologicalResponse + randomSigned4(seed + 726u) * (0.006 + mutation * 0.88),
+        float4(0.0), float4(1.0)
+    );
     numericalDistance += length(child.mechanochemistryA - oldMechanochemistryA) * 0.020 +
         length(child.mechanochemistryB - oldMechanochemistryB) * 0.020 +
         length(child.morphogenKinetics - oldMorphogenKinetics) * 0.026 +
-        length(child.morphogenTransport - oldMorphogenTransport) * 0.022;
+        length(child.morphogenTransport - oldMorphogenTransport) * 0.022 +
+        length(child.junctionMaterial - oldJunctionMaterial) * 0.024 +
+        length(child.ecologicalResponse - oldEcologicalResponse) * 0.022;
     uint structuralChanges = 0u;
     bool structuralMutation = branchMutation || random01(seed + 719u) < child.mutation.w;
     if (structuralMutation) {
@@ -849,7 +900,8 @@ inline void mutateDevelopmentalGenome(
                 (mutableNodes[childNodeBase + sourceSlot].flags & 1u) != 0u) {
                 RegulatoryNode duplicate = mutableNodes[childNodeBase + sourceSlot];
                 duplicate.bias = mutateScalar(duplicate.bias, seed + 739u, 0.22, -3.0, 3.0);
-                duplicate.sensorIndex = random01(seed + 743u) < 0.54 ? duplicate.sensorIndex : 8u;
+                duplicate.sensorIndex = random01(seed + 743u) < 0.54
+                    ? duplicate.sensorIndex : (hash32(seed + 745u) & 15u);
                 duplicate.actuatorMask = random01(seed + 747u) < 0.60
                     ? duplicate.actuatorMask : (1u << (hash32(seed + 751u) & 7u));
                 duplicate.innovationID = atomic_fetch_add_explicit(
@@ -950,7 +1002,7 @@ inline RegulatoryOutputs evolveDevelopmentalProgram(
         RegulatoryNode node = nodes[nodeBase + index];
         previous[index] = nodeStates[stateBase + index];
         drive[index] = node.bias;
-        if ((node.flags & 1u) != 0u && node.sensorIndex < 8u) {
+        if ((node.flags & 1u) != 0u && node.sensorIndex < 16u) {
             drive[index] += sensors[node.sensorIndex] * node.sensorWeight;
         }
     }
@@ -1460,7 +1512,15 @@ inline float2 substrateForcing(float2 uv, float4 geology, uint step) {
     float pulseB = 0.5 + 0.5 * sin(
         2.0 * M_PI_F * (time * frequency * 0.61 + phase * 1.37 - uv.y * 1.9)
     );
-    return 0.12 + 0.88 * float2(pulseA, pulseB);
+    float envelopeA = smoothstep(0.18, 0.82, 0.5 + 0.5 * sin(
+        2.0 * M_PI_F * (time * frequency * 0.071 + phase * 0.61)
+    ));
+    float envelopeB = smoothstep(0.16, 0.84, 0.5 + 0.5 * sin(
+        2.0 * M_PI_F * (time * frequency * 0.053 + phase * 0.83 + 0.31)
+    ));
+    float2 burst = pow(float2(pulseA, pulseB), float2(1.45)) *
+        mix(float2(0.20), float2(1.0), float2(envelopeA, envelopeB));
+    return 0.045 + 0.955 * burst;
 }
 
 inline float environmentalMechanicalAmplitude(float4 geology) {
@@ -2897,6 +2957,8 @@ kernel void initializeAgents(
         junctionStates[junction].strength = 0.0;
         junctionStates[junction].age = 0.0;
         junctionStates[junction].load = 0.0;
+        junctionStates[junction].material = float4(0.0);
+        junctionStates[junction].remodeling = float4(0.0);
     }
     if (gid == 0u) {
         atomic_store_explicit(&identityCounters[0], 1u, memory_order_relaxed);
@@ -3499,10 +3561,23 @@ kernel void unionCellComponents(
                             float bilateralFusionInvestment = min(
                                 inheritedA.social.x, inheritedB.social.x
                             );
+                            float localDetachmentGate = 1.0 - smoothstep(
+                                0.08, 0.42,
+                                max(cell.tissueGeometry.w, other.tissueGeometry.w)
+                            );
+                            float2 velocityA = agent.velocity +
+                                rotateTissueToWorld(cell.velocity, agent) * scale;
+                            float2 velocityB = otherAgent.velocity +
+                                rotateTissueToWorld(other.velocity, otherAgent) * scale;
+                            float separatingSpeed = dot(velocityB - velocityA, direction);
+                            float compressiveContactGate = 1.0 - smoothstep(
+                                -0.00001, 0.00018, separatingSpeed
+                            );
                             fusionDrive = adhesiveCommitment * integrity * nonAggression *
                                 mix(1.0, 0.72, pairDifference) * stressTolerance *
                                 mix(0.22, 1.0, compatibility) *
-                                mix(0.38, 1.24, bilateralFusionInvestment);
+                                mix(0.38, 1.24, bilateralFusionInvestment) *
+                                localDetachmentGate * compressiveContactGate;
                         }
                     }
                     float junctionExtension = sameOwner
@@ -4280,6 +4355,9 @@ kernel void evolveOrganismCells(
     float2 morphogenFlux = float2(0.0);
     float2 morphogenGradient = float2(0.0);
     float junctionConductance = 0.0;
+    float junctionMaterialDemand = 0.0;
+    float junctionStrainMemory = 0.0;
+    float junctionPolarityAlignment = 0.0;
     float2 nearestContact = float2(0.0);
     float nearestDistance = 10.0;
     float contactCount = 0.0;
@@ -4325,9 +4403,12 @@ kernel void evolveOrganismCells(
                     float loadGate = 1.0 / (
                         1.0 + max(cellJunctions[junctionIndex].load, 0.0) * 18.0
                     );
+                    float4 junctionMaterial = max(
+                        cellJunctions[junctionIndex].material, float4(0.0)
+                    );
                     float conductance = max(
                         cellJunctions[junctionIndex].strength, 0.0
-                    ) * maturity * integrityGate * loadGate * weight;
+                    ) * junctionMaterial.z * maturity * integrityGate * loadGate * weight;
                     float2 difference = other.signals.xy - cell.signals.xy;
                     float2 transportedDifference = difference *
                         development.morphogenTransport.zw;
@@ -4337,6 +4418,15 @@ kernel void evolveOrganismCells(
                         difference.y * development.morphogenTransport.y;
                     morphogenGradient += direction * receptorDifference * conductance;
                     junctionConductance += conductance;
+                    junctionMaterialDemand += maturity * weight * (
+                        junctionMaterial.x * 0.30 + junctionMaterial.z * 0.24 +
+                        junctionMaterial.w * 0.20
+                    );
+                    junctionStrainMemory += abs(
+                        cellJunctions[junctionIndex].remodeling.y
+                    ) * weight;
+                    junctionPolarityAlignment +=
+                        cellJunctions[junctionIndex].remodeling.w * weight;
                     uint transportProgramIndex = cellIdentities[otherIndex].programIndex;
                     AgentState transportProgram = agent;
                     float transportCompatibility = 1.0;
@@ -4603,7 +4693,8 @@ kernel void evolveOrganismCells(
         incomingRejection * 0.44 + barrierLoad * 0.24 +
         environmentalDrive * (1.0 - frequencyMatch) * 0.30
     );
-    float regulatorySensors[8] = {
+    float resourceTotal = max(localState.x + localEcology.x + localEcology.y, 0.0001);
+    float regulatorySensors[16] = {
         clamp(cell.physiology.x * 2.0 - 1.0, -1.0, 1.0),
         clamp(voltage / 1.8, -1.0, 1.0),
         fieldStrain,
@@ -4616,7 +4707,16 @@ kernel void evolveOrganismCells(
         ),
         clamp(uptakePotential * 1350.0 - externalStress - cell.signals.z * 0.35, -1.0, 1.0),
         clamp(resonantResponse, -1.0, 1.0),
-        saturate(cell.membrane.w * 8.0 + abs(cell.membrane.z - 1.0))
+        saturate(cell.membrane.w * 8.0 + abs(cell.membrane.z - 1.0)),
+        clamp((cell.membrane.z - 1.0) * 1.8, -1.0, 1.0),
+        saturate(cell.membrane.w * 6.0 + junctionStrainMemory * 2.0),
+        saturate(localEnvironment.z * 0.70 + localEcology.z * 0.85 + localEcology.y * 0.12),
+        clamp((localState.x - localEcology.x) / resourceTotal, -1.0, 1.0),
+        saturate(incomingRejection + mixedContactWeight * 0.16),
+        saturate(junctionConductance * 0.55 + junctionStrainMemory * 2.4),
+        membraneExposure,
+        clamp((cell.development.z - 0.5) * 1.4 +
+            junctionPolarityAlignment / max(contactCount, 0.001), -1.0, 1.0)
     };
     RegulatoryOutputs regulatoryOutput = evolveDevelopmentalProgram(
         developmentalGenomes, regulatoryNodes, regulatoryEdges, regulatoryStates,
@@ -4632,6 +4732,17 @@ kernel void evolveOrganismCells(
     float secretionProgram = regulationB.y;
     float apoptosisSuppression = regulationB.z;
     float motilityProgram = regulationB.w;
+    float ecologicalScarcity = 1.0 - smoothstep(0.035, 0.24, resourceTotal);
+    float toxinLoad = saturate(localEnvironment.z * 0.72 + localEcology.z * 0.88);
+    float toxinTolerance = development.ecologicalResponse.x * repairProgram;
+    float detritalScavenging = development.ecologicalResponse.y * permeabilityProgram;
+    float shearAnchoring = development.ecologicalResponse.z * adhesiveProgram;
+    float starvationQuiescence = development.ecologicalResponse.w *
+        (1.0 - proliferationProgram) * ecologicalScarcity;
+    externalStress = saturate(
+        externalStress - toxinLoad * toxinTolerance * 0.54 -
+            environmentalDrive * shearAnchoring * 620.0
+    );
     float2 previousMorphogens = saturate(cell.signals.xy);
     float activatorAutocatalysis = previousMorphogens.x * previousMorphogens.x /
         max(0.08 + previousMorphogens.x * previousMorphogens.x, 0.0001);
@@ -4707,7 +4818,8 @@ kernel void evolveOrganismCells(
     float requestedResourceB = localEcology.x * cell.phenotype.w * 0.00125 *
         uptakeGain * mix(0.12, 1.12, pow(membraneExposure, 0.70));
     float requestedDetritus = localEcology.y * agent.geneC.z * 0.00043 *
-        uptakeGain * mix(0.12, 1.12, pow(membraneExposure, 0.70));
+        uptakeGain * (1.0 + detritalScavenging * 1.65) *
+        mix(0.12, 1.12, pow(membraneExposure, 0.70));
     float consumedResourceA = claimSubstrate(
         &cellEnergyExchange[energyTileBase], requestedResourceA
     );
@@ -4732,7 +4844,8 @@ kernel void evolveOrganismCells(
     contractility *= mix(0.52, 1.58, contractileProgram) * (1.0 + calcium * 0.18) *
         mix(0.22, 1.0, metabolicReadiness);
     maintenance *= (0.94 + repairProgram * 0.16 + proliferationProgram * 0.10) *
-        mix(0.20, 1.0, metabolicReadiness);
+        mix(0.20, 1.0, metabolicReadiness) *
+        mix(1.0, 0.48, starvationQuiescence);
     float signalingCost = (calcium * 0.000020 + erk * 0.000024 +
         (mechanicsToCalciumEffect + calciumToERKEffect) * 0.000080) *
         development.mechanochemistryB.x;
@@ -4743,13 +4856,19 @@ kernel void evolveOrganismCells(
     float constructionWork = armorConstruction * 0.000070 +
         predatoryConstruction * 0.000060 + sensorConstruction * 0.000025 +
         locomotorConstruction * 0.000040;
+    float junctionMaterialWork = junctionMaterialDemand * 0.0000045 +
+        junctionStrainMemory * 0.000016;
+    float ecologicalResponseWork = toxinTolerance * toxinLoad * 0.000022 +
+        detritalScavenging * consumedDetritus * 0.045 +
+        shearAnchoring * environmentalDrive * 0.075 +
+        development.ecologicalResponse.w * 0.0000025;
     float propagulePreparation = membraneExposure * motilityProgram *
         development.mechanochemistryB.w * (1.0 - adhesiveProgram) *
         smoothstep(0.16, 0.38, cell.physiology.x);
     float activeWork = (contractility * (0.000055 + fieldStrain * 0.000070) +
         abs(voltageDerivative) * 0.000070 + signalingCost + frequencyWork +
         constructionWork + propagulePreparation * 0.000060 + morphogenWork +
-        junctionTransportWork) *
+        junctionTransportWork + junctionMaterialWork + ecologicalResponseWork) *
         mix(0.16, 1.0, metabolicReadiness);
     float dissipation = externalStress * 0.00032 + fieldWaveSpeed * 0.000035 +
         dot(cell.velocity, cell.velocity) * 2.8 + barrierLoad *
@@ -4857,7 +4976,8 @@ kernel void evolveOrganismCells(
         proliferationProgram, stress, membraneExposure
     );
     float contactBrake = contactInhibition * (0.62 + adhesiveProgram * 0.30);
-    float cycleRate = unconstrainedCycleDrive * (1.0 - contactBrake);
+    float cycleRate = unconstrainedCycleDrive * (1.0 - contactBrake) *
+        (1.0 - starvationQuiescence * 0.88);
     float cycleDecay = cellCycleQuiescenceDecay(energySupport, contactBrake, stress);
     float cycle = clamp(
         cell.physiology.z + cycleRate - cycleDecay,
@@ -4922,9 +5042,16 @@ kernel void evolveOrganismCells(
         (0.46 + adhesiveProgram * 0.54) * structuralDrag;
     activeTraction += boundaryNormal * exposure * contractility * tractionGain *
         (0.000014 + adhesiveProgram * 0.000026) * structuralDrag;
+    float2 localFieldMotion = rotateWorldToTissue(localMechanical.xy, agent);
+    if (length(localFieldMotion) > 0.000001) {
+        activeTraction -= normalize(localFieldMotion) * shearAnchoring *
+            environmentalDrive * (0.08 + frequencyMatch * 0.10) *
+            mix(0.30, 1.0, metabolicReadiness);
+    }
     float propaguleDrive = exposure * motilityProgram * development.mechanochemistryB.w *
         (1.0 - adhesiveProgram) * smoothstep(0.16, 0.38, atp);
-    activeTraction += boundaryNormal * propaguleDrive * 0.00018 * structuralDrag;
+    activeTraction += boundaryNormal * propaguleDrive *
+        (0.00018 + detachmentRelease * 0.00012) * structuralDrag;
     mechanicalForce += activeTraction + barrierForceLocal;
     float radialLength = length(cell.position);
     if (radialLength > 0.0001) {
@@ -5631,6 +5758,12 @@ inline uint findOrCreateCellJunction(
                 junctionStates[slot].strength = targetStrength;
                 junctionStates[slot].age = 1.0;
                 junctionStates[slot].load = 0.0;
+                junctionStates[slot].material = float4(
+                    max(targetStrength, 0.05), 0.35, 0.30, 0.25
+                );
+                junctionStates[slot].remodeling = float4(
+                    restDistance, 0.0, 0.0, 0.0
+                );
                 atomic_store_explicit(
                     &junctionStates[slot].lastSeenStep, step, memory_order_relaxed
                 );
@@ -5707,6 +5840,7 @@ kernel void resolveMembraneContacts(
     device atomic_int* energyAudit [[buffer(14)]],
     device atomic_uint* identityCounters [[buffer(15)]],
     device atomic_uint* topologySignatures [[buffer(16)]],
+    device const DevelopmentalGenome* developmentalGenomes [[buffer(17)]],
     uint pairIndex [[thread_position_in_grid]]
 ) {
     if (pairIndex >= atomic_load_explicit(&contactWorkState[0], memory_order_relaxed)) { return; }
@@ -5737,6 +5871,12 @@ kernel void resolveMembraneContacts(
     );
     CellState cell = cells[gid];
     CellState other = cells[otherIndex];
+    DevelopmentalGenome cellDevelopment = developmentalGenomes[programIndex];
+    DevelopmentalGenome otherDevelopment = developmentalGenomes[otherProgramIndex];
+    float4 inheritedJunctionMaterial = sqrt(max(
+        cellDevelopment.junctionMaterial * otherDevelopment.junctionMaterial,
+        float4(0.0001)
+    ));
     float scale = cellWorldScale(uniforms);
     float2 worldPosition = cellWorldPosition(agent, cell.position, uniforms);
                         float2 otherWorldPosition = cellWorldPosition(
@@ -5765,7 +5905,8 @@ kernel void resolveMembraneContacts(
                             min(cell.physiology.w, other.physiology.w),
                             min(supportA.integrity, supportB.integrity)
                         );
-                        float topologyAdhesion = min(cell.phenotype.x, other.phenotype.x);
+                        float topologyAdhesion = min(cell.phenotype.x, other.phenotype.x) *
+                            clamp(inheritedJunctionMaterial.x, 0.10, 1.50);
                         bool topologyConnected = sameOwner && topologyIntegrity > 0.10 &&
                             localGap <= 0.050 * topologyAdhesion * topologyIntegrity;
                         if (topologyConnected) {
@@ -5794,7 +5935,8 @@ kernel void resolveMembraneContacts(
                         bool fusionCandidate = !sameOwner && localGap < 0.008 &&
                             min(agent.social.x, otherAgent.social.x) > 0.20 &&
                             recognitionCompatibility(agent, otherAgent) > 0.35 &&
-                            max(agent.geneC.w, otherAgent.geneC.w) < 0.40;
+                            max(agent.geneC.w, otherAgent.geneC.w) < 0.40 &&
+                            max(cell.tissueGeometry.w, other.tissueGeometry.w) < 0.32;
                         if (newSameOwnerConnection || fusionCandidate) {
                             atomic_store_explicit(
                                 &contactWorkState[2], 1u, memory_order_relaxed
@@ -5895,8 +6037,40 @@ kernel void resolveMembraneContacts(
                                 (0.006 + min(defenseA, defenseB) * 0.010);
 
                             if (sameOwner) {
+                                float2 polarityA = length(cell.development.xy) > 0.0001
+                                    ? normalize(cell.development.xy) : localDirection;
+                                float2 polarityB = length(other.development.xy) > 0.0001
+                                    ? normalize(other.development.xy) : otherLocalDirection;
+                                float polarityAlignment = clamp(
+                                    0.5 * (dot(polarityA, localDirection) +
+                                        dot(polarityB, otherLocalDirection)),
+                                    -1.0, 1.0
+                                );
+                                float localRelease = saturate(max(
+                                    cell.tissueGeometry.w + cell.signals.w * 0.42,
+                                    other.tissueGeometry.w + other.signals.w * 0.42
+                                ));
+                                float metabolicInvestment = sqrt(max(
+                                    cell.physiology.x * other.physiology.x, 0.0
+                                ));
                                 float pairAdhesion = min(cell.phenotype.x, other.phenotype.x) *
-                                    sqrt(max(cell.physiology.w * other.physiology.w, 0.0));
+                                    sqrt(max(cell.physiology.w * other.physiology.w, 0.0)) *
+                                    inheritedJunctionMaterial.x *
+                                    (1.0 - localRelease * 0.88);
+                                float pairDamping = inheritedJunctionMaterial.z *
+                                    (0.28 + topologyIntegrity * 0.72);
+                                float pairPermeability = inheritedJunctionMaterial.w *
+                                    (0.22 + min(cell.regulationB.x, other.regulationB.x) * 0.78) *
+                                    topologyIntegrity;
+                                float pairCorticalTension = inheritedJunctionMaterial.y *
+                                    (0.24 + 0.38 * (cell.regulation.z + other.regulation.z)) *
+                                    (1.0 - localRelease * 0.58);
+                                float4 targetMaterial = clamp(float4(
+                                    pairAdhesion * (0.42 + metabolicInvestment * 0.76),
+                                    pairDamping,
+                                    pairPermeability,
+                                    pairCorticalTension
+                                ), float4(0.015), float4(1.80));
                                 uint pairKey = cellPairKey(gid, otherIndex);
                                 uint fingerprint = cellPairFingerprint(
                                     cellIdentities, gid, otherIndex
@@ -5925,18 +6099,57 @@ kernel void resolveMembraneContacts(
                                 }
                                 if (junction < cellJunctionCapacity) {
                                     float localCenterDistance = distance / max(scale, 0.0000001);
+                                    float investmentRate = 0.018 + metabolicInvestment * 0.065;
+                                    float4 updatedMaterial = mix(
+                                        junctionStates[junction].material,
+                                        targetMaterial, investmentRate
+                                    );
+                                    float remodelingTarget = localCenterDistance * (
+                                        1.0 - updatedMaterial.w *
+                                            (0.006 + max(polarityAlignment, 0.0) * 0.010)
+                                    );
+                                    float4 updatedRemodeling = junctionStates[junction].remodeling;
+                                    updatedRemodeling.x = mix(
+                                        max(updatedRemodeling.x, 0.001),
+                                        remodelingTarget,
+                                        0.004 + metabolicInvestment * 0.018
+                                    );
+                                    float materialStrain = localCenterDistance -
+                                        updatedRemodeling.x;
+                                    updatedRemodeling.y = mix(
+                                        updatedRemodeling.y, materialStrain, 0.075
+                                    );
+                                    updatedRemodeling.z = mix(
+                                        updatedRemodeling.z,
+                                        saturate(metabolicInvestment * pairAdhesion),
+                                        0.025
+                                    );
+                                    updatedRemodeling.w = mix(
+                                        updatedRemodeling.w, polarityAlignment, 0.040
+                                    );
+                                    float updatedStrength = mix(
+                                        junctionStates[junction].strength, pairAdhesion,
+                                        0.025 + metabolicInvestment * 0.055
+                                    );
                                     float stretch = localCenterDistance -
-                                        junctionStates[junction].restDistance;
+                                        updatedRemodeling.x;
                                     float2 velocityA = rotateTissueToWorld(cell.velocity, agent);
                                     float2 velocityB = rotateTissueToWorld(other.velocity, otherAgent);
                                     float relativeNormalVelocity = dot(
                                         velocityB - velocityA, normalWorld
                                     );
                                     float junctionMagnitude = -stretch *
-                                        junctionStates[junction].strength * 0.0080 -
-                                        relativeNormalVelocity * 0.055;
+                                        updatedStrength * updatedMaterial.x * 0.0080 -
+                                        relativeNormalVelocity *
+                                            (0.018 + updatedMaterial.y * 0.070) -
+                                        updatedMaterial.w *
+                                            max(updatedRemodeling.w, 0.0) * 0.000035;
                                     junctionMagnitude = clamp(junctionMagnitude, -0.0028, 0.0028);
                                     impulseMagnitude += junctionMagnitude;
+                                    junctionStates[junction].material = updatedMaterial;
+                                    junctionStates[junction].remodeling = updatedRemodeling;
+                                    junctionStates[junction].restDistance = updatedRemodeling.x;
+                                    junctionStates[junction].strength = updatedStrength;
                                     junctionStates[junction].load = abs(junctionMagnitude);
                                 } else if (localGap > 0.0) {
                                     impulseMagnitude -= pairAdhesion *
@@ -6316,7 +6529,16 @@ kernel void accumulateSimulationInvariants(
                 cellIdentities[cellA].owner == cellIdentities[cellB].owner &&
                 junctionStates[gid].persistentFingerprint ==
                     cellPairFingerprint(cellIdentities, cellA, cellB);
-            if (!validPair) {
+            bool validMaterial = all(isfinite(junctionStates[gid].material)) &&
+                all(isfinite(junctionStates[gid].remodeling)) &&
+                junctionStates[gid].restDistance > 0.0 &&
+                all(junctionStates[gid].material >= float4(0.0)) &&
+                all(junctionStates[gid].material <= float4(2.01)) &&
+                abs(junctionStates[gid].remodeling.y) < 2.0 &&
+                junctionStates[gid].remodeling.z >= 0.0 &&
+                junctionStates[gid].remodeling.z <= 1.01 &&
+                abs(junctionStates[gid].remodeling.w) <= 1.01;
+            if (!validPair || !validMaterial) {
                 recordInvariantFailure(
                     invariantState, invariantOrphanedJunction, 7u, uniforms.step
                 );
@@ -6813,9 +7035,25 @@ kernel void divideAndReduceOrganismCells(
                 uniforms.step, length(child.position - parent.position), midbodyStrength
             );
             if (midbodyJunction < cellJunctionCapacity) {
+                float4 midbodyInheritedMaterial = sqrt(max(
+                    developmentalGenomes[parentIdentity.programIndex].junctionMaterial *
+                        developmentalGenomes[childIdentity.programIndex].junctionMaterial,
+                    float4(0.0001)
+                ));
+                float midbodyRestDistance = length(child.position - parent.position);
                 cellJunctions[midbodyJunction].flags = 3u;
                 cellJunctions[midbodyJunction].age = mix(
                     5.0, 14.0, daughterRepair * daughterIntegrity
+                );
+                cellJunctions[midbodyJunction].material = clamp(float4(
+                    midbodyStrength * midbodyInheritedMaterial.x,
+                    midbodyInheritedMaterial.z,
+                    midbodyInheritedMaterial.w * daughterIntegrity,
+                    midbodyInheritedMaterial.y * (0.45 + daughterRepair * 0.55)
+                ), float4(0.02), float4(1.80));
+                cellJunctions[midbodyJunction].remodeling = float4(
+                    midbodyRestDistance, 0.0,
+                    daughterRepair * daughterIntegrity, 1.0
                 );
             }
             uint ownerHead = atomic_load_explicit(

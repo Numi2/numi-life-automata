@@ -374,6 +374,7 @@ public enum EvolutionaryEvidence {
     public static func evaluate(
         selection: SelectionPartition,
         maximumComponentDescentDepth: UInt32,
+        livingSeparatedDescendantCount: Int = 0,
         conservationValid: Bool
     ) -> (
         physicalDescent: EvidenceClaim,
@@ -381,7 +382,10 @@ public enum EvolutionaryEvidence {
         differentialTransmission: EvidenceClaim,
         darwinianEvolution: EvidenceClaim
     ) {
-        let descentSupported = selection.independentDescendantCount > 0 &&
+        let descentSupported = (
+            selection.independentDescendantCount > 0 ||
+                livingSeparatedDescendantCount > 0
+        ) &&
             maximumComponentDescentDepth > 0
         let physicalDescent = EvidenceClaim(
             state: descentSupported ? .supported : .inconclusive,
@@ -389,7 +393,7 @@ public enum EvolutionaryEvidence {
             nullUpperBound: nil,
             reason: descentSupported
                 ? "Inherited programs remain represented after independent physical separation."
-                : "No independently separated descendant currently carries a transmitted program.",
+                : "No independently separated living descendant or interval-recorded descendant carries a transmitted program.",
             timeBasis: .accumulatedHistory
         )
         let variationSupported = selection.transmittedVariantCount > 0

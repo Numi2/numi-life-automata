@@ -150,6 +150,25 @@ struct IndividualityObservationTests {
     }
 
     @Test
+    func livingSeparatedDescendantSupportsPhysicalDescentWithoutPriceInterval() {
+        let claims = EvolutionaryEvidence.evaluate(
+            selection: SelectionPartition(
+                betweenComponentSelection: 0,
+                withinComponentSelection: 0,
+                transmissionChange: 0,
+                covarianceSampleCount: 0
+            ),
+            maximumComponentDescentDepth: 1,
+            livingSeparatedDescendantCount: 1,
+            conservationValid: true
+        )
+
+        #expect(claims.physicalDescent.state == .supported)
+        #expect(claims.differentialTransmission.state == .inconclusive)
+        #expect(claims.darwinianEvolution.state == .inconclusive)
+    }
+
+    @Test
     func autonomyDistributionRetainsSpreadAndQuantiles() {
         let vectors = [0.1, 0.5, 0.9].map {
             AutonomyVector(

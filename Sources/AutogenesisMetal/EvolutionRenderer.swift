@@ -300,6 +300,8 @@ extension EvolutionRenderer {
                         observerResult: latestObserverResult,
                         maximumComponentDescentDepth: observationSamples
                             .map(\.maximumComponentDescentDepth).max() ?? 0,
+                        livingSeparatedDescendantCount: observationSamples
+                            .map(\.livingDescendants).max() ?? 0,
                         selection: MultilevelPriceAnalysis.summarize(selectionIntervals),
                         invariantReport: report
                     ),
@@ -333,6 +335,8 @@ extension EvolutionRenderer {
                 observerResult: latestObserverResult,
                 maximumComponentDescentDepth: observationSamples
                     .map(\.maximumComponentDescentDepth).max() ?? 0,
+                livingSeparatedDescendantCount: observationSamples
+                    .map(\.livingDescendants).max() ?? 0,
                 selection: MultilevelPriceAnalysis.summarize(selectionIntervals),
                 invariantReport: finalReport
             ),
@@ -472,6 +476,7 @@ extension EvolutionRenderer {
     private func individualityEvidence(
         observerResult: IndividualityObserverResult?,
         maximumComponentDescentDepth: UInt32,
+        livingSeparatedDescendantCount: Int,
         selection: SelectionPartition,
         invariantReport: ExperimentInvariantReport
     ) -> IndividualityEvidence {
@@ -480,6 +485,7 @@ extension EvolutionRenderer {
         let evolutionary = EvolutionaryEvidence.evaluate(
             selection: selection,
             maximumComponentDescentDepth: maximumComponentDescentDepth,
+            livingSeparatedDescendantCount: livingSeparatedDescendantCount,
             conservationValid: !conservationFailure
         )
         let collectiveSupport = selection.covarianceSampleCount >= 8 &&
@@ -1249,6 +1255,8 @@ private struct CellJunctionState {
     var strength: Float
     var age: Float
     var load: Float
+    var material: SIMD4<Float>
+    var remodeling: SIMD4<Float>
 }
 
 private struct CellAggregate {
@@ -1284,6 +1292,8 @@ private struct DevelopmentalGenome {
     var mechanochemistryB: SIMD4<Float>
     var morphogenKinetics: SIMD4<Float>
     var morphogenTransport: SIMD4<Float>
+    var junctionMaterial: SIMD4<Float>
+    var ecologicalResponse: SIMD4<Float>
 }
 
 private struct RegulatoryNode {
@@ -1863,13 +1873,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
         precondition(MemoryLayout<HeritableProgram>.stride == 112, "HeritableProgram Metal ABI drift")
         precondition(MemoryLayout<ProgramSlotState>.stride == 16, "ProgramSlotState Metal ABI drift")
-        precondition(MemoryLayout<CellJunctionState>.stride == 32, "CellJunctionState Metal ABI drift")
+        precondition(MemoryLayout<CellJunctionState>.stride == 64, "CellJunctionState Metal ABI drift")
         precondition(MemoryLayout<CellAggregate>.stride == 336, "CellAggregate Metal ABI drift")
-        precondition(MemoryLayout<DevelopmentalGenome>.stride == 128, "DevelopmentalGenome Metal ABI drift")
+        precondition(MemoryLayout<DevelopmentalGenome>.stride == 160, "DevelopmentalGenome Metal ABI drift")
         precondition(MemoryLayout<RegulatoryNode>.stride == 32, "RegulatoryNode Metal ABI drift")
         precondition(MemoryLayout<RegulatoryEdge>.stride == 32, "RegulatoryEdge Metal ABI drift")
         precondition(MemoryLayout<ResonanceGenome>.stride == 32, "ResonanceGenome Metal ABI drift")
-        precondition(MemoryLayout<ProgramMetricRecord>.stride == 160, "ProgramMetricRecord Metal ABI drift")
+        precondition(MemoryLayout<ProgramMetricRecord>.stride == 192, "ProgramMetricRecord Metal ABI drift")
         precondition(MemoryLayout<MembraneVertex>.stride == 32, "MembraneVertex Metal ABI drift")
         precondition(MemoryLayout<LineageEventRecord>.stride == 80, "LineageEventRecord Metal ABI drift")
         guard let device = view.device ?? MTLCreateSystemDefaultDevice() else {
@@ -3592,6 +3602,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(energyAudit, offset: 0, index: 14)
         encoder.setBuffer(identityCounters, offset: 0, index: 15)
         encoder.setBuffer(cellTopologySignatures, offset: 0, index: 16)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 17)
         encoder.dispatchThreadgroups(
             indirectBuffer: contactPairDispatchArguments,
             indirectBufferOffset: 0,
@@ -4888,6 +4899,20 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     programRecords[index].developmental.mechanochemistryB
                 )
             } / Double(livingIndices.count)
+        let meanJunctionMaterial: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                total += SIMD4<Double>(
+                    programRecords[index].developmental.junctionMaterial
+                )
+            } / Double(livingIndices.count)
+        let meanEcologicalResponse: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                total += SIMD4<Double>(
+                    programRecords[index].developmental.ecologicalResponse
+                )
+            } / Double(livingIndices.count)
         let meanLineageMutationDistance = livingIndices.isEmpty ? 0 : livingIndices.reduce(0.0) { total, index in
             total + Double(max(agents[index].mutationDistance, 0))
         } / Double(livingIndices.count)
@@ -5034,6 +5059,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 meanInheritedTractionGain: meanMechanochemistryB.y,
                 meanDetachmentThreshold: meanMechanochemistryB.z,
                 meanPropaguleInvestment: meanMechanochemistryB.w,
+                meanJunctionAdhesion: meanJunctionMaterial.x,
+                meanJunctionCorticalTension: meanJunctionMaterial.y,
+                meanJunctionDamping: meanJunctionMaterial.z,
+                meanJunctionPermeability: meanJunctionMaterial.w,
+                meanToxinTolerance: meanEcologicalResponse.x,
+                meanDetritalScavenging: meanEcologicalResponse.y,
+                meanShearAnchoring: meanEcologicalResponse.z,
+                meanStarvationQuiescence: meanEcologicalResponse.w,
                 meanCellsPerOrganism: meanCellsPerOrganism,
                 largestTissueCellCount: largestTissueCellCount,
                 cellPoolUtilization: cellPoolUtilization,
