@@ -97,7 +97,7 @@ struct ContentView: View {
             }
         }
         .background(Color.black)
-        .frame(minWidth: 1060, minHeight: 680)
+        .frame(minWidth: 900, minHeight: 620)
         .preferredColorScheme(.dark)
         .animation(.snappy(duration: 0.22), value: showsInspector)
         .onChange(of: activeObservationStop) { _, index in
@@ -211,18 +211,20 @@ struct ContentView: View {
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 3) {
-                    statusValue("STEP", value: compactStep(store.snapshot.totalSteps))
+                    statusValue("STEP", value: "\(store.runtimeTelemetry.scientificallyCommittedStep)")
+                    statusValue("SPS", value: String(format: "%.0f", store.runtimeTelemetry.stepsPerSecond))
+                    statusValue("Q", value: "\(store.runtimeTelemetry.unfinishedCommandBuffers)/\(store.runtimeTelemetry.maximumCommandBuffers)")
+                    statusValue("CHK", value: "\(store.runtimeTelemetry.checkpointStep)")
+                    statusValue("REC", value: "\(store.runtimeTelemetry.recoveryCount)")
                     statusValue(
-                        "LIN",
+                        "CDEP",
                         value: "G\(store.maximumLivingLineageGeneration)"
                     )
-                    statusValue(
-                        "ORG",
-                        value: "\(store.integratedOrganismCount)/\(store.observableAgentCount)"
-                    )
+                    statusValue("COMP", value: "\(store.observableAgentCount)")
+                    statusValue("IND", value: "\(store.resolvedIndividualCount)")
                     statusValue("MAG", value: zoomLabel)
                 }
-                statusValue("ORG", value: "\(store.integratedOrganismCount)")
+                statusValue("COMP", value: "\(store.observableAgentCount)")
             }
 
             commandDivider
@@ -260,7 +262,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(scaleName.uppercased())
                             .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        Text("STAGE 0\(activeObservationStop + 1) OF 06")
+                        Text("SCALE 0\(activeObservationStop + 1) OF 06")
                             .font(.system(size: 8, weight: .medium, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -309,16 +311,16 @@ struct ContentView: View {
 
                 if store.observationZoom >= 6,
                    store.observationZoom < 18,
-                   store.integratedOrganismCount > 0 || recordedFissionCount > 0 {
+                   store.observableAgentCount > 0 || recordedFissionCount > 0 {
                     evolutionAfterFormationPanel
                 }
 
                 if store.observationZoom < 64 {
-                    lifecyclePanel
+                    individualityPanel
                 }
 
                 if store.observationZoom >= 6, store.observationZoom < 18 {
-                    morphologyQualificationPanel
+                    autonomyObservablesPanel
                 }
 
                 DisclosureGroup(isExpanded: $showsScientificDefinition) {
@@ -336,6 +338,10 @@ struct ContentView: View {
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
 
                 inspectorMetrics
+
+                Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
+
+                runtimeReliabilityPanel
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
 
@@ -405,7 +411,7 @@ struct ContentView: View {
             } else if store.observationZoom >= 18, store.displayMode == .causality {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
-                observerMetric("Lifecycle P/A/T/O", value: lifecycleStageLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
+                observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Mean / max component", value: "\(decimal(store.snapshot.meanCellsPerOrganism)) / \(store.snapshot.largestTissueCellCount)", tint: .green, values: store.history.map(\.meanCellsPerOrganism))
                 observerMetric("Global cell pool", value: percent(store.snapshot.cellPoolUtilization), tint: .blue, values: store.history.map(\.cellPoolUtilization))
                 observerMetric("Heritable programs", value: "\(store.snapshot.heritableProgramCount) / 4096", tint: .purple, values: store.history.map(\.heritableProgramPoolUtilization))
@@ -436,7 +442,7 @@ struct ContentView: View {
             } else if store.observationZoom >= 18 {
                 let tissueCount = max(store.snapshot.organismCount, store.observableAgentCount)
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
-                observerMetric("Lifecycle P/A/T/O", value: lifecycleStageLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
+                observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
                 observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                 observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
@@ -469,7 +475,7 @@ struct ContentView: View {
                     observerMetric("Obs Δstrain → ΔVₘ", value: strainVoltageAssociationLabel, tint: .pink, values: store.history.map(\.meanTissueStrain))
                     observerMetric("Obs ΔCa* → ΔERK*", value: calciumERKAssociationLabel, tint: .purple, values: store.history.map(\.meanCalciumActivity))
                 } else {
-                    observerMetric("Lifecycle P/A/T/O", value: lifecycleStageLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
+                    observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                     observerMetric("Cells / component", value: "\(store.snapshot.cellCount) / \(decimal(store.snapshot.meanCellsPerOrganism))", tint: .blue, values: store.history.map { Double($0.cellCount) })
                     observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .pink, values: store.history.map(\.meanDevelopmentalEdgeCount))
                     if store.displayMode == .development {
@@ -484,7 +490,7 @@ struct ContentView: View {
                     observerMetric("Persistent clades", value: "\(store.snapshot.persistentCladeCount)", tint: .orange, values: store.history.map { Double($0.persistentCladeCount) })
                 }
             } else {
-                observerMetric("Organisms / units", value: "\(store.integratedOrganismCount) / \(store.observableAgentCount)", tint: .mint, values: store.history.map { Double($0.organismCount) })
+                observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Mean free R", value: resourceLabel, tint: .cyan, values: store.history.map(\.metrics.resourceDensity))
                 observerMetric("Substrate forcing", value: decimal(store.snapshot.metrics.substrateFluctuation), tint: .cyan, values: store.history.map(\.metrics.substrateFluctuation))
                 observerMetric("Detritus density", value: decimal(store.snapshot.metrics.detritusDensity), tint: .orange, values: store.history.map(\.metrics.detritusDensity))
@@ -498,43 +504,33 @@ struct ContentView: View {
         }
     }
 
-    private var lifecyclePanel: some View {
+    private var individualityPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("BIOLOGICAL LIFECYCLE")
-            HStack(spacing: 0) {
-                lifecycleStageCell(.protocell, count: store.protocellCount)
-                lifecycleStageCell(.autonomousCell, count: store.autonomousCellCount)
-                lifecycleStageCell(.developingTissue, count: store.developingTissueCount)
-                lifecycleStageCell(.integratedOrganism, count: store.integratedOrganismCount)
+            sectionLabel("OBSERVER INFERENCE — NONCAUSAL")
+            HStack(spacing: 10) {
+                evidenceCount("COMP", value: store.observableAgentCount, tint: .cyan)
+                evidenceCount("IND", value: store.resolvedIndividualCount, tint: .mint)
+                evidenceCount("CDEP", value: Int(store.maximumLivingLineageGeneration), tint: .orange)
+                evidenceCount("PGEN", value: Int(store.maximumProgramReplicationGeneration), tint: .pink)
             }
-
-            if let stage = store.followedLifeStage {
-                HStack {
-                    Text("TRACKED: \(stage.label.uppercased())")
-                    Spacer()
-                    Text("\(Int((followedLifecycleProgress * 100).rounded()))%")
-                }
-                .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                .foregroundStyle(lifecycleColor(stage))
-                ProgressView(value: followedLifecycleProgress)
-                    .progressViewStyle(.linear)
-                    .tint(lifecycleColor(stage))
-            }
+            evidenceRow("AUTONOMY", claim: store.individualityEvidence.mechanochemicalAutonomy)
+            evidenceRow("DARWINIAN LINEAGE", claim: store.individualityEvidence.darwinianLineage)
+            evidenceRow("COLLECTIVE LEVEL", claim: store.individualityEvidence.collectiveLevelIndividuality)
         }
     }
 
     private var evolutionAfterFormationPanel: some View {
         VStack(alignment: .leading, spacing: 9) {
-            sectionLabel("EVOLUTION AFTER FORMATION")
+            sectionLabel("PHYSICAL TRANSMISSION")
             HStack(spacing: 0) {
                 evolutionClockValue(
-                    "LINEAGE",
+                    "C DEPTH",
                     "G\(store.maximumLivingLineageGeneration)"
                 )
+                evolutionClockValue("P GEN", "G\(store.maximumProgramReplicationGeneration)")
                 evolutionClockValue("FISSIONS", "\(recordedFissionCount)")
                 evolutionClockValue("DESC", "\(store.livingDescendantCount)")
-                evolutionClockValue("D ORG", "\(store.integratedDescendantCount)")
-                evolutionClockValue("D CELLS", "\(store.livingDescendantCellCount)")
+                evolutionClockValue("D IND", "\(store.resolvedDescendantCount)")
             }
 
             Text(evolutionaryStateSummary)
@@ -543,21 +539,7 @@ struct ContentView: View {
                 .lineSpacing(1.5)
                 .fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 8) {
-                Text("SCORE / INHERITED GATE")
-                ProgressView(value: min(detachmentReadinessRatio, 1))
-                    .progressViewStyle(.linear)
-                    .tint(recordedFissionCount > 0 ? .green : .orange)
-                Text(String(
-                    format: "%.3f / %.3f",
-                    store.snapshot.meanDetachmentScore,
-                    store.snapshot.meanDetachmentThreshold
-                ))
-            }
-            .font(.system(size: 7, weight: .semibold, design: .monospaced))
-            .foregroundStyle(.secondary)
-
-            Text("Solver steps are dimensionless. Lineage generation advances only after viable physical separation and inherited-program transmission; rendering speed never changes the integration step.")
+            Text("Solver steps are dimensionless. Component descent advances at physical separation; program generation advances only when cell division creates a mutated program. Observer claims never alter either process.")
                 .font(.system(size: 8, weight: .regular))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -582,21 +564,16 @@ struct ContentView: View {
         store.lineageBranches.count { $0.parentID != nil }
     }
 
-    private var detachmentReadinessRatio: Double {
-        store.snapshot.meanDetachmentScore /
-            max(store.snapshot.meanDetachmentThreshold, 0.000_001)
-    }
-
     private var evolutionaryStateSummary: String {
         guard recordedFissionCount > 0 else {
-            return "The integrated-organism criterion is present, but Darwinian lineage evolution has not started: no viable membrane-disconnected component has yet transmitted an inherited program."
+            return "No membrane-disconnected descendant has yet transmitted its already-present cell programs."
         }
-        return "\(recordedFissionCount) physical fissions have produced \(store.livingDescendantCount) living descendants; \(store.integratedDescendantCount) satisfy the integrated-organism criterion and together contain \(store.livingDescendantCellCount) cells. Living lineage depth is G\(store.maximumLivingLineageGeneration), with \(store.snapshot.persistentCladeCount) persistent clades."
+        return "\(recordedFissionCount) physical separations have produced \(store.livingDescendantCount) living descendants containing \(store.livingDescendantCellCount) cells. Component depth is G\(store.maximumLivingLineageGeneration); cell-division program replication is G\(store.maximumProgramReplicationGeneration)."
     }
 
-    private var morphologyQualificationPanel: some View {
+    private var autonomyObservablesPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("INTEGRATION GATE OBSERVABLES")
+            sectionLabel("MEASURED AUTONOMY VARIABLES")
             LazyVGrid(
                 columns: [
                     GridItem(.flexible(), alignment: .leading),
@@ -605,83 +582,119 @@ struct ContentView: View {
                 alignment: .leading,
                 spacing: 8
             ) {
-                qualificationCriterion(
-                    "CONNECTED CELLS",
-                    value: "\(store.snapshot.largestTissueCellCount)",
-                    threshold: ">= 6",
-                    passes: store.snapshot.largestTissueCellCount >= 6
+                measuredAutonomyValue(
+                    "RESOLVED PARTITIONS",
+                    value: "cell \(store.resolvedCellIndividualCount) / collective \(store.resolvedCollectiveIndividualCount)",
+                    tint: .cyan
                 )
-                qualificationCriterion(
-                    "QUALIFYING DWELL",
-                    value: percent(followedLifecycleProgress),
-                    threshold: "900 steps",
-                    passes: store.followedLifeStage == .integratedOrganism
+                measuredAutonomyValue(
+                    "ENERGETIC INDEPENDENCE",
+                    value: percent(meanAutonomy(\.energeticIndependence)),
+                    tint: .yellow
                 )
-                qualificationCriterion(
-                    "MEAN ATP",
-                    value: decimal(store.snapshot.meanCellATP),
-                    threshold: ">= 0.12",
-                    passes: store.snapshot.meanCellATP >= 0.12
+                measuredAutonomyValue(
+                    "BOUNDARY MAINTENANCE",
+                    value: percent(meanAutonomy(\.boundaryMaintenance)),
+                    tint: .mint
                 )
-                qualificationCriterion(
-                    "MEMBRANE INTEGRITY",
-                    value: decimal(store.snapshot.meanCellIntegrity),
-                    threshold: ">= 0.42",
-                    passes: store.snapshot.meanCellIntegrity >= 0.42
+                measuredAutonomyValue(
+                    "MECHANOCHEMICAL CLOSURE",
+                    value: decimal(meanAutonomy(\.mechanochemicalClosure)),
+                    tint: .pink
                 )
-                qualificationCriterion(
-                    "MEAN STRESS",
-                    value: decimal(store.snapshot.meanCellStress),
-                    threshold: "<= 0.48",
-                    passes: store.snapshot.meanCellStress <= 0.48
+                measuredAutonomyValue(
+                    "ENDOGENOUS INFORMATION",
+                    value: compactScientific(meanAutonomy(\.endogenousDetermination)),
+                    tint: .cyan
                 )
-                qualificationCriterion(
-                    "PHASE COHERENCE",
-                    value: decimal(store.snapshot.meanPhaseCoherence),
-                    threshold: ">= 0.15",
-                    passes: store.snapshot.meanPhaseCoherence >= 0.15
+                measuredAutonomyValue(
+                    "COOPERATION / CONFLICT",
+                    value: "\(decimal(meanAutonomy(\.cooperation))) / \(decimal(meanAutonomy(\.conflict)))",
+                    tint: .orange
                 )
-                qualificationCriterion(
-                    "JUNCTION TRANSPORT",
-                    value: compactScientific(store.snapshot.meanJunctionMorphogenTransport),
-                    threshold: "> 1e-8",
-                    passes: store.snapshot.meanJunctionMorphogenTransport > 1e-8
+                measuredAutonomyValue(
+                    "HEREDITY",
+                    value: decimal(meanAutonomy(\.heredity)),
+                    tint: .green
                 )
-                qualificationCriterion(
-                    "DIFFERENTIATION",
-                    value: decimal(store.snapshot.meanMorphogenDifferentiation),
-                    threshold: ">= 0.006",
-                    passes: store.snapshot.meanMorphogenDifferentiation >= 0.006
+                measuredAutonomyValue(
+                    "AUTOCORRELATION TIME",
+                    value: String(format: "%.1f samples", store.individualityEvidence.autocorrelationTime),
+                    tint: .secondary
                 )
-                qualificationCriterion(
-                    "EXPOSED PERIMETER",
-                    value: decimal(store.snapshot.meanExposedMembraneLength),
-                    threshold: ">= 0.45",
-                    passes: store.snapshot.meanExposedMembraneLength >= 0.45
+                measuredAutonomyValue(
+                    "PRICE BETWEEN / WITHIN",
+                    value: "\(compactScientific(store.individualityEvidence.selection.betweenComponentSelection)) / \(compactScientific(store.individualityEvidence.selection.withinComponentSelection))",
+                    tint: .orange
                 )
-                qualificationCriterion(
-                    "CELL TRACTION",
-                    value: compactScientific(store.snapshot.meanCellGeneratedForce),
-                    threshold: ">= 3e-6",
-                    passes: store.snapshot.meanCellGeneratedForce >= 3e-6
+                measuredAutonomyValue(
+                    "TRANSMISSION CHANGE",
+                    value: compactScientific(store.individualityEvidence.selection.transmissionChange),
+                    tint: .pink
+                )
+                measuredAutonomyValue(
+                    "COLLECTIVE HERITABILITY",
+                    value: confidenceLabel(
+                        store.individualityEvidence.selection.collectiveHeritability
+                    ),
+                    tint: .green
+                )
+                measuredAutonomyValue(
+                    "TRANSMITTED COMPONENTS",
+                    value: "\(store.individualityEvidence.selection.independentDescendantCount)",
+                    tint: .cyan
                 )
             }
-            Text("Population-weighted observations are shown here; lifecycle classification is evaluated per membrane-connected component on the GPU.")
+            Text("Population-weighted measurements are copied from the GPU. Observer inference uses autocorrelation-adjusted windows, block-shuffled nulls, and bootstrap intervals and is never returned to a causal kernel.")
                 .font(.system(size: 8, weight: .regular))
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func qualificationCriterion(
+    private func confidenceLabel(_ interval: ConfidenceInterval?) -> String {
+        guard let interval else { return "unresolved" }
+        return String(
+            format: "%.3g [%.3g, %.3g]",
+            interval.estimate,
+            interval.lower,
+            interval.upper
+        )
+    }
+
+    private var runtimeReliabilityPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("METAL EXECUTION STATE")
+            HStack(spacing: 0) {
+                evolutionClockValue("SCHEDULED", "\(store.runtimeTelemetry.scheduledStep)")
+                evolutionClockValue("GPU DONE", "\(store.runtimeTelemetry.gpuCompletedStep)")
+                evolutionClockValue("COMMITTED", "\(store.runtimeTelemetry.scientificallyCommittedStep)")
+            }
+            HStack(spacing: 0) {
+                evolutionClockValue("CHECKPOINT", "\(store.runtimeTelemetry.checkpointStep)")
+                evolutionClockValue(
+                    "QUEUE",
+                    "\(store.runtimeTelemetry.unfinishedCommandBuffers)/\(store.runtimeTelemetry.maximumCommandBuffers)"
+                )
+                evolutionClockValue("RECOVERIES", "\(store.runtimeTelemetry.recoveryCount)")
+            }
+            if let error = store.runtimeTelemetry.lastError {
+                Text(error)
+                    .font(.system(size: 8, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func measuredAutonomyValue(
         _ label: String,
         value: String,
-        threshold: String,
-        passes: Bool
+        tint: Color
     ) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Circle()
-                .fill(passes ? Color.green : Color.orange)
+                .fill(tint)
                 .frame(width: 6, height: 6)
                 .padding(.top, 3)
             VStack(alignment: .leading, spacing: 1) {
@@ -690,12 +703,8 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
-                HStack(spacing: 4) {
-                    Text(value)
-                        .foregroundStyle(.primary)
-                    Text(threshold)
-                        .foregroundStyle(.tertiary)
-                }
+                Text(value)
+                    .foregroundStyle(.primary)
                 .font(.system(size: 8, weight: .semibold, design: .monospaced))
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -704,40 +713,41 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func lifecycleStageCell(_ stage: AgentLifeStage, count: Int) -> some View {
+    private func meanAutonomy(_ keyPath: KeyPath<AutonomyVector, Double>) -> Double {
+        guard !store.autonomyVectors.isEmpty else { return 0 }
+        return store.autonomyVectors.reduce(0) { $0 + $1[keyPath: keyPath] } /
+            Double(store.autonomyVectors.count)
+    }
+
+    private func evidenceCount(_ label: String, value: Int, tint: Color) -> some View {
         VStack(spacing: 4) {
-            Text("\(count)")
+            Text("\(value)")
                 .font(.system(size: 14, weight: .semibold, design: .monospaced))
-                .foregroundStyle(lifecycleColor(stage))
-            Text(stage.abbreviation)
+                .foregroundStyle(tint)
+            Text(label)
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(lifecycleColor(stage).opacity(0.72))
-                .frame(height: 2)
-        }
-        .help(stage.label)
     }
 
-    private var followedLifecycleProgress: Double {
-        guard let stage = store.followedLifeStage else { return 0 }
-        return switch stage {
-        case .protocell: Double(store.followedHomeostasisProgress)
-        case .autonomousCell: 1
-        case .developingTissue: Double(store.followedIntegrationProgress)
-        case .integratedOrganism: 1
+    private func evidenceRow(_ label: String, claim: EvidenceClaim) -> some View {
+        HStack(spacing: 7) {
+            Circle().fill(evidenceColor(claim.state)).frame(width: 6, height: 6)
+            Text(label)
+            Spacer()
+            Text(claim.state.rawValue.uppercased())
         }
+        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .help(claim.reason)
     }
 
-    private func lifecycleColor(_ stage: AgentLifeStage) -> Color {
-        switch stage {
-        case .protocell: .cyan
-        case .autonomousCell: .blue
-        case .developingTissue: .mint
-        case .integratedOrganism: .white
+    private func evidenceColor(_ state: EvidenceState) -> Color {
+        switch state {
+        case .supported: .green
+        case .inconclusive: .orange
+        case .notSupported: .red
         }
     }
 
@@ -900,7 +910,7 @@ struct ContentView: View {
                 Text(scaleName)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .lineLimit(1)
-                Text("\(zoomLabel) · stage 0\(activeObservationStop + 1)")
+                Text("\(zoomLabel) · scale 0\(activeObservationStop + 1)")
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
                     .foregroundStyle(scaleAccent)
             }
@@ -1004,7 +1014,7 @@ struct ContentView: View {
                     Text(event.title)
                         .font(.system(size: 11, weight: .semibold))
                     Spacer(minLength: 4)
-                    Text("GEN \(event.generation)")
+                    Text("\(eventCoordinateLabel(event.kind)) \(event.generation)")
                         .font(.system(size: 8, weight: .medium, design: .monospaced))
                         .foregroundStyle(.tertiary)
                 }
@@ -1105,9 +1115,9 @@ struct ContentView: View {
                 : "Cell-derived geometry and mechanochemical control"
         }
         if zoom >= 6 {
-            return store.integratedOrganismCount > 0
-                ? "Integrated membrane-connected tissue"
-                : "Membrane-connected tissue formation"
+            return store.resolvedIndividualCount > 0
+                ? "Observer-resolved autonomous tissue"
+                : "Membrane-connected component dynamics"
         }
         return "Contact-mediated trophic and vibrational niches"
     }
@@ -1117,7 +1127,7 @@ struct ContentView: View {
             return worldSummary
         }
         let components = max(store.snapshot.organismCount, store.observableAgentCount)
-        return "\(store.snapshot.cellCount) persistent cells form \(components) membrane-connected component\(components == 1 ? "" : "s"); \(store.integratedOrganismCount) currently satisfies the integrated-organism gate. Exposed perimeter is \(decimal(store.snapshot.meanExposedMembraneLength)); net cell-generated force \(compactScientific(store.snapshot.meanCellGeneratedForce)) produces mean translation \(compactScientific(store.snapshot.meanOrganismSpeed))."
+        return "\(store.snapshot.cellCount) persistent cells form \(components) membrane-connected component\(components == 1 ? "" : "s"); the noncausal observer resolves \(store.resolvedIndividualCount) persistent information-local maximum\(store.resolvedIndividualCount == 1 ? "" : "s"). Exposed perimeter is \(decimal(store.snapshot.meanExposedMembraneLength)); cell-generated force \(compactScientific(store.snapshot.meanCellGeneratedForce)) produces translation \(compactScientific(store.snapshot.meanOrganismSpeed))."
     }
 
     private var scientificDefinitionText: String {
@@ -1147,15 +1157,15 @@ struct ContentView: View {
             if store.displayMode == .development {
                 return "Morphogen A and B are synthesized and degraded using inherited kinetic constants, then diffuse only through recent persistent cell junctions. Their receptor-weighted imbalance updates continuous fate memory and tissue polarity, which alter division axes, membrane allocation, traction, feeding, and defense. Mean A/B is \(decimal(store.snapshot.meanMorphogenActivator))/\(decimal(store.snapshot.meanMorphogenInhibitor)); differentiation is \(decimal(store.snapshot.meanMorphogenDifferentiation))."
             }
-            return "\(store.snapshot.cellCount) persistent cells are active across \(units) tracked components: \(lifecycleStageLabel) at protocell/autonomous-cell/developing-tissue/integrated-organism stages. Exposed membrane arcs determine tissue covariance axes, elongation, polarity, and boundary length. Cell-local chemistry, Ca*/ERK* signaling, adhesion, and traction produce component force and torque."
+            return "\(store.snapshot.cellCount) persistent cells are active across \(units) physical components. Exposed membrane arcs determine covariance axes, elongation, polarity, and boundary length. Cell-local chemistry, Ca*/ERK* signaling, adhesion, and traction produce component force and torque; observer labels do not alter these equations."
         }
         if zoom >= 6 {
             return units == 0
-                ? "No biological component is active. Protocell nucleation remains gated by measured biomass, stored-energy, membrane, and catalyst thresholds, not elapsed time."
-                : "Lifecycle counts P/A/T/O are \(lifecycleStageLabel). A component becomes developing tissue at two connected cells. Integrated-organism classification requires at least six cells plus 900 qualifying steps with sustained ATP, membrane integrity, low stress, junction transport, morphogen differentiation, exposed boundary, phase coherence, and cell-generated traction. New detached components requalify under their own owner identity."
+                ? "No biological component is active. Founder nucleation remains driven by measured biomass, stored energy, membrane precursor, and catalyst concentrations."
+                : "Every nonempty membrane-connected component has an independent handle immediately after separation. IND = \(store.resolvedIndividualCount) is inferred from persistent conditional self-predictive information relative to block-shuffled nulls; it never unlocks survival, division, or reproduction."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
-        return "\(store.integratedOrganismCount) integrated organisms exist among \(units) active biological components; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are resolved; occupied-field fraction is \(occupied). The clade count requires sustained divergence and is not a species count."
+        return "\(units) physical components and \(store.resolvedIndividualCount) observer-resolved individuals are present; \(store.snapshot.persistentCladeCount) genealogically and morphologically persistent clades are resolved; occupied-field fraction is \(occupied). These measurements are distinct and none is a programmed fitness value."
     }
 
     private var scaleRelation: String {
@@ -1167,7 +1177,7 @@ struct ContentView: View {
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
         case 2: "Local chemical affinity is sqrt(A·B) times permeability and toxin inhibition. Quantum order and mechanical activity add catalyst; catalyst then gates stored-energy production. Quantum order, catalyst, and E set the membrane target, while catalyst-dependent mineralization returns detritus to both substrates. Cells consume these fields for ATP and return mechanical work and detritus, closing the cross-scale loop."
         case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Cell-cycle and biomass dynamics use measured substrate harvest relative to maintenance, work, and dissipation together with ATP reserve, exposed membrane, crowding, stress, and inherited regulation. Inherited morphogen source, decay, receptor, and diffusivity parameters operate across persistent junctions; their local imbalance updates fate memory and polarity. Exposed membrane edges define geometry, and cell-local gradients, ERK* state, and developmental polarity generate external traction."
-        case 4: "GPU union-find labels membrane-connected cells independently of storage position. Cross-owner fusion additionally requires intact membranes, low stress, low predatory investment, reciprocal ligand-receptor compatibility, and inherited fusion investment. Fission allocates one descendant program per transmitted source only after ATP, integrity, and inherited detachment criteria pass. Permanent cell IDs and acquired states persist through both ownership changes."
+        case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Fission transmits programs already present in cells without mutation; mutation occurs only during ATP-funded cell division. Permanent cell IDs and acquired states persist through ownership changes."
         default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
         }
     }
@@ -1259,8 +1269,8 @@ struct ContentView: View {
         let zoom = store.observationZoom
         if zoom < 6 { return "Ecological field" }
         if zoom < 18 {
-            return store.integratedOrganismCount > 0
-                ? "Integrated organism morphology" : "Developing tissue morphology"
+            return store.resolvedIndividualCount > 0
+                ? "Observer-resolved tissue morphology" : "Component morphology"
         }
         if zoom < 64 { return "Cellular tissue" }
         if zoom < 160 { return "Molecular reaction chemistry" }
@@ -1532,6 +1542,8 @@ struct ContentView: View {
         case .observation: "eye"
         case .fusion: "link"
         case .emergence: "point.3.connected.trianglepath.dotted"
+        case .cellDivision: "arrow.triangle.2.circlepath"
+        case .programMutation: "point.3.filled.connected.trianglepath.dotted"
         }
     }
 
@@ -1546,12 +1558,21 @@ struct ContentView: View {
         case .observation: .secondary
         case .fusion: .cyan
         case .emergence: .green
+        case .cellDivision: .cyan
+        case .programMutation: .pink
         }
     }
 
-    private var lifecycleStageLabel: String {
-        "\(store.protocellCount)/\(store.autonomousCellCount)/" +
-            "\(store.developingTissueCount)/\(store.integratedOrganismCount)"
+    private func eventCoordinateLabel(_ kind: EvolutionEventKind) -> String {
+        switch kind {
+        case .branching, .fusion: "CDEP"
+        case .cellDivision, .programMutation: "PGEN"
+        default: "EPOCH"
+        }
+    }
+
+    private var individualityCountLabel: String {
+        "\(store.observableAgentCount) / C\(store.resolvedCollectiveIndividualCount) + S\(store.resolvedCellIndividualCount)"
     }
 }
 

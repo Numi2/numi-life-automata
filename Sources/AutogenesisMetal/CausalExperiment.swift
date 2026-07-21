@@ -134,7 +134,7 @@ struct CausalExperimentHeader: Codable {
 
 struct CausalOutcomeVector: Codable, Equatable, Sendable {
     let livingComponents: Double
-    let integratedOrganisms: Double
+    let mechanochemicalClosure: Double
     let livingCells: Double
     let meanCellATP: Double
     let meanCellIntegrity: Double
@@ -150,8 +150,8 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
     let trophicLoss: Double
 
     init(sample: ExperimentSample) {
-        livingComponents = Double(sample.livingOrganisms)
-        integratedOrganisms = Double(sample.integratedOrganisms)
+        livingComponents = Double(sample.physicalComponents)
+        mechanochemicalClosure = sample.meanMechanochemicalClosure
         livingCells = Double(sample.livingCells)
         meanCellATP = sample.meanCellATP
         meanCellIntegrity = sample.meanCellIntegrity
@@ -170,7 +170,7 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
     static func difference(treatment: Self, control: Self) -> Self {
         Self(
             livingComponents: treatment.livingComponents - control.livingComponents,
-            integratedOrganisms: treatment.integratedOrganisms - control.integratedOrganisms,
+            mechanochemicalClosure: treatment.mechanochemicalClosure - control.mechanochemicalClosure,
             livingCells: treatment.livingCells - control.livingCells,
             meanCellATP: treatment.meanCellATP - control.meanCellATP,
             meanCellIntegrity: treatment.meanCellIntegrity - control.meanCellIntegrity,
@@ -189,7 +189,7 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
 
     private init(
         livingComponents: Double,
-        integratedOrganisms: Double,
+        mechanochemicalClosure: Double,
         livingCells: Double,
         meanCellATP: Double,
         meanCellIntegrity: Double,
@@ -205,7 +205,7 @@ struct CausalOutcomeVector: Codable, Equatable, Sendable {
         trophicLoss: Double
     ) {
         self.livingComponents = livingComponents
-        self.integratedOrganisms = integratedOrganisms
+        self.mechanochemicalClosure = mechanochemicalClosure
         self.livingCells = livingCells
         self.meanCellATP = meanCellATP
         self.meanCellIntegrity = meanCellIntegrity
@@ -263,7 +263,7 @@ enum PairedCausalExperimentCLI {
 
     @MainActor private static let outcomes = [
         OutcomeDefinition(name: "living_components", unit: "count", keyPath: \.livingComponents),
-        OutcomeDefinition(name: "integrated_organisms", unit: "count", keyPath: \.integratedOrganisms),
+        OutcomeDefinition(name: "mechanochemical_closure", unit: "dimensionless", keyPath: \.mechanochemicalClosure),
         OutcomeDefinition(name: "living_cells", unit: "count", keyPath: \.livingCells),
         OutcomeDefinition(name: "mean_cell_atp", unit: "model_energy_per_cell", keyPath: \.meanCellATP),
         OutcomeDefinition(name: "mean_cell_integrity", unit: "fraction", keyPath: \.meanCellIntegrity),

@@ -36,6 +36,28 @@ struct MechanosensingSchedule: Codable, Sendable, Equatable {
     }
 }
 
+struct EnvironmentalScaffoldSchedule: Codable, Sendable, Equatable {
+    var baselineResourceFlux: Float = 1
+    var baselineBarrierGain: Float = 1
+    var interventionStep: UInt64?
+    var postInterventionResourceFlux: Float?
+    var postInterventionBarrierGain: Float?
+
+    func resourceFlux(forCompletedStep step: UInt64) -> Float {
+        guard let interventionStep,
+              let postInterventionResourceFlux,
+              step > interventionStep else { return baselineResourceFlux }
+        return postInterventionResourceFlux
+    }
+
+    func barrierGain(forCompletedStep step: UInt64) -> Float {
+        guard let interventionStep,
+              let postInterventionBarrierGain,
+              step > interventionStep else { return baselineBarrierGain }
+        return postInterventionBarrierGain
+    }
+}
+
 struct HeadlessExperimentConfiguration: Codable, Sendable {
     var seed: UInt32 = 1
     var steps: UInt64 = 1_000_000
@@ -45,7 +67,12 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
     var quantumStride: UInt64 = 3
     var strictInvariants = true
     var mechanosensing = MechanosensingSchedule()
+    var environmentalScaffold = EnvironmentalScaffoldSchedule()
     var outputPath = ""
+
+    var interventionStep: UInt64? {
+        mechanosensing.interventionStep ?? environmentalScaffold.interventionStep
+    }
 
     static let usage = """
     Usage: NumiAutomata experiment [options]
@@ -57,8 +84,12 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
       --audit-every N       GPU invariant interval (default: 1)
       --quantum-stride N    Biological steps per quantum step (default: 3)
       --mechanosensing-gain X  Baseline mechanics input gain in 0...2 (default: 1)
+      --resource-flux X      Baseline substrate replenishment in 0...2 (default: 1)
+      --barrier-gain X       Baseline mechanical barrier gain in 0...1 (default: 1)
       --intervention-step N    Last baseline step before a scheduled gain change
       --post-mechanosensing-gain X  Gain after --intervention-step
+      --post-resource-flux X  Resource replenishment after --intervention-step
+      --post-barrier-gain X   Mechanical barrier gain after --intervention-step
       --output PATH         JSONL output path
       --no-strict           Record invariant failures without stopping
       --help                Show this help
@@ -117,6 +148,24 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
                     )
                 }
                 configuration.mechanosensing.baselineGain = value
+            case "--resource-flux":
+                guard let value = Float(try value(after: argument)),
+                      value.isFinite,
+                      (0...2).contains(value) else {
+                    throw HeadlessExperimentError.invalidArgument(
+                        "--resource-flux must be finite and in 0...2."
+                    )
+                }
+                configuration.environmentalScaffold.baselineResourceFlux = value
+            case "--barrier-gain":
+                guard let value = Float(try value(after: argument)),
+                      value.isFinite,
+                      (0...1).contains(value) else {
+                    throw HeadlessExperimentError.invalidArgument(
+                        "--barrier-gain must be finite and in 0...1."
+                    )
+                }
+                configuration.environmentalScaffold.baselineBarrierGain = value
             case "--intervention-step":
                 guard let value = UInt64(try value(after: argument)), value > 0 else {
                     throw HeadlessExperimentError.invalidArgument(
@@ -124,6 +173,7 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
                     )
                 }
                 configuration.mechanosensing.interventionStep = value
+                configuration.environmentalScaffold.interventionStep = value
             case "--post-mechanosensing-gain":
                 guard let value = Float(try value(after: argument)),
                       value.isFinite,
@@ -133,6 +183,24 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
                     )
                 }
                 configuration.mechanosensing.postInterventionGain = value
+            case "--post-resource-flux":
+                guard let value = Float(try value(after: argument)),
+                      value.isFinite,
+                      (0...2).contains(value) else {
+                    throw HeadlessExperimentError.invalidArgument(
+                        "--post-resource-flux must be finite and in 0...2."
+                    )
+                }
+                configuration.environmentalScaffold.postInterventionResourceFlux = value
+            case "--post-barrier-gain":
+                guard let value = Float(try value(after: argument)),
+                      value.isFinite,
+                      (0...1).contains(value) else {
+                    throw HeadlessExperimentError.invalidArgument(
+                        "--post-barrier-gain must be finite and in 0...1."
+                    )
+                }
+                configuration.environmentalScaffold.postInterventionBarrierGain = value
             case "--output":
                 configuration.outputPath = try value(after: argument)
             case "--no-strict":
@@ -145,14 +213,16 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
             }
             index = arguments.index(after: index)
         }
-        let hasInterventionStep = configuration.mechanosensing.interventionStep != nil
-        let hasPostGain = configuration.mechanosensing.postInterventionGain != nil
+        let hasInterventionStep = configuration.interventionStep != nil
+        let hasPostGain = configuration.mechanosensing.postInterventionGain != nil ||
+            configuration.environmentalScaffold.postInterventionResourceFlux != nil ||
+            configuration.environmentalScaffold.postInterventionBarrierGain != nil
         guard hasInterventionStep == hasPostGain else {
             throw HeadlessExperimentError.invalidArgument(
-                "--intervention-step and --post-mechanosensing-gain must be supplied together."
+                "--intervention-step requires at least one post-intervention gain, and every post-intervention gain requires --intervention-step."
             )
         }
-        if let interventionStep = configuration.mechanosensing.interventionStep,
+        if let interventionStep = configuration.interventionStep,
            interventionStep >= configuration.steps {
             throw HeadlessExperimentError.invalidArgument(
                 "--intervention-step must be smaller than --steps."
@@ -212,17 +282,12 @@ struct ExperimentSample: Codable {
     let generation: UInt32
     let elapsedSeconds: Double
     let stepsPerSecond: Double
-    // Retained in schema v4 for compatibility; this is the occupied component-owner count.
-    let livingOrganisms: Int
+    let physicalComponents: Int
     let livingCells: Int
-    let protocells: Int
-    let autonomousCells: Int
-    let developingTissues: Int
-    let integratedOrganisms: Int
-    let maximumLivingGeneration: UInt32
+    let maximumComponentDescentDepth: UInt32
+    let maximumProgramReplicationGeneration: UInt32
     let largestTissueCellCount: Int
     let livingDescendants: Int
-    let integratedDescendants: Int
     let descendantCellCount: Int
     let largestDescendantTissueCellCount: Int
     let meanDescendantCellATP: Double
@@ -237,6 +302,8 @@ struct ExperimentSample: Codable {
     let deaths: UInt64
     let fissions: UInt64
     let fusions: UInt64
+    let cellDivisions: UInt64
+    let programMutations: UInt64
     let activePrograms: UInt32
     let livingProgramReferences: UInt32
     let recycledProgramClaims: UInt64
@@ -249,7 +316,7 @@ struct ExperimentSample: Codable {
     let cellularMaintenance: Double
     let cellularActiveWork: Double
     let cellularDissipation: Double
-    let meanCellsPerOrganism: Double
+    let meanCellsPerComponent: Double
     let meanTissueRadius: Double
     let meanShapeIndex: Double
     let meanElongation: Double
@@ -275,6 +342,14 @@ struct ExperimentSample: Codable {
     let meanDevelopmentalPolarityCoherence: Double
     let meanMorphogenSynthesisRate: Double
     let meanMorphogenTransportWork: Double
+    let meanEnergeticIndependence: Double
+    let meanBoundaryMaintenance: Double
+    let meanMechanochemicalClosure: Double
+    let meanProgramCooperation: Double
+    let meanProgramConflict: Double
+    let componentAutonomyDistribution: AutonomyDistribution
+    let cellAutonomyDistribution: AutonomyDistribution
+    let selectionInterval: MultilevelSelectionInterval?
     let invariantReport: ExperimentInvariantReport
 }
 
@@ -287,8 +362,10 @@ struct ExperimentSummary: Codable {
     let deaths: UInt64
     let fissions: UInt64
     let fusions: UInt64
+    let cellDivisions: UInt64
+    let programMutations: UInt64
     let invariantReport: ExperimentInvariantReport
-    let developmentalQualification: DevelopmentalQualification
+    let individualityEvidence: IndividualityEvidence
     let finalSample: ExperimentSample?
     let outputPath: String
 }
@@ -367,7 +444,7 @@ enum HeadlessExperimentCLI {
         let summary = result.summary
         print(
             "experiment_complete=\(summary.completed ? 1 : 0) " +
-            "development_qualified=\(summary.developmentalQualification.passed ? 1 : 0) " +
+            "autonomy_evidence=\(summary.individualityEvidence.mechanochemicalAutonomy.state.rawValue) " +
             "steps=\(summary.step) steps_per_second=" +
             String(format: "%.1f", summary.meanStepsPerSecond) +
             " output=\(summary.outputPath)"

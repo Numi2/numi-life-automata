@@ -68,6 +68,8 @@ enum NumiAutomataEntrypoint {
                 try HeadlessExperimentCLI.run(arguments: arguments.dropFirst())
             case "causal-experiment":
                 try PairedCausalExperimentCLI.run(arguments: arguments.dropFirst())
+            case "recovery-probe":
+                try RecoveryProbeCLI.run(arguments: arguments.dropFirst())
             default:
                 runApplication()
             }

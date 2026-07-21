@@ -200,15 +200,22 @@ struct MetalEvolutionView: NSViewRepresentable {
                     store.apply(snapshot)
                 }
             }
-            renderer.onObservationBatch = { events, observations in
+            renderer.onObservationBatch = { events, observations, cellObservations in
                 Task { @MainActor in
                     if !events.isEmpty {
                         store.applyLineageEvents(events)
                     }
-                    store.applyAgentObservations(observations)
+                    store.applyAgentObservations(
+                        observations,
+                        cellObservations: cellObservations
+                    )
                 }
             }
+            renderer.onRuntimeTelemetry = { telemetry in
+                Task { @MainActor in store.applyRuntimeTelemetry(telemetry) }
+            }
             context.coordinator.renderer = renderer
+            context.coordinator.startBackgroundTick(for: view)
             view.delegate = renderer
             view.panHandler = { [weak coordinator = context.coordinator] delta, aspect in
                 coordinator?.pan(by: delta, aspect: aspect)
@@ -241,9 +248,42 @@ struct MetalEvolutionView: NSViewRepresentable {
     final class Coordinator {
         var store: EvolutionStore
         var renderer: EvolutionRenderer?
+        private var backgroundTimer: Timer?
+        private var activationObserver: NSObjectProtocol?
 
         init(store: EvolutionStore) {
             self.store = store
+        }
+
+        isolated deinit {
+            backgroundTimer?.invalidate()
+            if let activationObserver {
+                NotificationCenter.default.removeObserver(activationObserver)
+            }
+        }
+
+        func startBackgroundTick(for view: InteractiveMetalView) {
+            backgroundTimer?.invalidate()
+            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) {
+                [weak self, weak view] _ in
+                Task { @MainActor [weak self, weak view] in
+                    guard let self, let view,
+                          view.window?.occlusionState.contains(.visible) != true else { return }
+                    self.renderer?.draw(in: view)
+                }
+            }
+            backgroundTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            activationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak view] _ in
+                Task { @MainActor [weak view] in
+                    view?.isPaused = false
+                    view?.setNeedsDisplay(view?.bounds ?? .zero)
+                }
+            }
         }
 
         func pan(by delta: SIMD2<Float>, aspect: Float) {

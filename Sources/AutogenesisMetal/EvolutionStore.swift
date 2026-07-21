@@ -37,6 +37,8 @@ enum EvolutionEventKind: Sendable, Equatable {
     case observation
     case fusion
     case emergence
+    case cellDivision
+    case programMutation
 }
 
 struct EvolutionEvent: Identifiable, Sendable, Equatable {
@@ -56,6 +58,13 @@ struct ObservedLineageBranch: Identifiable, Sendable, Equatable {
     let mutationDistance: Float
     let resonanceFrequency: Float
     var deathStep: UInt32?
+}
+
+struct ComponentAncestryEdge: Hashable, Sendable {
+    let descendantID: UInt32
+    let contributorID: UInt32
+    let step: UInt32
+    let aroseByFusion: Bool
 }
 
 struct EvolutionSnapshot: Sendable, Equatable {
@@ -402,6 +411,7 @@ struct RendererSettings: Sendable {
     var mutationScale: Float
     var transportScale: Float
     var mechanosensingGain: Float
+    var barrierGain: Float
     var displayMode: UInt32
     var trackedAgentID: UInt32
     var cameraCenter: SIMD2<Float>
@@ -433,19 +443,24 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var fusionEventCount = 0
     @Published private(set) var followedAgentID: Int?
     @Published private(set) var observableAgentCount = 0
-    @Published private(set) var protocellCount = 0
-    @Published private(set) var autonomousCellCount = 0
-    @Published private(set) var developingTissueCount = 0
-    @Published private(set) var integratedOrganismCount = 0
+    @Published private(set) var resolvedIndividualCount = 0
+    @Published private(set) var resolvedCellIndividualCount = 0
+    @Published private(set) var resolvedCollectiveIndividualCount = 0
+    @Published private(set) var meanEnergeticIndependence = 0.0
+    @Published private(set) var meanMechanochemicalClosure = 0.0
+    @Published private(set) var maximumProgramReplicationGeneration: UInt32 = 0
+    @Published private(set) var individualityEvidence = IndividualityEvidence.inconclusive
+    @Published private(set) var autonomyVectors: [AutonomyVector] = []
+    @Published private(set) var runtimeTelemetry = RendererRuntimeTelemetry.idle
     @Published private(set) var maximumLivingLineageGeneration: UInt32 = 0
     @Published private(set) var livingDescendantCount = 0
-    @Published private(set) var integratedDescendantCount = 0
+    @Published private(set) var resolvedDescendantCount = 0
     @Published private(set) var livingDescendantCellCount = 0
-    @Published private(set) var followedLifeStage: AgentLifeStage?
-    @Published private(set) var followedHomeostasisProgress: Float = 0
-    @Published private(set) var followedIntegrationProgress: Float = 0
+    @Published private(set) var followedEnergeticIndependence: Float = 0
+    @Published private(set) var followedMechanochemicalClosure: Float = 0
     @Published private(set) var lineageAnalysis = LineageAnalysis.empty
     @Published private(set) var lineageBranches: [ObservedLineageBranch] = []
+    @Published private(set) var componentAncestryEdges: Set<ComponentAncestryEdge> = []
     @Published private(set) var worldScale: Double = 1
     @Published private(set) var errorMessage: String?
     private var addColonyPosition = SIMD2<Float>(repeating: 0.5)
@@ -457,7 +472,43 @@ final class EvolutionStore: ObservableObject {
     private var lastRecordedGeneration = 0
     private var observedAgents: [AgentObservation] = []
     private var followedBirthID: UInt32?
-    private var lifeStageByBirthID: [UInt32: AgentLifeStage] = [:]
+    private struct ObserverCandidateKey: Hashable {
+        let level: CandidatePartitionLevel
+        let id: UInt64
+    }
+    private struct ObserverHistory {
+        var steps: [UInt64] = []
+        var internalState: [Double] = []
+        var environment: [Double] = []
+    }
+    private struct ObserverCandidate {
+        let key: ObserverCandidateKey
+        let position: SIMD2<Float>
+        let observation: ComponentObservation
+        let isSeparatedDescendant: Bool
+        let environmentalDependence: Double
+    }
+    private struct ObservedProgramKey: Hashable {
+        let componentID: UInt64
+        let programID: UInt64
+    }
+    private struct ObservedProgramCount {
+        let parentProgramID: UInt64?
+        let inheritedTrait: Double
+        let collectiveTrait: Double
+        var cellCount: Int
+    }
+    private var observerHistories: [ObserverCandidateKey: ObserverHistory] = [:]
+    private var observerPersistence: [ObserverCandidateKey: Int] = [:]
+    private var observerEvaluationCounter = 0
+    private var previousProgramRepresentations: [ProgramRepresentation] = []
+    private var selectionIntervals: [MultilevelSelectionInterval] = []
+    private var currentSelection = SelectionPartition(
+        betweenComponentSelection: 0,
+        withinComponentSelection: 0,
+        transmissionChange: 0,
+        covarianceSampleCount: 0
+    )
     private var lineageTracker = LineageDivergenceTracker()
     private var hasObservedFirstBiologicalUnit = false
     private var autoFollowInitialObservation = false
@@ -486,6 +537,7 @@ final class EvolutionStore: ObservableObject {
             mutationScale: Float(mutationScale),
             transportScale: Float(transportScale),
             mechanosensingGain: mechanosensingBlocked ? 0 : 1,
+            barrierGain: 1,
             displayMode: displayMode.rawValue,
             trackedAgentID: followedAgentID.map(UInt32.init) ?? .max,
             cameraCenter: cameraCenter,
@@ -508,23 +560,38 @@ final class EvolutionStore: ObservableObject {
         fusionEventCount = 0
         lineageAnalysis = .empty
         lineageBranches.removeAll(keepingCapacity: true)
+        componentAncestryEdges.removeAll(keepingCapacity: true)
         lineageTracker.reset()
         followedBirthID = nil
         followedAgentID = nil
         observableAgentCount = 0
-        protocellCount = 0
-        autonomousCellCount = 0
-        developingTissueCount = 0
-        integratedOrganismCount = 0
+        resolvedIndividualCount = 0
+        resolvedCellIndividualCount = 0
+        resolvedCollectiveIndividualCount = 0
+        meanEnergeticIndependence = 0
+        meanMechanochemicalClosure = 0
+        maximumProgramReplicationGeneration = 0
+        individualityEvidence = .inconclusive
+        autonomyVectors.removeAll(keepingCapacity: true)
+        runtimeTelemetry = .idle
         maximumLivingLineageGeneration = 0
         livingDescendantCount = 0
-        integratedDescendantCount = 0
+        resolvedDescendantCount = 0
         livingDescendantCellCount = 0
-        followedLifeStage = nil
-        followedHomeostasisProgress = 0
-        followedIntegrationProgress = 0
+        followedEnergeticIndependence = 0
+        followedMechanochemicalClosure = 0
         observedAgents.removeAll(keepingCapacity: true)
-        lifeStageByBirthID.removeAll(keepingCapacity: true)
+        observerHistories.removeAll(keepingCapacity: true)
+        observerPersistence.removeAll(keepingCapacity: true)
+        observerEvaluationCounter = 0
+        previousProgramRepresentations.removeAll(keepingCapacity: true)
+        selectionIntervals.removeAll(keepingCapacity: true)
+        currentSelection = SelectionPartition(
+            betweenComponentSelection: 0,
+            withinComponentSelection: 0,
+            transmissionChange: 0,
+            covarianceSampleCount: 0
+        )
         worldScale = 1
         expansionToken = 0
         lastRecordedGeneration = 0
@@ -563,8 +630,8 @@ final class EvolutionStore: ObservableObject {
         recordEvent(
             generation: snapshot.generation,
             kind: .intervention,
-            title: "External founder protocell initialized",
-            detail: "Founder \(founderCount) received an independent component owner, one persistent cell, and sampled heritable control parameters at the camera position. It is not yet classified as an integrated organism."
+            title: "External founder cell initialized",
+            detail: "Founder \(founderCount) received an independent component handle, one persistent cell, and sampled heritable control parameters at the camera position. Observer inference remains separate from its physics."
         )
         objectWillChange.send()
     }
@@ -637,34 +704,28 @@ final class EvolutionStore: ObservableObject {
         follow(selected.0)
     }
 
-    func applyAgentObservations(_ agents: [AgentObservation]) {
+    func applyAgentObservations(
+        _ agents: [AgentObservation],
+        cellObservations: [CellObservation]
+    ) {
         observedAgents = agents
         if observableAgentCount != agents.count {
             observableAgentCount = agents.count
         }
-        protocellCount = agents.count { $0.lifeStage == .protocell }
-        autonomousCellCount = agents.count { $0.lifeStage == .autonomousCell }
-        developingTissueCount = agents.count { $0.lifeStage == .developingTissue }
-        integratedOrganismCount = agents.count { $0.lifeStage == .integratedOrganism }
+        meanEnergeticIndependence = agents.isEmpty ? 0 : agents.reduce(0) {
+            $0 + Double($1.energeticIndependence)
+        } / Double(agents.count)
+        meanMechanochemicalClosure = agents.isEmpty ? 0 : agents.reduce(0) {
+            $0 + Double($1.mechanochemicalClosure)
+        } / Double(agents.count)
+        maximumProgramReplicationGeneration = agents.map(\.programReplicationGeneration).max() ?? 0
         maximumLivingLineageGeneration = agents.map(\.generation).max() ?? 0
         let livingDescendants = agents.filter { $0.generation > 0 }
         livingDescendantCount = livingDescendants.count
-        integratedDescendantCount = livingDescendants.count {
-            $0.lifeStage == .integratedOrganism
-        }
         livingDescendantCellCount = livingDescendants.reduce(0) {
             $0 + max(Int(($1.morphology.x * 24).rounded()), 1)
         }
-
-        for agent in agents {
-            let previousStage = lifeStageByBirthID[agent.birthID] ?? .protocell
-            if agent.lifeStage.rawValue > previousStage.rawValue {
-                recordLifecycleTransition(agent)
-            }
-        }
-        lifeStageByBirthID = Dictionary(
-            uniqueKeysWithValues: agents.map { ($0.birthID, $0.lifeStage) }
-        )
+        updateIndividualityObserver(agents, cells: cellObservations)
         if autoFollowInitialObservation, followedAgentID == nil, let first = agents.first {
             autoFollowInitialObservation = false
             follow(first)
@@ -675,9 +736,9 @@ final class EvolutionStore: ObservableObject {
             recordEvent(
                 generation: snapshot.generation,
                 kind: .founding,
-                title: "Founder protocell nucleated",
+                title: "Founder cell nucleated",
                 detail: String(
-                    format: "Component owner %d initialized at (%.4f, %.4f) after local biomass, stored-energy, membrane, and catalyst thresholds were met. Multicellular organism criteria have not yet been applied.",
+                    format: "Component handle %d initialized at (%.4f, %.4f) after local biomass, stored-energy, membrane, and catalyst thresholds were met. Individuality is inferred only from subsequent observations.",
                     founder.id,
                     founder.position.x,
                     founder.position.y
@@ -693,9 +754,8 @@ final class EvolutionStore: ObservableObject {
             }
             if let followed {
                 if self.followedAgentID != followed.id { self.followedAgentID = followed.id }
-                followedLifeStage = followed.lifeStage
-                followedHomeostasisProgress = followed.homeostasisProgress
-                followedIntegrationProgress = followed.integrationProgress
+                followedEnergeticIndependence = followed.energeticIndependence
+                followedMechanochemicalClosure = followed.mechanochemicalClosure
                 if simd_distance_squared(cameraCenter, followed.position) > 1.0e-14 {
                     cameraCenter = followed.position
                 }
@@ -733,43 +793,348 @@ final class EvolutionStore: ObservableObject {
     private func follow(_ agent: AgentObservation) {
         followedAgentID = agent.id
         followedBirthID = agent.birthID
-        followedLifeStage = agent.lifeStage
-        followedHomeostasisProgress = agent.homeostasisProgress
-        followedIntegrationProgress = agent.integrationProgress
+        followedEnergeticIndependence = agent.energeticIndependence
+        followedMechanochemicalClosure = agent.mechanochemicalClosure
         cameraCenter = agent.position
     }
 
     private func clearFollow() {
         followedAgentID = nil
         followedBirthID = nil
-        followedLifeStage = nil
-        followedHomeostasisProgress = 0
-        followedIntegrationProgress = 0
+        followedEnergeticIndependence = 0
+        followedMechanochemicalClosure = 0
     }
 
-    private func recordLifecycleTransition(_ agent: AgentObservation) {
-        let cellCount = max(Int((agent.morphology.x * 24).rounded()), 1)
-        let title: String
-        let detail: String
-        switch agent.lifeStage {
-        case .protocell:
-            return
-        case .autonomousCell:
-            title = "Birth ID \(agent.birthID) sustained cellular homeostasis"
-            detail = "A single-cell component reached 600 units in a leaky homeostasis accumulator: each step with ATP >= 0.10, membrane integrity >= 0.30, stress <= 0.60, exposed membrane >= 0.10, and a valid inherited program adds 1; a failed step subtracts 4."
-        case .developingTissue:
-            title = "Birth ID \(agent.birthID) formed multicellular tissue"
-            detail = "The membrane-connectivity component now contains \(cellCount) persistent cells. Tissue classification begins at two cells; this is not yet integrated-organism classification."
-        case .integratedOrganism:
-            title = "Birth ID \(agent.birthID) became an integrated organism"
-            detail = "The integration accumulator reached 900: each qualifying step with at least six connected cells, ATP >= 0.12, integrity >= 0.42, stress <= 0.48, junction transport > 1e-8, differentiation >= 0.006, exposed membrane >= 0.45, phase coherence >= 0.15, and traction >= 3e-6 adds 1; failure subtracts 2."
+    func applyRuntimeTelemetry(_ telemetry: RendererRuntimeTelemetry) {
+        if telemetry.scientificallyCommittedStep < runtimeTelemetry.scientificallyCommittedStep {
+            history.removeAll { $0.totalSteps > telemetry.scientificallyCommittedStep }
+            lineageBranches.removeAll {
+                UInt64($0.birthStep) > telemetry.scientificallyCommittedStep
+            }
+            componentAncestryEdges = componentAncestryEdges.filter {
+                UInt64($0.step) <= telemetry.scientificallyCommittedStep
+            }
+            for key in observerHistories.keys {
+                guard var candidateHistory = observerHistories[key] else { continue }
+                while let step = candidateHistory.steps.last,
+                      step > telemetry.scientificallyCommittedStep {
+                    candidateHistory.steps.removeLast()
+                    candidateHistory.internalState.removeLast()
+                    candidateHistory.environment.removeLast()
+                }
+                observerHistories[key] = candidateHistory
+            }
+            observerHistories = observerHistories.filter { !$0.value.steps.isEmpty }
+            observerPersistence.removeAll(keepingCapacity: true)
+            previousProgramRepresentations.removeAll(keepingCapacity: true)
+            selectionIntervals.removeAll(keepingCapacity: true)
+            currentSelection = SelectionPartition(
+                betweenComponentSelection: 0,
+                withinComponentSelection: 0,
+                transmissionChange: 0,
+                covarianceSampleCount: 0
+            )
+            resolvedIndividualCount = 0
+            resolvedCellIndividualCount = 0
+            resolvedCollectiveIndividualCount = 0
+            resolvedDescendantCount = 0
+            autonomyVectors.removeAll(keepingCapacity: true)
+            individualityEvidence = .inconclusive
         }
-        recordEvent(
-            generation: snapshot.generation,
-            kind: .emergence,
-            title: title,
-            detail: detail
+        runtimeTelemetry = telemetry
+        if let error = telemetry.lastError {
+            errorMessage = error
+        }
+    }
+
+    private func updateIndividualityObserver(
+        _ agents: [AgentObservation],
+        cells: [CellObservation]
+    ) {
+        updateSelectionObserver(agents: agents, cells: cells)
+        let observationStep = max(
+            runtimeTelemetry.scientificallyCommittedStep,
+            snapshot.totalSteps
         )
+        var candidates: [ObserverCandidate] = agents.map { agent in
+            let cellCount = max(Int((agent.morphology.x * 24).rounded()), 1)
+            let observation = ComponentObservation(
+                step: observationStep,
+                candidateID: UInt64(agent.birthID),
+                partitionLevel: .membraneConnectedComponent,
+                cellCount: cellCount,
+                harvestedATP: Double(agent.energeticBoundary.x),
+                importedATP: Double(agent.energeticBoundary.y),
+                repairFlux: Double(agent.energeticBoundary.z),
+                membraneIntegrity: Double(agent.boundary.w),
+                exposedPerimeter: Double(agent.boundary.x),
+                damageFlux: Double(agent.boundary.y),
+                membraneTurnover: Double(agent.boundary.z),
+                strainToCalcium: Double(agent.mechanochemical.x),
+                calciumToERK: Double(agent.mechanochemical.y),
+                erkToTraction: Double(agent.mechanochemical.z),
+                tractionToStrain: Double(agent.mechanochemical.w),
+                junctionTransmission: Double(agent.social.z),
+                atpSharing: Double(agent.social.x),
+                rejection: Double(agent.social.y),
+                withinComponentReplicationAdvantage: Double(agent.social.w),
+                descendantRepresentation: agent.componentDescentDepth > 0 ? 1 : 0,
+                parentResemblance: exp(-Double(agent.mutationDistance))
+            )
+            return ObserverCandidate(
+                key: ObserverCandidateKey(
+                    level: .membraneConnectedComponent,
+                    id: UInt64(agent.birthID)
+                ),
+                position: agent.position,
+                observation: observation,
+                isSeparatedDescendant: agent.componentDescentDepth > 0,
+                environmentalDependence: Double(
+                    abs(agent.environment.x) + abs(agent.environment.y) +
+                    (1 - min(max(agent.environment.w, 0), 1))
+                )
+            )
+        }
+        candidates.append(contentsOf: cells.map { cell in
+            let observation = ComponentObservation(
+                step: observationStep,
+                candidateID: UInt64(cell.persistentID),
+                partitionLevel: .cell,
+                cellCount: 1,
+                harvestedATP: Double(cell.energetic.x),
+                importedATP: Double(cell.energetic.y),
+                repairFlux: Double(cell.energetic.z),
+                membraneIntegrity: Double(cell.energetic.w),
+                exposedPerimeter: Double(cell.boundary.x),
+                damageFlux: Double(cell.boundary.y),
+                membraneTurnover: Double(cell.boundary.z),
+                strainToCalcium: Double(cell.mechanochemical.x),
+                calciumToERK: Double(cell.mechanochemical.y),
+                erkToTraction: Double(cell.mechanochemical.z),
+                tractionToStrain: Double(cell.mechanochemical.w),
+                junctionTransmission: Double(cell.social.z),
+                atpSharing: Double(cell.social.x),
+                rejection: Double(cell.social.y),
+                withinComponentReplicationAdvantage: Double(cell.social.w),
+                descendantRepresentation: 0,
+                parentResemblance: 0
+            )
+            return ObserverCandidate(
+                key: ObserverCandidateKey(level: .cell, id: UInt64(cell.persistentID)),
+                position: cell.position,
+                observation: observation,
+                isSeparatedDescendant: false,
+                environmentalDependence: Double(
+                    abs(cell.environment.x) + abs(cell.environment.y) +
+                    (1 - min(max(cell.environment.w, 0), 1))
+                )
+            )
+        })
+
+        let livingKeys = Set(candidates.map(\.key))
+        observerHistories = observerHistories.filter { livingKeys.contains($0.key) }
+        observerPersistence = observerPersistence.filter { livingKeys.contains($0.key) }
+        for candidate in candidates {
+            var history = observerHistories[candidate.key] ?? ObserverHistory()
+            let autonomy = AutonomyVector.measured(
+                from: candidate.observation,
+                conditionalSelfPredictiveInformation: 0
+            )
+            history.steps.append(observationStep)
+            history.internalState.append(autonomy.mechanochemicalClosure)
+            history.environment.append(candidate.environmentalDependence)
+            if history.internalState.count > 256 {
+                let excess = history.internalState.count - 256
+                history.steps.removeFirst(excess)
+                history.internalState.removeFirst(excess)
+                history.environment.removeFirst(excess)
+            }
+            observerHistories[candidate.key] = history
+        }
+
+        observerEvaluationCounter += 1
+        guard observerEvaluationCounter.isMultiple(of: 8) else { return }
+        var estimates: [ObserverCandidateKey: SelfPredictiveInformationEstimate] = [:]
+        for candidate in candidates.prefix(128) {
+            guard let history = observerHistories[candidate.key],
+                  let estimate = IndividualityStatistics.conditionalSelfPredictiveInformation(
+                    state: history.internalState,
+                    environment: history.environment,
+                    resamples: 48,
+                    seed: candidate.key.id ^ observationStep
+                  ) else { continue }
+            estimates[candidate.key] = estimate
+        }
+
+        let spatialRadiusSquared: Float = 0.08 * 0.08
+        let instantaneousMaxima = candidates.filter { candidate in
+            guard let estimate = estimates[candidate.key], estimate.state == .supported,
+                  let history = observerHistories[candidate.key],
+                  Double(history.internalState.count) >= 3 * estimate.autocorrelationTime else {
+                return false
+            }
+            return !candidates.contains { neighbor in
+                guard neighbor.key != candidate.key,
+                      simd_distance_squared(neighbor.position, candidate.position) <= spatialRadiusSquared,
+                      let neighborEstimate = estimates[neighbor.key] else { return false }
+                return neighborEstimate.observed.estimate > estimate.observed.estimate
+            }
+        }
+        let instantaneousKeys = Set(instantaneousMaxima.map(\.key))
+        for candidate in candidates {
+            observerPersistence[candidate.key] = instantaneousKeys.contains(candidate.key)
+                ? (observerPersistence[candidate.key] ?? 0) + 1 : 0
+        }
+        let localMaxima = instantaneousMaxima.filter { candidate in
+            guard let estimate = estimates[candidate.key] else { return false }
+            let requiredEvaluationWindows = max(
+                Int(ceil(estimate.autocorrelationTime / 8)),
+                1
+            )
+            return (observerPersistence[candidate.key] ?? 0) >= requiredEvaluationWindows
+        }
+        resolvedCellIndividualCount = localMaxima.count {
+            $0.key.level == .cell
+        }
+        resolvedCollectiveIndividualCount = localMaxima.count {
+            $0.key.level == .membraneConnectedComponent
+        }
+        resolvedIndividualCount = localMaxima.count
+        resolvedDescendantCount = localMaxima.count {
+            $0.key.level == .membraneConnectedComponent && $0.isSeparatedDescendant
+        }
+        autonomyVectors = localMaxima.compactMap { candidate in
+            estimates[candidate.key].map {
+                AutonomyVector.measured(
+                    from: candidate.observation,
+                    conditionalSelfPredictiveInformation: $0.observed.estimate
+                )
+            }
+        }
+
+        let bestCandidate = localMaxima.max {
+            (estimates[$0.key]?.observed.estimate ?? 0) <
+                (estimates[$1.key]?.observed.estimate ?? 0)
+        }
+        let best = bestCandidate.flatMap { estimates[$0.key] }
+        let autonomyClaim: EvidenceClaim
+        if let best {
+            autonomyClaim = EvidenceClaim(
+                state: best.state,
+                estimate: best.observed,
+                nullUpperBound: best.shuffledNull.upper,
+                reason: "Conditional self-predictive information is compared with autocorrelation-preserving block-shuffled nulls."
+            )
+        } else {
+            autonomyClaim = EvidenceClaim(
+                state: estimates.isEmpty ? .inconclusive : .notSupported,
+                estimate: nil,
+                nullUpperBound: nil,
+                reason: estimates.isEmpty
+                    ? "The observer has fewer than three empirical autocorrelation windows."
+                    : "No persistent local maximum exceeds its block-shuffled null."
+            )
+        }
+        let hasSeparatedLivingDescendant = currentSelection.independentDescendantCount > 0 &&
+            agents.contains { $0.componentDescentDepth > 0 }
+        let lineageClaim = EvidenceClaim(
+            state: hasSeparatedLivingDescendant ? .supported : .inconclusive,
+            estimate: nil,
+            nullUpperBound: nil,
+            reason: hasSeparatedLivingDescendant
+                ? "Inherited programs remain represented in independently separated living components."
+                : "No independently separated living descendant currently carries transmitted programs."
+        )
+        let collectiveSupport = currentSelection.covarianceSampleCount >= 8 &&
+            (currentSelection.betweenComponentConfidence?.lower ?? -.infinity) > 0 &&
+            (currentSelection.collectiveHeritability?.lower ?? -.infinity) > 0
+        let collectiveClaim = EvidenceClaim(
+            state: collectiveSupport ? .supported : .inconclusive,
+            estimate: currentSelection.betweenComponentConfidence,
+            nullUpperBound: 0,
+            reason: collectiveSupport
+                ? "Measured between-component Price covariance and collective parent-descendant resemblance have positive 95% bootstrap intervals."
+                : "Collective support requires eight transmitted parent components and positive 95% intervals for between-component covariance and collective resemblance."
+        )
+        individualityEvidence = IndividualityEvidence(
+            mechanochemicalAutonomy: autonomyClaim,
+            darwinianLineage: lineageClaim,
+            collectiveLevelIndividuality: collectiveClaim,
+            selection: currentSelection,
+            autocorrelationTime: best?.autocorrelationTime ?? 0,
+            observationWindows: bestCandidate.flatMap { candidate in
+                best.map {
+                    Int(Double(observerHistories[candidate.key]?.internalState.count ?? 0) /
+                        max($0.autocorrelationTime, 1))
+                }
+            } ?? 0
+        )
+    }
+
+    private func updateSelectionObserver(
+        agents: [AgentObservation],
+        cells: [CellObservation]
+    ) {
+        let collectiveTraits = Dictionary(uniqueKeysWithValues: agents.map { agent in
+            let terms = [
+                agent.mechanochemical.x,
+                agent.mechanochemical.y,
+                agent.mechanochemical.z,
+                agent.mechanochemical.w
+            ].map { Double(max($0, 0)) }
+            let trait = terms.contains(0) ? 0 : pow(terms.reduce(1, *), 0.25)
+            return (UInt64(agent.birthID), trait)
+        })
+        var counts: [ObservedProgramKey: ObservedProgramCount] = [:]
+        for cell in cells where cell.programGenomeHash != 0 {
+            let componentID = UInt64(cell.componentBirthID)
+            let programID = UInt64(cell.programGenomeHash)
+            let key = ObservedProgramKey(componentID: componentID, programID: programID)
+            var count = counts[key] ?? ObservedProgramCount(
+                parentProgramID: cell.parentProgramGenomeHash == 0 ||
+                    cell.parentProgramGenomeHash == cell.programGenomeHash
+                    ? nil : UInt64(cell.parentProgramGenomeHash),
+                inheritedTrait: Double(cell.inheritedMechanochemicalTrait),
+                collectiveTrait: collectiveTraits[componentID] ?? 0,
+                cellCount: 0
+            )
+            count.cellCount += 1
+            counts[key] = count
+        }
+        let current = counts.map { key, count in
+            ProgramRepresentation(
+                componentID: key.componentID,
+                programID: key.programID,
+                parentProgramID: count.parentProgramID,
+                cellCount: count.cellCount,
+                inheritedTrait: count.inheritedTrait,
+                collectiveTrait: count.collectiveTrait
+            )
+        }
+        if !previousProgramRepresentations.isEmpty {
+            let contributions = Set(componentAncestryEdges.map {
+                ComponentContribution(
+                    descendantID: UInt64($0.descendantID),
+                    contributorID: UInt64($0.contributorID)
+                )
+            })
+            let interval = MultilevelPriceAnalysis.interval(
+                parent: previousProgramRepresentations,
+                descendant: current,
+                contributions: contributions
+            )
+            if interval.independentDescendantComponents > 0 {
+                selectionIntervals.append(interval)
+                if selectionIntervals.count > 256 {
+                    selectionIntervals.removeFirst(selectionIntervals.count - 256)
+                }
+                currentSelection = MultilevelPriceAnalysis.summarize(
+                    selectionIntervals,
+                    resamples: 128
+                )
+            }
+        }
+        previousProgramRepresentations = current
     }
 
     func applyLineageEvents(_ records: [RecordedLineageEvent]) {
@@ -777,6 +1142,14 @@ final class EvolutionStore: ObservableObject {
             switch record.kind {
             case .birth:
                 let parent = record.parentBirthID == .max ? nil : record.parentBirthID
+                if let parent {
+                    componentAncestryEdges.insert(ComponentAncestryEdge(
+                        descendantID: record.birthID,
+                        contributorID: parent,
+                        step: record.step,
+                        aroseByFusion: false
+                    ))
+                }
                 lineageBranches.insert(ObservedLineageBranch(
                     id: record.birthID,
                     parentID: parent,
@@ -805,7 +1178,7 @@ final class EvolutionStore: ObservableObject {
                         ? "Founder cell birth ID \(record.birthID) initialized"
                         : "Detached component received birth ID \(record.birthID)",
                     detail: String(
-                        format: "GPU step %u; component owner allocated after physical separation; topology hash %08X; branch mutation distance %.4f; inherited resonance %.5f cycles/step. The component must independently satisfy lifecycle criteria.",
+                        format: "GPU step %u; a component handle was allocated immediately after physical separation; topology hash %08X; accumulated program mutation distance %.4f; inherited resonance %.5f cycles/step. Separation itself introduced no mutation.",
                         record.step,
                         record.topologyHash,
                         record.mutationDistance,
@@ -830,6 +1203,12 @@ final class EvolutionStore: ObservableObject {
                 )
             case .fusion:
                 fusionEventCount += 1
+                componentAncestryEdges.insert(ComponentAncestryEdge(
+                    descendantID: record.birthID,
+                    contributorID: record.parentBirthID,
+                    step: record.step,
+                    aroseByFusion: true
+                ))
                 recordEvent(
                     generation: Int(record.generation),
                     kind: .fusion,
@@ -839,6 +1218,35 @@ final class EvolutionStore: ObservableObject {
                         record.step,
                         record.birthID,
                         record.topologyHash
+                    )
+                )
+            case .cellDivision:
+                recordEvent(
+                    generation: Int(record.generation),
+                    kind: .cellDivision,
+                    title: "Cell #\(record.parentBirthID) divided into cell #\(record.birthID)",
+                    detail: String(
+                        format: "GPU step %u; daughter ATP %.4f, biomass %.4f, membrane integrity %.4f, stress %.4f; inherited program generation %u.",
+                        record.step,
+                        record.energy,
+                        record.morphology.x,
+                        record.morphology.y,
+                        record.morphology.z,
+                        record.generation
+                    )
+                )
+            case .programMutation:
+                recordEvent(
+                    generation: Int(record.generation),
+                    kind: .programMutation,
+                    title: "Program mutation in daughter cell #\(record.birthID)",
+                    detail: String(
+                        format: "GPU step %u; replication generation %u; topology hash %08X; mutation distance %.5f; mechanosensory frequency %.5f cycles/step.",
+                        record.step,
+                        record.generation,
+                        record.topologyHash,
+                        record.mutationDistance,
+                        record.resonanceFrequency
                     )
                 )
             }
