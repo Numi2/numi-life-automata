@@ -52,6 +52,8 @@ constant uint lineageEventCapacity = 4096u;
 constant uint cellSpatialHashBucketCount = 16384u;
 constant uint cellSpatialHashMask = cellSpatialHashBucketCount - 1u;
 constant uint cellSpatialHashAxisResolution = 256u;
+constant uint membraneContactPairCapacity = 524288u;
+constant uint componentTopologyReconciliationStride = 256u;
 constant uint cellJunctionCapacity = 32768u;
 constant uint cellJunctionMask = cellJunctionCapacity - 1u;
 constant uint energyExchangeChannelCount = 8u;
@@ -72,6 +74,7 @@ constant uint invariantReferenceCount = 1u << 3u;
 constant uint invariantOrphanedJunction = 1u << 4u;
 constant uint invariantInvalidMembrane = 1u << 5u;
 constant uint invariantDisconnectedOwnership = 1u << 6u;
+constant uint invariantContactPairOverflow = 1u << 7u;
 struct AgentState {
     float2 position;
     float2 velocity;
@@ -3377,10 +3380,12 @@ kernel void initializeCellComponents(
     device atomic_uint* componentPrograms [[buffer(7)]],
     device atomic_uint* componentCellHeads [[buffer(8)]],
     device uint* componentCellNext [[buffer(9)]],
+    device const atomic_uint* contactWorkState [[buffer(28)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
@@ -3388,6 +3393,23 @@ kernel void initializeCellComponents(
     if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) != 0u &&
         identity.owner < maxAgentCount) {
         atomic_store_explicit(&componentParents[gid], gid, memory_order_relaxed);
+        atomic_store_explicit(&componentCounts[gid], 0u, memory_order_relaxed);
+        atomic_store_explicit(
+            &componentOwners[gid], emptySpatialHashEntry, memory_order_relaxed
+        );
+        atomic_store_explicit(&componentPrograms[gid], 0u, memory_order_relaxed);
+        atomic_store_explicit(
+            &componentCellHeads[gid], emptySpatialHashEntry, memory_order_relaxed
+        );
+        componentCellNext[gid] = emptySpatialHashEntry;
+        atomic_store_explicit(
+            &ownerPrimaryRoots[identity.owner], emptySpatialHashEntry, memory_order_relaxed
+        );
+        for (uint channel = 0u; channel < 5u; ++channel) {
+            atomic_store_explicit(
+                &componentAccumulation[gid * 5u + channel], 0, memory_order_relaxed
+            );
+        }
         identity.componentRoot = gid;
         cellIdentities[gid] = identity;
     }
@@ -3400,62 +3422,33 @@ kernel void unionCellComponents(
     device const atomic_uint* cellOccupancy [[buffer(3)]],
     device const MembraneVertex* membraneVertices [[buffer(4)]],
     device const CellIdentity* cellIdentities [[buffer(5)]],
-    device const atomic_uint* hashHeads [[buffer(6)]],
-    device const uint* hashNext [[buffer(7)]],
+    device const uint2* contactPairs [[buffer(6)]],
+    device const atomic_uint* contactWorkState [[buffer(7)]],
     device atomic_uint* componentParents [[buffer(8)]],
     constant SimulationUniforms& uniforms [[buffer(9)]],
     device const HeritableProgram* heritablePrograms [[buffer(10)]],
     device atomic_uint* identityCounters [[buffer(11)]],
-    device const atomic_uint* activeCellCount [[buffer(29)]],
-    device const uint* activeCellIndices [[buffer(30)]],
-    uint compactIndex [[thread_position_in_grid]]
+    uint pairIndex [[thread_position_in_grid]]
 ) {
-    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
-    uint gid = activeCellIndices[compactIndex];
-    if (gid >= maxCellCount ||
-        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u ||
+        pairIndex >= atomic_load_explicit(&contactWorkState[0], memory_order_relaxed)) { return; }
+    uint2 pair = contactPairs[pairIndex];
+    uint gid = pair.x;
+    uint otherIndex = pair.y;
+    if (gid >= maxCellCount || otherIndex >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u ||
+        atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) == 0u) { return; }
     uint owner = cellIdentities[gid].owner;
-    if (owner >= maxAgentCount ||
-        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+    uint otherOwner = cellIdentities[otherIndex].owner;
+    if (owner >= maxAgentCount || otherOwner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u ||
+        atomic_load_explicit(&agentOccupancy[otherOwner], memory_order_relaxed) == 0u) { return; }
 
     AgentState agent = agents[owner];
     CellState cell = cells[gid];
     float scale = cellWorldScale(uniforms);
     float2 worldPosition = cellWorldPosition(agent, cell.position, uniforms);
-    int2 baseCoordinate = int2(spatialHashCoordinate(worldPosition));
-    uint visitedBuckets[25];
-    uint visitedBucketCount = 0u;
-    for (int offsetY = -2; offsetY <= 2; ++offsetY) {
-        for (int offsetX = -2; offsetX <= 2; ++offsetX) {
-            int2 candidateCoordinate = baseCoordinate + int2(offsetX, offsetY);
-            if (any(candidateCoordinate < int2(0)) ||
-                any(candidateCoordinate >= int2(cellSpatialHashAxisResolution))) { continue; }
-            uint bucket = cellSpatialHash(uint2(candidateCoordinate));
-            bool alreadyVisited = false;
-            for (uint visited = 0u; visited < visitedBucketCount; ++visited) {
-                if (visitedBuckets[visited] == bucket) {
-                    alreadyVisited = true;
-                    break;
-                }
-            }
-            if (alreadyVisited) { continue; }
-            visitedBuckets[visitedBucketCount++] = bucket;
-            uint otherIndex = atomic_load_explicit(&hashHeads[bucket], memory_order_relaxed);
-            uint traversed = 0u;
-            while (otherIndex != emptySpatialHashEntry && traversed < 96u) {
-                uint nextIndex = hashNext[otherIndex];
-                if (otherIndex > gid &&
-                    atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) != 0u) {
-                    uint otherOwner = cellIdentities[otherIndex].owner;
-                    if (otherOwner >= maxAgentCount ||
-                        atomic_load_explicit(
-                            &agentOccupancy[otherOwner], memory_order_relaxed
-                        ) == 0u) {
-                        otherIndex = nextIndex;
-                        traversed += 1u;
-                        continue;
-                    }
-                    CellState other = cells[otherIndex];
+    CellState other = cells[otherIndex];
                     AgentState otherAgent = agents[otherOwner];
                     float2 otherWorldPosition = cellWorldPosition(
                         otherAgent, other.position, uniforms
@@ -3535,22 +3528,18 @@ kernel void unionCellComponents(
                             componentParents, cellIdentities, gid, otherIndex
                         );
                     }
-                }
-                otherIndex = nextIndex;
-                traversed += 1u;
-            }
-        }
-    }
 }
 
 kernel void compressCellComponents(
     device const atomic_uint* cellOccupancy [[buffer(0)]],
     device atomic_uint* componentParents [[buffer(1)]],
     device CellIdentity* cellIdentities [[buffer(2)]],
+    device const atomic_uint* contactWorkState [[buffer(28)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
@@ -3567,10 +3556,12 @@ kernel void buildCellComponentLists(
     device const CellIdentity* cellIdentities [[buffer(1)]],
     device atomic_uint* componentCellHeads [[buffer(2)]],
     device uint* componentCellNext [[buffer(3)]],
+    device const atomic_uint* contactWorkState [[buffer(28)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
@@ -3595,10 +3586,12 @@ kernel void accumulateCellComponents(
     device atomic_uint* componentCounts [[buffer(3)]],
     device atomic_int* componentAccumulation [[buffer(4)]],
     device atomic_uint* componentOwners [[buffer(5)]],
+    device const atomic_uint* contactWorkState [[buffer(28)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
@@ -3658,8 +3651,10 @@ kernel void selectPrimaryCellComponents(
     device atomic_uint* ownerPrimaryRoots [[buffer(5)]],
     device const uint* activeComponents [[buffer(6)]],
     device const atomic_uint* activeComponentCount [[buffer(7)]],
+    device const atomic_uint* contactWorkState [[buffer(28)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
     if (compactIndex >= atomic_load_explicit(activeComponentCount, memory_order_relaxed)) { return; }
     uint owner = activeComponents[compactIndex];
     if (owner >= maxAgentCount ||
@@ -3710,10 +3705,12 @@ kernel void assignCellComponentOwners(
     device const atomic_uint* componentCellHeads [[buffer(20)]],
     device const uint* componentCellNext [[buffer(21)]],
     device ProgramSlotState* programSlots [[buffer(22)]],
+    device const atomic_uint* contactWorkState [[buffer(28)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint root = activeCellIndices[compactIndex];
     if (root >= maxCellCount) { return; }
@@ -3942,10 +3939,12 @@ kernel void reassignCellComponents(
     device CellJunctionState* junctionStates [[buffer(12)]],
     device const atomic_uint* ownerCellHeads [[buffer(13)]],
     device const uint* ownerCellNext [[buffer(14)]],
+    device const atomic_uint* contactWorkState [[buffer(28)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
+    if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount ||
@@ -4017,6 +4016,20 @@ kernel void reassignCellComponents(
     cellIdentities[gid] = identity;
 }
 
+kernel void finalizeCellTopology(
+    device atomic_uint* contactWorkState [[buffer(0)]],
+    device const atomic_uint* activeCellCount [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u ||
+        atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u) { return; }
+    atomic_store_explicit(
+        &contactWorkState[3],
+        atomic_load_explicit(activeCellCount, memory_order_relaxed),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(&contactWorkState[2], 0u, memory_order_relaxed);
+}
 
 kernel void injectFounder(
     device AgentState* agents [[buffer(0)]],
@@ -5317,6 +5330,7 @@ kernel void clearCellSpatialHash(
 kernel void clearActiveCellContactEffects(
     device atomic_int* contactEffects [[buffer(0)]],
     device atomic_int* membraneContactEffects [[buffer(1)]],
+    device atomic_uint* topologySignatures [[buffer(2)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
@@ -5335,6 +5349,9 @@ kernel void clearActiveCellContactEffects(
             &membraneContactEffects[membraneBase + channel], 0, memory_order_relaxed
         );
     }
+    uint topologyBase = cellIndex * 4u;
+    atomic_store_explicit(&topologySignatures[topologyBase], 0u, memory_order_relaxed);
+    atomic_store_explicit(&topologySignatures[topologyBase + 1u], 0u, memory_order_relaxed);
 }
 
 kernel void clearOwnerCellLists(
@@ -5438,6 +5455,121 @@ kernel void buildCellSpatialHash(
     uint bucket = cellSpatialHash(spatialHashCoordinate(worldPosition));
     hashNext[gid] = atomic_exchange_explicit(&hashHeads[bucket], gid, memory_order_relaxed);
     insertOwnedCellSorted(ownerCellHeads, ownerCellNext, gid, owner);
+}
+
+kernel void resetMembraneContactWork(
+    device atomic_uint* contactWorkState [[buffer(0)]],
+    device const atomic_uint* activeCellCount [[buffer(1)]],
+    constant SimulationUniforms& uniforms [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint livingCount = atomic_load_explicit(activeCellCount, memory_order_relaxed);
+    uint previousCount = atomic_load_explicit(&contactWorkState[3], memory_order_relaxed);
+    bool reconcile = livingCount != previousCount ||
+        uniforms.step % componentTopologyReconciliationStride == 0u;
+    atomic_store_explicit(&contactWorkState[0], 0u, memory_order_relaxed);
+    atomic_store_explicit(&contactWorkState[1], 0u, memory_order_relaxed);
+    atomic_store_explicit(&contactWorkState[2], reconcile ? 1u : 0u, memory_order_relaxed);
+}
+
+kernel void buildMembraneContactPairs(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const atomic_uint* cellOccupancy [[buffer(3)]],
+    device const atomic_uint* hashHeads [[buffer(4)]],
+    device const uint* hashNext [[buffer(5)]],
+    device const CellIdentity* cellIdentities [[buffer(6)]],
+    device uint2* contactPairs [[buffer(7)]],
+    device atomic_uint* contactWorkState [[buffer(8)]],
+    constant SimulationUniforms& uniforms [[buffer(9)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+
+    float scale = max(cellWorldScale(uniforms), 0.0000001);
+    float2 worldPosition = cellWorldPosition(agents[owner], cells[gid].position, uniforms);
+    int2 baseCoordinate = int2(spatialHashCoordinate(worldPosition));
+    uint visitedBuckets[25];
+    uint visitedBucketCount = 0u;
+    for (int offsetY = -2; offsetY <= 2; ++offsetY) {
+        for (int offsetX = -2; offsetX <= 2; ++offsetX) {
+            int2 candidateCoordinate = baseCoordinate + int2(offsetX, offsetY);
+            if (any(candidateCoordinate < int2(0)) ||
+                any(candidateCoordinate >= int2(cellSpatialHashAxisResolution))) { continue; }
+            uint bucket = cellSpatialHash(uint2(candidateCoordinate));
+            bool alreadyVisited = false;
+            for (uint visited = 0u; visited < visitedBucketCount; ++visited) {
+                if (visitedBuckets[visited] == bucket) {
+                    alreadyVisited = true;
+                    break;
+                }
+            }
+            if (alreadyVisited) { continue; }
+            visitedBuckets[visitedBucketCount++] = bucket;
+            uint otherIndex = atomic_load_explicit(&hashHeads[bucket], memory_order_relaxed);
+            uint traversed = 0u;
+            while (otherIndex != emptySpatialHashEntry && traversed < 96u) {
+                uint nextIndex = hashNext[otherIndex];
+                if (otherIndex > gid &&
+                    atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) != 0u) {
+                    uint otherOwner = cellIdentities[otherIndex].owner;
+                    if (otherOwner < maxAgentCount &&
+                        atomic_load_explicit(
+                            &agentOccupancy[otherOwner], memory_order_relaxed
+                        ) != 0u) {
+                        float2 otherWorldPosition = cellWorldPosition(
+                            agents[otherOwner], cells[otherIndex].position, uniforms
+                        );
+                        if (length(otherWorldPosition - worldPosition) / scale <= 0.72) {
+                            uint pairIndex = atomic_fetch_add_explicit(
+                                &contactWorkState[0], 1u, memory_order_relaxed
+                            );
+                            if (pairIndex < membraneContactPairCapacity) {
+                                contactPairs[pairIndex] = uint2(gid, otherIndex);
+                            }
+                        }
+                    }
+                }
+                otherIndex = nextIndex;
+                traversed += 1u;
+            }
+        }
+    }
+}
+
+kernel void prepareMembraneContactDispatch(
+    device atomic_uint* contactWorkState [[buffer(0)]],
+    device uint* dispatchArguments [[buffer(1)]],
+    device atomic_uint* invariantState [[buffer(2)]],
+    constant SimulationUniforms& uniforms [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint rawCount = atomic_load_explicit(&contactWorkState[0], memory_order_relaxed);
+    uint pairCount = min(rawCount, membraneContactPairCapacity);
+    bool overflow = rawCount > membraneContactPairCapacity;
+    atomic_store_explicit(&contactWorkState[0], pairCount, memory_order_relaxed);
+    atomic_store_explicit(&contactWorkState[1], overflow ? 1u : 0u, memory_order_relaxed);
+    dispatchArguments[0] = (pairCount + 63u) / 64u;
+    dispatchArguments[1] = 1u;
+    dispatchArguments[2] = 1u;
+    if (overflow) {
+        atomic_fetch_or_explicit(
+            &invariantState[0], invariantContactPairOverflow, memory_order_relaxed
+        );
+        atomic_fetch_min_explicit(&invariantState[1], uniforms.step, memory_order_relaxed);
+        atomic_fetch_add_explicit(&invariantState[17], 1u, memory_order_relaxed);
+    }
 }
 
 inline uint cellPairKey(uint indexA, uint indexB) {
@@ -5563,8 +5695,8 @@ kernel void resolveMembraneContacts(
     device const CellState* cells [[buffer(2)]],
     device const atomic_uint* cellOccupancy [[buffer(3)]],
     device const MembraneVertex* membraneVertices [[buffer(4)]],
-    device const atomic_uint* hashHeads [[buffer(5)]],
-    device const uint* hashNext [[buffer(6)]],
+    device const uint2* contactPairs [[buffer(5)]],
+    device atomic_uint* contactWorkState [[buffer(6)]],
     device atomic_int* contactEffects [[buffer(7)]],
     constant SimulationUniforms& uniforms [[buffer(8)]],
     device const CellIdentity* cellIdentities [[buffer(9)]],
@@ -5574,68 +5706,39 @@ kernel void resolveMembraneContacts(
     device const ProgramSlotState* programSlots [[buffer(13)]],
     device atomic_int* energyAudit [[buffer(14)]],
     device atomic_uint* identityCounters [[buffer(15)]],
-    device const atomic_uint* activeCellCount [[buffer(29)]],
-    device const uint* activeCellIndices [[buffer(30)]],
-    uint compactIndex [[thread_position_in_grid]]
+    device atomic_uint* topologySignatures [[buffer(16)]],
+    uint pairIndex [[thread_position_in_grid]]
 ) {
-    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
-    uint gid = activeCellIndices[compactIndex];
-    if (gid >= maxCellCount ||
-        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
+    if (pairIndex >= atomic_load_explicit(&contactWorkState[0], memory_order_relaxed)) { return; }
+    uint2 pair = contactPairs[pairIndex];
+    uint gid = pair.x;
+    uint otherIndex = pair.y;
+    if (gid >= maxCellCount || otherIndex >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u ||
+        atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) == 0u) { return; }
     uint owner = cellIdentities[gid].owner;
-    if (owner >= maxAgentCount ||
-        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+    uint otherOwner = cellIdentities[otherIndex].owner;
+    if (owner >= maxAgentCount || otherOwner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u ||
+        atomic_load_explicit(&agentOccupancy[otherOwner], memory_order_relaxed) == 0u) { return; }
 
     uint programIndex = cellIdentities[gid].programIndex;
+    uint otherProgramIndex = cellIdentities[otherIndex].programIndex;
     if (!programSlotMatches(
         programSlots, programIndex, cellIdentities[gid].programGeneration
+    ) || !programSlotMatches(
+        programSlots, otherProgramIndex, cellIdentities[otherIndex].programGeneration
     )) { return; }
     AgentState agent = agentWithCellProgram(
         agents[owner], programIndex, heritablePrograms
     );
+    AgentState otherAgent = agentWithCellProgram(
+        agents[otherOwner], otherProgramIndex, heritablePrograms
+    );
     CellState cell = cells[gid];
+    CellState other = cells[otherIndex];
     float scale = cellWorldScale(uniforms);
     float2 worldPosition = cellWorldPosition(agent, cell.position, uniforms);
-    int2 baseCoordinate = int2(spatialHashCoordinate(worldPosition));
-    uint visitedBuckets[25];
-    uint visitedBucketCount = 0u;
-    for (int offsetY = -2; offsetY <= 2; ++offsetY) {
-        for (int offsetX = -2; offsetX <= 2; ++offsetX) {
-            int2 candidateCoordinate = baseCoordinate + int2(offsetX, offsetY);
-            if (any(candidateCoordinate < int2(0)) ||
-                any(candidateCoordinate >= int2(cellSpatialHashAxisResolution))) { continue; }
-            uint bucket = cellSpatialHash(uint2(candidateCoordinate));
-            bool alreadyVisited = false;
-            for (uint visited = 0u; visited < visitedBucketCount; ++visited) {
-                if (visitedBuckets[visited] == bucket) {
-                    alreadyVisited = true;
-                    break;
-                }
-            }
-            if (alreadyVisited) { continue; }
-            visitedBuckets[visitedBucketCount++] = bucket;
-            uint otherIndex = atomic_load_explicit(&hashHeads[bucket], memory_order_relaxed);
-            uint traversed = 0u;
-            while (otherIndex != emptySpatialHashEntry && traversed < 48u) {
-                uint nextIndex = hashNext[otherIndex];
-                if (otherIndex > gid &&
-                    atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) != 0u) {
-                    uint otherOwner = cellIdentities[otherIndex].owner;
-                    if (otherOwner < maxAgentCount &&
-                        atomic_load_explicit(&agentOccupancy[otherOwner], memory_order_relaxed) != 0u) {
-                        uint otherProgramIndex = cellIdentities[otherIndex].programIndex;
-                        if (!programSlotMatches(
-                            programSlots, otherProgramIndex,
-                            cellIdentities[otherIndex].programGeneration
-                        )) {
-                            otherIndex = nextIndex;
-                            traversed += 1u;
-                            continue;
-                        }
-                        AgentState otherAgent = agentWithCellProgram(
-                            agents[otherOwner], otherProgramIndex, heritablePrograms
-                        );
-                        CellState other = cells[otherIndex];
                         float2 otherWorldPosition = cellWorldPosition(
                             otherAgent, other.position, uniforms
                         );
@@ -5658,6 +5761,45 @@ kernel void resolveMembraneContacts(
                         float localGap = supportGap / max(scale, 0.0000001);
                         bool sameOwner = otherOwner == owner;
                         float interactionRange = sameOwner ? 0.090 : 0.012;
+                        float topologyIntegrity = min(
+                            min(cell.physiology.w, other.physiology.w),
+                            min(supportA.integrity, supportB.integrity)
+                        );
+                        float topologyAdhesion = min(cell.phenotype.x, other.phenotype.x);
+                        bool topologyConnected = sameOwner && topologyIntegrity > 0.10 &&
+                            localGap <= 0.050 * topologyAdhesion * topologyIntegrity;
+                        if (topologyConnected) {
+                            uint topologyBase = gid * 4u;
+                            uint otherTopologyBase = otherIndex * 4u;
+                            atomic_fetch_add_explicit(
+                                &topologySignatures[topologyBase], 1u, memory_order_relaxed
+                            );
+                            atomic_fetch_xor_explicit(
+                                &topologySignatures[topologyBase + 1u],
+                                hash32(cellIdentities[otherIndex].persistentID ^ 0xa511e9b3u),
+                                memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &topologySignatures[otherTopologyBase], 1u, memory_order_relaxed
+                            );
+                            atomic_fetch_xor_explicit(
+                                &topologySignatures[otherTopologyBase + 1u],
+                                hash32(cellIdentities[gid].persistentID ^ 0xa511e9b3u),
+                                memory_order_relaxed
+                            );
+                        }
+                        bool newSameOwnerConnection = topologyConnected &&
+                            cellIdentities[gid].componentRoot !=
+                                cellIdentities[otherIndex].componentRoot;
+                        bool fusionCandidate = !sameOwner && localGap < 0.008 &&
+                            min(agent.social.x, otherAgent.social.x) > 0.20 &&
+                            recognitionCompatibility(agent, otherAgent) > 0.35 &&
+                            max(agent.geneC.w, otherAgent.geneC.w) < 0.40;
+                        if (newSameOwnerConnection || fusionCandidate) {
+                            atomic_store_explicit(
+                                &contactWorkState[2], 1u, memory_order_relaxed
+                            );
+                        }
                         if (localGap < interactionRange) {
                             if (!sameOwner) {
                                 atomic_fetch_add_explicit(
@@ -5848,13 +5990,40 @@ kernel void resolveMembraneContacts(
                                 impulse, pressure
                             );
                         }
-                    }
-                }
-                otherIndex = nextIndex;
-                traversed += 1u;
-            }
-        }
+}
+
+kernel void detectCellTopologyChanges(
+    device atomic_uint* topologySignatures [[buffer(0)]],
+    device atomic_uint* contactWorkState [[buffer(1)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint cellIndex = activeCellIndices[compactIndex];
+    if (cellIndex >= maxCellCount) { return; }
+    uint base = cellIndex * 4u;
+    uint currentCount = atomic_load_explicit(
+        &topologySignatures[base], memory_order_relaxed
+    );
+    uint currentHash = atomic_load_explicit(
+        &topologySignatures[base + 1u], memory_order_relaxed
+    );
+    uint previousCount = atomic_load_explicit(
+        &topologySignatures[base + 2u], memory_order_relaxed
+    );
+    uint previousHash = atomic_load_explicit(
+        &topologySignatures[base + 3u], memory_order_relaxed
+    );
+    if (currentCount != previousCount || currentHash != previousHash) {
+        atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
     }
+    atomic_store_explicit(
+        &topologySignatures[base + 2u], currentCount, memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &topologySignatures[base + 3u], currentHash, memory_order_relaxed
+    );
 }
 
 kernel void applyCellContactEffects(
@@ -7154,6 +7323,7 @@ kernel void compactVisibleCells(
     device const CellIdentity* cellIdentities [[buffer(5)]],
     device const AgentState* agents [[buffer(6)]],
     device const CellState* cells [[buffer(7)]],
+    device atomic_uint* meshDispatchArguments [[buffer(8)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
@@ -7182,6 +7352,7 @@ kernel void compactVisibleCells(
     if (any(screenUV < -margin) || any(screenUV > 1.0 + margin)) { return; }
 
     uint target = atomic_fetch_add_explicit(&drawArguments[1], 1u, memory_order_relaxed);
+    atomic_fetch_add_explicit(&meshDispatchArguments[0], 1u, memory_order_relaxed);
     if (target < maxCellCount) {
         visibleCellIndices[target] = gid;
     }
@@ -7681,6 +7852,7 @@ struct CellRasterData {
     float tracked;
     float radialCoordinate;
     float edgeExposure;
+    float4 localMembrane;
 };
 
 inline float2 smoothMembranePosition(
@@ -7705,20 +7877,20 @@ inline float2 smoothMembranePosition(
         currentPosition * (2.0 * oneMinusT * t) + curveEnd * (t * t);
 }
 
-vertex CellRasterData cellVertex(
-    device const AgentState* agents [[buffer(0)]],
-    device const uint* agentOccupancy [[buffer(1)]],
-    device const CellState* cells [[buffer(2)]],
-    device const uint* cellOccupancy [[buffer(3)]],
-    device const MembraneVertex* membraneVertices [[buffer(4)]],
-    constant SimulationUniforms& uniforms [[buffer(5)]],
-    device const uint* visibleCellIndices [[buffer(6)]],
-    device const CellIdentity* cellIdentities [[buffer(7)]],
-    device const HeritableProgram* heritablePrograms [[buffer(8)]],
-    device const float4* programInteractions [[buffer(9)]],
-    device const ProgramSlotState* programSlots [[buffer(10)]],
-    uint vertexID [[vertex_id]],
-    uint instanceID [[instance_id]]
+inline CellRasterData makeCellRasterData(
+    device const AgentState* agents,
+    device const uint* agentOccupancy,
+    device const CellState* cells,
+    device const uint* cellOccupancy,
+    device const MembraneVertex* membraneVertices,
+    constant SimulationUniforms& uniforms,
+    device const uint* visibleCellIndices,
+    device const CellIdentity* cellIdentities,
+    device const HeritableProgram* heritablePrograms,
+    device const float4* programInteractions,
+    device const ProgramSlotState* programSlots,
+    uint vertexID,
+    uint instanceID
 ) {
     uint cellIndex = visibleCellIndices[instanceID];
     CellRasterData output = {};
@@ -7832,7 +8004,92 @@ vertex CellRasterData cellVertex(
     output.edgeExposure = triangleVertex == 0u
         ? saturate(cell.tissueGeometry.z)
         : edgeExposure;
+    MembraneVertex localVertex = membraneVertices[
+        cellIndex * membraneVertexCount + physicalEdge
+    ];
+    float localIntegrity = triangleVertex == 0u
+        ? saturate(cell.physiology.w) : saturate(localVertex.mechanics.y);
+    float localPressure = triangleVertex == 0u
+        ? saturate(cell.tissueForce.z * 900.0)
+        : saturate(localVertex.mechanics.z * 120.0);
+    float localStrain = triangleVertex == 0u
+        ? saturate(cell.mechanics.y)
+        : saturate(abs(localVertex.mechanics.w) * 18.0);
+    float paidRepair = saturate(
+        cell.regulation.w * cell.physiology.x *
+        (0.45 + saturate(cell.energetics.y * 2400.0) * 0.55)
+    );
+    output.localMembrane = float4(
+        localIntegrity, localPressure, localStrain, paidRepair
+    );
     return output;
+}
+
+vertex CellRasterData cellVertex(
+    device const AgentState* agents [[buffer(0)]],
+    device const uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const uint* cellOccupancy [[buffer(3)]],
+    device const MembraneVertex* membraneVertices [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device const uint* visibleCellIndices [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    device const HeritableProgram* heritablePrograms [[buffer(8)]],
+    device const float4* programInteractions [[buffer(9)]],
+    device const ProgramSlotState* programSlots [[buffer(10)]],
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]]
+) {
+    return makeCellRasterData(
+        agents, agentOccupancy, cells, cellOccupancy, membraneVertices, uniforms,
+        visibleCellIndices, cellIdentities, heritablePrograms, programInteractions,
+        programSlots, vertexID, instanceID
+    );
+}
+
+using CellContourMesh = metal::mesh<
+    CellRasterData, void, membraneRenderSegmentCount + 1u,
+    membraneRenderSegmentCount, metal::topology::triangle
+>;
+
+[[mesh, max_total_threads_per_threadgroup(64)]]
+void cellContourMesh(
+    CellContourMesh output,
+    device const AgentState* agents [[buffer(0)]],
+    device const uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const uint* cellOccupancy [[buffer(3)]],
+    device const MembraneVertex* membraneVertices [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device const uint* visibleCellIndices [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    device const HeritableProgram* heritablePrograms [[buffer(8)]],
+    device const float4* programInteractions [[buffer(9)]],
+    device const ProgramSlotState* programSlots [[buffer(10)]],
+    uint lane [[thread_index_in_threadgroup]],
+    uint meshIndex [[threadgroup_position_in_grid]]
+) {
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    uint segmentCount = observationZoom >= 6.0
+        ? membraneRenderSegmentCount : membraneRenderSegmentCount / 2u;
+    output.set_primitive_count(segmentCount);
+    if (lane <= segmentCount) {
+        uint sample = lane == 0u ? 0u :
+            (lane - 1u) * (membraneRenderSegmentCount / segmentCount);
+        uint syntheticVertex = lane == 0u ? 0u :
+            (sample == 0u ? 1u : (sample - 1u) * 3u + 2u);
+        output.set_vertex(lane, makeCellRasterData(
+            agents, agentOccupancy, cells, cellOccupancy, membraneVertices, uniforms,
+            visibleCellIndices, cellIdentities, heritablePrograms, programInteractions,
+            programSlots, syntheticVertex, meshIndex
+        ));
+    }
+    if (lane < segmentCount) {
+        output.set_index(lane * 3u, 0u);
+        output.set_index(lane * 3u + 1u, lane + 1u);
+        output.set_index(lane * 3u + 2u, lane + 1u == segmentCount
+            ? 1u : lane + 2u);
+    }
 }
 
 fragment float4 cellFragment(
@@ -7852,8 +8109,15 @@ fragment float4 cellFragment(
     float body = 1.0 - smoothstep(1.0 - aa * 1.8, 1.0, radius);
     if (body <= 0.001) { discard_fragment(); }
 
-    float integrity = saturate(input.physiology.w);
-    float membrane = body * smoothstep(0.72 - integrity * 0.10, 0.98, radius);
+    float integrity = saturate(input.localMembrane.x);
+    float localPressure = saturate(input.localMembrane.y);
+    float localStrain = saturate(input.localMembrane.z);
+    float paidRepair = saturate(input.localMembrane.w);
+    float membraneThickness = clamp(
+        0.10 + integrity * 0.10 + paidRepair * 0.035 - localStrain * 0.025,
+        0.065, 0.22
+    );
+    float membrane = body * smoothstep(1.0 - membraneThickness, 0.985, radius);
     float cytoplasm = body * (1.0 - smoothstep(0.62, 0.94, radius));
     float nucleusRadius = 0.20 + input.signals.x * 0.08;
     float2 nucleusPosition = morphologyAxis * (input.development.z - 0.5) * 0.18;
@@ -7864,6 +8128,15 @@ fragment float4 cellFragment(
         ? normalize(input.tissueGeometry.xy) : morphologyAxis;
     float2 surfaceDirection = length(p) > 0.001 ? normalize(p) : boundaryNormal;
     float exposedArc = membrane * exposure;
+    float localFailure = saturate((1.0 - integrity) * 1.35 + localStrain * 0.28);
+    float membraneContinuity = 1.0 - localFailure * exposure *
+        smoothstep(0.82, 1.0, radius) * 0.82;
+    membrane *= membraneContinuity;
+    exposedArc *= membraneContinuity;
+    float repairFront = membrane * paidRepair * (1.0 - localFailure * 0.55);
+    float pressureFront = membrane * localPressure;
+    float leakage = exposedArc * localFailure *
+        (0.55 + 0.45 * sin(angle * 17.0 + input.dynamics.z * 9.0));
     float autonomySignal = saturate(input.closureSignal);
     float autonomyPulse = 0.88 + 0.12 * sin(
         input.dynamics.z * 2.0 * M_PI_F + angle * 3.0
@@ -7978,6 +8251,12 @@ fragment float4 cellFragment(
             (0.26 + organismDetail * 0.54);
         coarseColor += float3(0.02, 1.0, 0.58) * tractionTrack *
             (0.42 + organismDetail * 0.52);
+        coarseColor += float3(0.08, 1.0, 0.62) * repairFront *
+            (0.28 + organismDetail * 0.34);
+        coarseColor += float3(1.0, 0.30, 0.015) * pressureFront *
+            (0.38 + organismDetail * 0.32);
+        coarseColor += float3(1.0, 0.065, 0.018) * leakage *
+            (0.72 + organismDetail * 0.42);
         coarseColor += float3(1.0, 0.08, 0.015) * morphologyExposedArc * contactDamage * 1.16;
         coarseColor += float3(1.0, 0.045, 0.01) * morphologyExposedArc * input.construction.x * 0.94;
         coarseColor += float3(0.08, 0.92, 0.62) * morphologyExposedArc * input.construction.y * 0.72;
@@ -8112,6 +8391,9 @@ fragment float4 cellFragment(
     color *= 1.0 - apoptosis * (0.46 + 0.28 * mitochondriaPattern);
     color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
     color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
+    color += float3(0.08, 1.0, 0.62) * repairFront * 0.62;
+    color += float3(1.0, 0.30, 0.015) * pressureFront * 0.76;
+    color += float3(1.0, 0.065, 0.018) * leakage * 1.18;
     color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.82;
     color += float3(0.02, 0.94, 0.78) * exposedArc * (0.12 + exposure * 0.22);
     color += float3(1.0, 0.26, 0.015) * membrane * barrierCompression *

@@ -24,18 +24,8 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "6EDD48C6583DC45063B5D51B8F1EAF8FE71DA9FCD3427030A2CFD5628D983E01",
-        "name": "cellFragment",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "E1A912178400E07E730DC7717E14669CE74DB07E16F46A7189C081421BF75A9D",
-        "name": "cellVertex",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "D5E47953015F6D9D65623FF7722083C2594FDC49F31EC62B7B64E10545BA0D52",
-        "name": "molecularSurfaceFragment",
+        "label": "DA92E391BAA599AB3DDF12DB319CEF2733BC642323FFF3663A098495F13A155E",
+        "name": "cellContourMesh",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -44,13 +34,23 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "1E0E796B8586C9E1AA8B11ADA44CEA10F7DDB1389CCA64785699746A57E395A7",
+        "label": "D5E47953015F6D9D65623FF7722083C2594FDC49F31EC62B7B64E10545BA0D52",
+        "name": "molecularSurfaceFragment",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "4C941733E62D1A22DB62A6CBCE0757C1BF990E33CA9D5C66F1F8C5EF55B9FADF",
         "name": "compactVisibleCells",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "C1C3A6758922F7B2229B7D92A97548E834B9F8C4F2DE1DD7B25A2040F0DF6F46",
-        "name": "auditContactMomentum",
+        "label": "E00BA489CD951F20EC4DB104CC63FF57F56EEF8D1D8EBFE162BAF113159E328B",
+        "name": "accumulateSimulationInvariants",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "E4DB218B804F0E606F216329BAB71792EA7A3CF633D91338D146480E61A10166",
+        "name": "clearInvariantScratch",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -59,57 +59,27 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "4C364E7E35A3323045A9C37B5489116913F46BF6363FAC4EE93A3D1E4D30CC40",
+        "label": "D254ED28260A0E1E9586C4837751AA1A105A5AE24505E31F2B241D086F92839B",
+        "name": "finalizeCellTopology",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "E7E28FB823AB873B46FBE025DBA848B43403AD0FD712C958A2DD308CACD9746B",
         "name": "reassignCellComponents",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "480FA14864105736164BCB26B1E2E3567B7ABD95CD4074AB187D35B5E46D5EA6",
-        "name": "evolveQuantumField",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "5529D6CA379DE34A5EFDD7588C312291A3FC787A5EE88BB7C2A676EC55AC80A8",
+        "label": "4DAB628D894ACDF8C0954E77294873933088CD22122A6978C0C07726E2A81344",
         "name": "assignCellComponentOwners",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "5214A485B2B03BB5EDEEEBDB005F856E78A2981324B9482B3112058AB6EA1809",
-        "name": "collectCellObservations",
+        "label": "C1C3A6758922F7B2229B7D92A97548E834B9F8C4F2DE1DD7B25A2040F0DF6F46",
+        "name": "auditContactMomentum",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "CBA33F5498873DD011BEFE88D467993A0E08C438EE1076C70292C574E56C7ECF",
-        "name": "compactActiveCellsOrdered",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "40DD7A611B7AD7E4BE8C1D33EEA0FA672CB32B3AC502C5580A251E7BCFCA8E6A",
-        "name": "selectPrimaryCellComponents",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "54D9CDAACA735274415DF5AE22E4EABC846A5D7FA045B19D880B57824B435A47",
-        "name": "cellularSurfaceFragment",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "EF52350F15C5A06301A3AF4506400050B57F538FE75B04483A58D44BFF4F4261",
-        "name": "initializeInvariantAudit",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "990892506D9812D3F116BB7162C409A121B7B45317FD2FBD7B7800A4FBA47AE3",
-        "name": "compressCellComponents",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "134CA7636D57706780EA06A933C751AC6A2FC7448993207EAEE857776F74A3D8",
-        "name": "initializeCellComponents",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "6C65DF475AF8C768ECE6DAA37200D1941CAC09C48EFD47C4540FC902C6B51B10",
+        "label": "FAC7BB4FB269E39CC62EEE38B921AFBFB00D69A9A19630358011625584FC1BE7",
         "name": "unionCellComponents",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
@@ -124,23 +94,58 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
+        "label": "416AD2075704D822FBEC8EF98AF568785E9407BC674625F84D9F5E52118E83D3",
+        "name": "initializeAgents",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "8795ECCEE0B65C0141DB85152ECE77B3A0DB1C2E4830A56CA3B0DFBC990475F1",
+        "name": "selectPrimaryCellComponents",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "0181B9D3B3C72BA3C9C19E27A8C665A97C725E5FBFA372B67D6F2A93307E81CF",
+        "name": "cellVertex",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "F89692B60DBE82ABB223B3EECA432A36777275EDFB47EE0D7FAA8D5C818D0815",
+        "name": "detectCellTopologyChanges",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "75859B0BE97B24D94F43B045C1472F87B770CDE52709DE039698EB08F7C0BC00",
+        "name": "damageWorld",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "06ABAFF8A88847B92BB223152505805CF9AF964A28A9C6D25C2C2833A344D8C0",
+        "name": "clearActiveCellContactEffects",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
         "label": "652E83324F2024B9B7E7AD2B966F17AE3E1EB0720BCB3C54175B8EAB41A3E6AA",
         "name": "clearCellSpatialHash",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "E4DB218B804F0E606F216329BAB71792EA7A3CF633D91338D146480E61A10166",
-        "name": "clearInvariantScratch",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "996C96262C835C58631999254A76BCAE4EE8B1663225DBF57D6D5DC7572C2F80",
+        "label": "28C20988C5F819CC8432F2593715A233BA846559129F8E0C280D5B1434DF5FAB",
         "name": "resolveMembraneContacts",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
         "label": "A98D5704F2F6C51891EFA9EB0FC3A0D8B2236F0CB8807330543E0915268AFAD6",
         "name": "evolveOrganismCells",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "5214A485B2B03BB5EDEEEBDB005F856E78A2981324B9482B3112058AB6EA1809",
+        "name": "collectCellObservations",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "CBA33F5498873DD011BEFE88D467993A0E08C438EE1076C70292C574E56C7ECF",
+        "name": "compactActiveCellsOrdered",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -159,8 +164,23 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
+        "label": "36AEE427EB878BCC99C6CF1D55D43C639D22B9263976A52507048D6FBFF05AA0",
+        "name": "accumulateCellComponents",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "7AD41876924637890FBEC850E21138F6DC397ADBB4F8C1EF10CF178C165659D7",
+        "name": "prepareMembraneContactDispatch",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
         "label": "935E84BDED9917155ECF6390FC025F947872A45C08C3C53BC01A1D1E3995DC55",
         "name": "waveSurfaceFragment",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "E93A9E12E1751A92B7E56F7E926AC20A72F1B57D99BF5CFCB3124961A3662602",
+        "name": "resetMembraneContactWork",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -184,6 +204,11 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
+        "label": "188441D035AD3B2DAF5C3FC99B0AA8F9C38B530D5AF116F0E9E380E28A54C027",
+        "name": "buildCellComponentLists",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
         "label": "BFB743093B2C7CF7B27A39A40303532A2C43337ABB471C569E3848954B793F69",
         "name": "resetActiveComponentDispatch",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
@@ -196,11 +221,6 @@
       {
         "label": "FA5C2E71AEB2F13099B9DFD5F2BFBC3B6F0E81CB17B6F7C7ADE071E1AB16B7C3",
         "name": "nucleateAutogenicFounder",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "B04CC82C6681502B5E75AB09F6088A10DBF678404FBCE6714D9DEA335585ACEC",
-        "name": "buildCellComponentLists",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -219,13 +239,13 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "3AA20CA0835C7AED70FB4C1D28B6EC499EEEEE05A0BBE997F00D26D8A04A40C6",
-        "name": "clearActiveCellContactEffects",
+        "label": "24E8CA9FF44199F230FE6CADDD1B2E5ADA88D7111252F184000B9F6473EDC04A",
+        "name": "measureWorld",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "24E8CA9FF44199F230FE6CADDD1B2E5ADA88D7111252F184000B9F6473EDC04A",
-        "name": "measureWorld",
+        "label": "A6F240FDBC4990CC2EF5DC78674F4F562435CCCC5860ABB72FF913A25CEAE3D1",
+        "name": "compressCellComponents",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -259,13 +279,23 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "E00BA489CD951F20EC4DB104CC63FF57F56EEF8D1D8EBFE162BAF113159E328B",
-        "name": "accumulateSimulationInvariants",
+        "label": "54D9CDAACA735274415DF5AE22E4EABC846A5D7FA045B19D880B57824B435A47",
+        "name": "cellularSurfaceFragment",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "7BCED6BBC325FF0825D6DF65C478D84F6CC367E25FD654FB6FA54A192FE26680",
-        "name": "accumulateCellComponents",
+        "label": "EF52350F15C5A06301A3AF4506400050B57F538FE75B04483A58D44BFF4F4261",
+        "name": "initializeInvariantAudit",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "A3ECF5203B7DA96E29CE269474B987B10E4819487DF0A18BEE5B1B9188EAC27D",
+        "name": "buildMembraneContactPairs",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "8DD4DFF1C1D98D5EFB83B727CB3BCE75150FBC24C246A128DF2844EFB88780B5",
+        "name": "cellFragment",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -304,8 +334,8 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "75859B0BE97B24D94F43B045C1472F87B770CDE52709DE039698EB08F7C0BC00",
-        "name": "damageWorld",
+        "label": "91FFD31EDD3374444D70DB5D2082151961BD4CB81A6584AC82455D0C249FAFA5",
+        "name": "initializeCellComponents",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -319,8 +349,8 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "416AD2075704D822FBEC8EF98AF568785E9407BC674625F84D9F5E52118E83D3",
-        "name": "initializeAgents",
+        "label": "480FA14864105736164BCB26B1E2E3567B7ABD95CD4074AB187D35B5E46D5EA6",
+        "name": "evolveQuantumField",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       }
     ]
@@ -560,7 +590,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:3AA20CA0835C7AED70FB4C1D28B6EC499EEEEE05A0BBE997F00D26D8A04A40C6",
+        "compute_function_descriptor": "fnd:06ABAFF8A88847B92BB223152505805CF9AF964A28A9C6D25C2C2833A344D8C0",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -569,6 +599,38 @@
       },
       {
         "compute_function_descriptor": "fnd:CFE9FB5F1A798994DEBF90BD0039489F24B5488044690470DAB3F7F2C1D79B7D",
+        "required_threads_per_threadgroup": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "compute_function_descriptor": "fnd:E93A9E12E1751A92B7E56F7E926AC20A72F1B57D99BF5CFCB3124961A3662602",
+        "required_threads_per_threadgroup": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "compute_function_descriptor": "fnd:A3ECF5203B7DA96E29CE269474B987B10E4819487DF0A18BEE5B1B9188EAC27D",
+        "required_threads_per_threadgroup": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "compute_function_descriptor": "fnd:7AD41876924637890FBEC850E21138F6DC397ADBB4F8C1EF10CF178C165659D7",
+        "required_threads_per_threadgroup": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "compute_function_descriptor": "fnd:F89692B60DBE82ABB223B3EECA432A36777275EDFB47EE0D7FAA8D5C818D0815",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -592,7 +654,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:996C96262C835C58631999254A76BCAE4EE8B1663225DBF57D6D5DC7572C2F80",
+        "compute_function_descriptor": "fnd:28C20988C5F819CC8432F2593715A233BA846559129F8E0C280D5B1434DF5FAB",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -616,7 +678,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:134CA7636D57706780EA06A933C751AC6A2FC7448993207EAEE857776F74A3D8",
+        "compute_function_descriptor": "fnd:91FFD31EDD3374444D70DB5D2082151961BD4CB81A6584AC82455D0C249FAFA5",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -624,7 +686,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:6C65DF475AF8C768ECE6DAA37200D1941CAC09C48EFD47C4540FC902C6B51B10",
+        "compute_function_descriptor": "fnd:FAC7BB4FB269E39CC62EEE38B921AFBFB00D69A9A19630358011625584FC1BE7",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -632,7 +694,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:990892506D9812D3F116BB7162C409A121B7B45317FD2FBD7B7800A4FBA47AE3",
+        "compute_function_descriptor": "fnd:A6F240FDBC4990CC2EF5DC78674F4F562435CCCC5860ABB72FF913A25CEAE3D1",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -640,7 +702,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:B04CC82C6681502B5E75AB09F6088A10DBF678404FBCE6714D9DEA335585ACEC",
+        "compute_function_descriptor": "fnd:188441D035AD3B2DAF5C3FC99B0AA8F9C38B530D5AF116F0E9E380E28A54C027",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -648,7 +710,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:7BCED6BBC325FF0825D6DF65C478D84F6CC367E25FD654FB6FA54A192FE26680",
+        "compute_function_descriptor": "fnd:36AEE427EB878BCC99C6CF1D55D43C639D22B9263976A52507048D6FBFF05AA0",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -656,7 +718,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:40DD7A611B7AD7E4BE8C1D33EEA0FA672CB32B3AC502C5580A251E7BCFCA8E6A",
+        "compute_function_descriptor": "fnd:8795ECCEE0B65C0141DB85152ECE77B3A0DB1C2E4830A56CA3B0DFBC990475F1",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -664,7 +726,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:5529D6CA379DE34A5EFDD7588C312291A3FC787A5EE88BB7C2A676EC55AC80A8",
+        "compute_function_descriptor": "fnd:4DAB628D894ACDF8C0954E77294873933088CD22122A6978C0C07726E2A81344",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -672,7 +734,15 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:4C364E7E35A3323045A9C37B5489116913F46BF6363FAC4EE93A3D1E4D30CC40",
+        "compute_function_descriptor": "fnd:E7E28FB823AB873B46FBE025DBA848B43403AD0FD712C958A2DD308CACD9746B",
+        "required_threads_per_threadgroup": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "compute_function_descriptor": "fnd:D254ED28260A0E1E9586C4837751AA1A105A5AE24505E31F2B241D086F92839B",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -728,7 +798,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:1E0E796B8586C9E1AA8B11ADA44CEA10F7DDB1389CCA64785699746A57E395A7",
+        "compute_function_descriptor": "fnd:4C941733E62D1A22DB62A6CBCE0757C1BF990E33CA9D5C66F1F8C5EF55B9FADF",
         "required_threads_per_threadgroup": [
           0,
           0,
@@ -791,8 +861,8 @@
         ]
       },
       {
-        "vertex_function_descriptor": "fnd:E1A912178400E07E730DC7717E14669CE74DB07E16F46A7189C081421BF75A9D",
-        "fragment_function_descriptor": "fnd:6EDD48C6583DC45063B5D51B8F1EAF8FE71DA9FCD3427030A2CFD5628D983E01",
+        "vertex_function_descriptor": "fnd:0181B9D3B3C72BA3C9C19E27A8C665A97C725E5FBFA372B67D6F2A93307E81CF",
+        "fragment_function_descriptor": "fnd:8DD4DFF1C1D98D5EFB83B727CB3BCE75150FBC24C246A128DF2844EFB88780B5",
         "color_attachments": [
           {
             "pixel_format": "RG11B10Float",
@@ -818,6 +888,28 @@
         "color_attachments": [
           {
             "pixel_format": "BGRA8Unorm_sRGB"
+          }
+        ]
+      }
+    ],
+    "mesh_render_pipeline_descriptors": [
+      {
+        "mesh_function_descriptor": "fnd:DA92E391BAA599AB3DDF12DB319CEF2733BC642323FFF3663A098495F13A155E",
+        "fragment_function_descriptor": "fnd:8DD4DFF1C1D98D5EFB83B727CB3BCE75150FBC24C246A128DF2844EFB88780B5",
+        "mesh_threadgroup_size_is_multiple_of_thread_execution_width": true,
+        "max_total_threads_per_mesh_threadgroup": 64,
+        "required_threads_per_mesh_threadgroup": [
+          64,
+          1,
+          1
+        ],
+        "color_attachments": [
+          {
+            "pixel_format": "RG11B10Float",
+            "blending_state": "Enabled",
+            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
+            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
+            "source_rgb_blend_factor": "SourceAlpha"
           }
         ]
       }

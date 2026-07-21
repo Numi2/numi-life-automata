@@ -449,7 +449,8 @@ extension EvolutionRenderer {
             (1 << 3, "program_reference_count"),
             (1 << 4, "orphaned_junction"),
             (1 << 5, "invalid_membrane"),
-            (1 << 6, "disconnected_ownership")
+            (1 << 6, "disconnected_ownership"),
+            (1 << 7, "contact_pair_queue_overflow")
         ]
         return ExperimentInvariantReport(
             flags: flags,
@@ -1613,6 +1614,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let membraneVertexCount = 12
     private static let membraneRenderSubdivision = 4
     private static let cellSpatialHashBucketCount = 16_384
+    private static let membraneContactPairCapacity = 524_288
+    private static let contactWorkStateCount = 4
     private static let cellJunctionCapacity = 32_768
     private static let energyExchangeChannelCount = 8
     private static let energyAuditChannelCount = 10
@@ -1672,6 +1675,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let clearCellSpatialHashPipeline: MTLComputePipelineState
     private let clearActiveCellContactEffectsPipeline: MTLComputePipelineState
     private let buildCellSpatialHashPipeline: MTLComputePipelineState
+    private let resetMembraneContactWorkPipeline: MTLComputePipelineState
+    private let buildMembraneContactPairsPipeline: MTLComputePipelineState
+    private let prepareMembraneContactDispatchPipeline: MTLComputePipelineState
+    private let detectCellTopologyChangesPipeline: MTLComputePipelineState
     private let clearOwnerCellListsPipeline: MTLComputePipelineState
     private let buildOwnerCellListsPipeline: MTLComputePipelineState
     private let resolveCellContactsPipeline: MTLComputePipelineState
@@ -1685,6 +1692,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let selectPrimaryCellComponentsPipeline: MTLComputePipelineState
     private let assignCellComponentOwnersPipeline: MTLComputePipelineState
     private let reassignCellComponentsPipeline: MTLComputePipelineState
+    private let finalizeCellTopologyPipeline: MTLComputePipelineState
     private let divideAndReduceCellPipeline: MTLComputePipelineState
     private let initializeInvariantPipeline: MTLComputePipelineState
     private let clearInvariantScratchPipeline: MTLComputePipelineState
@@ -1694,6 +1702,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let compactCellRenderPipeline: MTLComputePipelineState
     private let scaleSurfacePipelines: [MTLRenderPipelineState]
     private let cellRenderPipeline: MTLRenderPipelineState
+    private let cellMeshRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
     private let spinorDisplayPipeline: MTLRenderPipelineState
@@ -1753,6 +1762,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let membraneVertices: MTLBuffer
     private let cellSpatialHashHeads: MTLBuffer
     private let cellSpatialHashNext: MTLBuffer
+    private let membraneContactPairs: MTLBuffer
+    private let contactWorkState: MTLBuffer
+    private let cellTopologySignatures: MTLBuffer
+    private let contactPairDispatchArguments: MTLBuffer
     private let cellContactEffects: MTLBuffer
     private let membraneContactEffects: MTLBuffer
     private let cellJunctions: MTLBuffer
@@ -1762,6 +1775,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let invariantScratch: MTLBuffer
     private let visibleCellIndices: MTLBuffer
     private let cellDrawArguments: MTLBuffer
+    private let cellMeshDrawArguments: MTLBuffer
     private let activeComponentIndices: MTLBuffer
     private let activeComponentCount: MTLBuffer
     private let activeComponentDispatchArguments: MTLBuffer
@@ -1904,6 +1918,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             named: "clearActiveCellContactEffects"
         )
         buildCellSpatialHashPipeline = try pipelineFactory.makeComputePipeline(named: "buildCellSpatialHash")
+        resetMembraneContactWorkPipeline = try pipelineFactory.makeComputePipeline(
+            named: "resetMembraneContactWork"
+        )
+        buildMembraneContactPairsPipeline = try pipelineFactory.makeComputePipeline(
+            named: "buildMembraneContactPairs"
+        )
+        prepareMembraneContactDispatchPipeline = try pipelineFactory.makeComputePipeline(
+            named: "prepareMembraneContactDispatch"
+        )
+        detectCellTopologyChangesPipeline = try pipelineFactory.makeComputePipeline(
+            named: "detectCellTopologyChanges"
+        )
         clearOwnerCellListsPipeline = try pipelineFactory.makeComputePipeline(named: "clearOwnerCellLists")
         buildOwnerCellListsPipeline = try pipelineFactory.makeComputePipeline(named: "buildOwnerCellLists")
         resolveCellContactsPipeline = try pipelineFactory.makeComputePipeline(named: "resolveMembraneContacts")
@@ -1917,6 +1943,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         selectPrimaryCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "selectPrimaryCellComponents")
         assignCellComponentOwnersPipeline = try pipelineFactory.makeComputePipeline(named: "assignCellComponentOwners")
         reassignCellComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "reassignCellComponents")
+        finalizeCellTopologyPipeline = try pipelineFactory.makeComputePipeline(
+            named: "finalizeCellTopology"
+        )
         divideAndReduceCellPipeline = try pipelineFactory.makeComputePipeline(named: "divideAndReduceOrganismCells")
         initializeInvariantPipeline = try pipelineFactory.makeComputePipeline(named: "initializeInvariantAudit")
         clearInvariantScratchPipeline = try pipelineFactory.makeComputePipeline(named: "clearInvariantScratch")
@@ -1944,6 +1973,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         cellRenderPipeline = try pipelineFactory.makeRenderPipeline(
             label: "Persistent multicellular renderer",
             vertex: "cellVertex",
+            fragment: "cellFragment",
+            pixelFormat: .rg11b10Float,
+            blending: true
+        )
+        cellMeshRenderPipeline = try pipelineFactory.makeMeshRenderPipeline(
+            label: "M4 adaptive membrane contour renderer",
+            mesh: "cellContourMesh",
             fragment: "cellFragment",
             pixelFormat: .rg11b10Float,
             blending: true
@@ -2033,6 +2069,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             MemoryLayout<MembraneVertex>.stride
         let cellSpatialHashHeadLength = Self.cellSpatialHashBucketCount * MemoryLayout<UInt32>.stride
         let cellSpatialHashNextLength = Self.maxCellCount * MemoryLayout<UInt32>.stride
+        let membraneContactPairLength = Self.membraneContactPairCapacity *
+            MemoryLayout<SIMD2<UInt32>>.stride
+        let contactWorkStateLength = Self.contactWorkStateCount * MemoryLayout<UInt32>.stride
+        let cellTopologySignatureLength = Self.maxCellCount * 4 * MemoryLayout<UInt32>.stride
+        let contactPairDispatchLength = 3 * MemoryLayout<UInt32>.stride
         let cellContactEffectLength = Self.maxCellCount * 4 * MemoryLayout<Int32>.stride
         let membraneContactEffectLength = Self.maxCellCount * Self.membraneVertexCount * 3 *
             MemoryLayout<Int32>.stride
@@ -2044,6 +2085,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let invariantScratchLength = Self.invariantScratchCount * MemoryLayout<Int32>.stride
         let visibleCellIndexLength = Self.maxCellCount * MemoryLayout<UInt32>.stride
         let drawArgumentLength = 4 * MemoryLayout<UInt32>.stride
+        let meshDrawArgumentLength = 3 * MemoryLayout<UInt32>.stride
         let activeComponentIndexLength = Self.maxAgentCount * MemoryLayout<UInt32>.stride
         let activeComponentCountLength = MemoryLayout<UInt32>.stride
         let activeComponentDispatchLength = 3 * MemoryLayout<UInt32>.stride
@@ -2117,6 +2159,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               let cellSpatialHashNext = device.makeBuffer(
                 length: cellSpatialHashNextLength, options: .storageModePrivate
               ),
+              let membraneContactPairs = device.makeBuffer(
+                length: membraneContactPairLength, options: .storageModePrivate
+              ),
+              let contactWorkState = device.makeBuffer(
+                length: contactWorkStateLength, options: .storageModePrivate
+              ),
+              let cellTopologySignatures = device.makeBuffer(
+                length: cellTopologySignatureLength, options: .storageModePrivate
+              ),
+              let contactPairDispatchArguments = device.makeBuffer(
+                length: contactPairDispatchLength, options: .storageModePrivate
+              ),
               let cellContactEffects = device.makeBuffer(
                 length: cellContactEffectLength, options: .storageModePrivate
               ),
@@ -2144,6 +2198,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               ),
               let cellDrawArguments = device.makeBuffer(
                 length: drawArgumentLength,
+                options: .storageModeShared
+              ),
+              let cellMeshDrawArguments = device.makeBuffer(
+                length: meshDrawArgumentLength,
                 options: .storageModeShared
               ),
               let activeComponentIndices = device.makeBuffer(
@@ -2207,6 +2265,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         membraneVertices.label = "Deformable cell membrane vertices"
         cellSpatialHashHeads.label = "Membrane-contact spatial hash heads"
         cellSpatialHashNext.label = "Membrane-contact spatial hash links"
+        membraneContactPairs.label = "Compacted membrane-contact candidate pairs"
+        contactWorkState.label = "Contact count, overflow, and topology state"
+        cellTopologySignatures.label = "Current and previous cell connectivity signatures"
+        contactPairDispatchArguments.label = "Indirect membrane-contact dispatch arguments"
         cellContactEffects.label = "Accumulated cell contact effects"
         membraneContactEffects.label = "Equal-and-opposite membrane vertex forces"
         cellJunctions.label = "Persistent membrane junction hash"
@@ -2216,6 +2278,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         invariantScratch.label = "Invariant reduction scratch"
         visibleCellIndices.label = "GPU-compacted visible cell indices"
         cellDrawArguments.label = "Indirect living-cell draw arguments"
+        cellMeshDrawArguments.label = "Indirect M4 cell-mesh dispatch arguments"
         activeComponentIndices.label = "Compacted active component handles"
         activeComponentCount.label = "Active component count"
         activeComponentDispatchArguments.label = "Indirect active component dispatch arguments"
@@ -2229,6 +2292,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         drawArguments[1] = 0
         drawArguments[2] = 0
         drawArguments[3] = 0
+        let meshDrawArguments = cellMeshDrawArguments.contents().bindMemory(
+            to: UInt32.self,
+            capacity: 3
+        )
+        meshDrawArguments[0] = 0
+        meshDrawArguments[1] = 1
+        meshDrawArguments[2] = 1
         identityCounters.label = "Permanent identity and innovation counters"
         lineageEvents.label = "GPU lineage event ring"
         mechanicalForcing.label = "Cell contractile forcing"
@@ -2261,6 +2331,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.membraneVertices = membraneVertices
         self.cellSpatialHashHeads = cellSpatialHashHeads
         self.cellSpatialHashNext = cellSpatialHashNext
+        self.membraneContactPairs = membraneContactPairs
+        self.contactWorkState = contactWorkState
+        self.cellTopologySignatures = cellTopologySignatures
+        self.contactPairDispatchArguments = contactPairDispatchArguments
         self.cellContactEffects = cellContactEffects
         self.membraneContactEffects = membraneContactEffects
         self.cellJunctions = cellJunctions
@@ -2270,6 +2344,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.invariantScratch = invariantScratch
         self.visibleCellIndices = visibleCellIndices
         self.cellDrawArguments = cellDrawArguments
+        self.cellMeshDrawArguments = cellMeshDrawArguments
         self.activeComponentIndices = activeComponentIndices
         self.activeComponentCount = activeComponentCount
         self.activeComponentDispatchArguments = activeComponentDispatchArguments
@@ -2737,7 +2812,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             ownerPrimaryRoots, cellAggregates, heritablePrograms, programSlots,
             developmentalGenomes, regulatoryNodes, regulatoryEdges, regulatoryStates,
             resonanceGenomes, membraneVertices, cellSpatialHashHeads, cellSpatialHashNext,
-            cellContactEffects, membraneContactEffects, cellJunctions, cellEnergyExchange,
+            contactWorkState, cellTopologySignatures, cellContactEffects, membraneContactEffects,
+            cellJunctions, cellEnergyExchange,
             energyAudit, invariantState, invariantScratch, identityCounters, lineageEvents,
             mechanicalForcing
         ]
@@ -2758,17 +2834,22 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             evolveCellPipeline,
             evolveMembranePipeline, clearCellSpatialHashPipeline,
             clearActiveCellContactEffectsPipeline,
-            buildCellSpatialHashPipeline, clearOwnerCellListsPipeline,
+            buildCellSpatialHashPipeline, resetMembraneContactWorkPipeline,
+            buildMembraneContactPairsPipeline, prepareMembraneContactDispatchPipeline,
+            detectCellTopologyChangesPipeline,
+            clearOwnerCellListsPipeline,
             buildOwnerCellListsPipeline, resolveCellContactsPipeline,
             applyCellContactEffectsPipeline, measureCellMembraneExposurePipeline,
             initializeCellComponentsPipeline, unionCellComponentsPipeline,
             compressCellComponentsPipeline, buildCellComponentListsPipeline,
             accumulateCellComponentsPipeline, selectPrimaryCellComponentsPipeline,
             assignCellComponentOwnersPipeline, reassignCellComponentsPipeline,
+            finalizeCellTopologyPipeline,
             divideAndReduceCellPipeline, initializeInvariantPipeline,
             clearInvariantScratchPipeline, auditContactMomentumPipeline,
             accumulateSimulationInvariantsPipeline, finalizeSimulationInvariantsPipeline,
-            compactCellRenderPipeline, cellRenderPipeline, bloomPrefilterPipeline,
+            compactCellRenderPipeline, cellRenderPipeline, cellMeshRenderPipeline,
+            bloomPrefilterPipeline,
             compositePipeline, spinorDisplayPipeline
         ]
         let textures: [any MTLAllocation] = [
@@ -2781,8 +2862,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         var buffers = checkpointBufferSources()
         buffers.append(contentsOf: [
             reactionAgentState, reactionCellState, visibleCellIndices, cellDrawArguments,
+            cellMeshDrawArguments,
             activeComponentIndices, activeComponentCount, activeComponentDispatchArguments,
-            activeCellIndices, activeCellCount, activeCellDispatchArguments
+            activeCellIndices, activeCellCount, activeCellDispatchArguments,
+            membraneContactPairs, contactPairDispatchArguments
         ])
         buffers.append(contentsOf: agentObservationBuffers)
         buffers.append(contentsOf: cellObservationBuffers)
@@ -3070,6 +3153,21 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             blitEncoder.fill(
                 buffer: energyAudit,
                 range: 0..<energyAudit.length,
+                value: 0
+            )
+            blitEncoder.fill(
+                buffer: contactWorkState,
+                range: 0..<contactWorkState.length,
+                value: 0
+            )
+            blitEncoder.fill(
+                buffer: cellTopologySignatures,
+                range: 0..<cellTopologySignatures.length,
+                value: 0
+            )
+            blitEncoder.fill(
+                buffer: contactPairDispatchArguments,
+                range: 0..<contactPairDispatchArguments.length,
                 value: 0
             )
             blitEncoder.endEncoding()
@@ -3439,14 +3537,51 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         encodeCellNeighborhoodIndex(encoder, uniforms: &uniforms)
 
+        encoder.setComputePipelineState(resetMembraneContactWorkPipeline)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 0)
+        encoder.setBuffer(activeCellCount, offset: 0, index: 1)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 2)
+        encoder.dispatchThreads(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+        encoder.memoryBarrier(resources: [contactWorkState])
+
+        encoder.setComputePipelineState(buildMembraneContactPairsPipeline)
+        encoder.setBuffer(agentState, offset: 0, index: 0)
+        encoder.setBuffer(agentOccupancy, offset: 0, index: 1)
+        encoder.setBuffer(cellState, offset: 0, index: 2)
+        encoder.setBuffer(cellOccupancy, offset: 0, index: 3)
+        encoder.setBuffer(cellSpatialHashHeads, offset: 0, index: 4)
+        encoder.setBuffer(cellSpatialHashNext, offset: 0, index: 5)
+        encoder.setBuffer(cellIdentities, offset: 0, index: 6)
+        encoder.setBuffer(membraneContactPairs, offset: 0, index: 7)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 8)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 9)
+        dispatchCells(encoder, pipeline: buildMembraneContactPairsPipeline)
+        encoder.memoryBarrier(resources: [membraneContactPairs, contactWorkState])
+
+        encoder.setComputePipelineState(prepareMembraneContactDispatchPipeline)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 0)
+        encoder.setBuffer(contactPairDispatchArguments, offset: 0, index: 1)
+        encoder.setBuffer(invariantState, offset: 0, index: 2)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 3)
+        encoder.dispatchThreads(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+        encoder.memoryBarrier(resources: [
+            contactWorkState, contactPairDispatchArguments, invariantState
+        ])
+
         encoder.setComputePipelineState(resolveCellContactsPipeline)
         encoder.setBuffer(agentState, offset: 0, index: 0)
         encoder.setBuffer(agentOccupancy, offset: 0, index: 1)
         encoder.setBuffer(cellState, offset: 0, index: 2)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 3)
         encoder.setBuffer(membraneVertices, offset: 0, index: 4)
-        encoder.setBuffer(cellSpatialHashHeads, offset: 0, index: 5)
-        encoder.setBuffer(cellSpatialHashNext, offset: 0, index: 6)
+        encoder.setBuffer(membraneContactPairs, offset: 0, index: 5)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 6)
         encoder.setBuffer(cellContactEffects, offset: 0, index: 7)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 8)
         encoder.setBuffer(cellIdentities, offset: 0, index: 9)
@@ -3456,11 +3591,22 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(programSlots, offset: 0, index: 13)
         encoder.setBuffer(energyAudit, offset: 0, index: 14)
         encoder.setBuffer(identityCounters, offset: 0, index: 15)
-        dispatchCells(encoder, pipeline: resolveCellContactsPipeline)
+        encoder.setBuffer(cellTopologySignatures, offset: 0, index: 16)
+        encoder.dispatchThreadgroups(
+            indirectBuffer: contactPairDispatchArguments,
+            indirectBufferOffset: 0,
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+        )
         encoder.memoryBarrier(resources: [
             cellContactEffects, membraneContactEffects, cellJunctions, energyAudit,
-            identityCounters
+            identityCounters, contactWorkState, cellTopologySignatures
         ])
+
+        encoder.setComputePipelineState(detectCellTopologyChangesPipeline)
+        encoder.setBuffer(cellTopologySignatures, offset: 0, index: 0)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 1)
+        dispatchCells(encoder, pipeline: detectCellTopologyChangesPipeline)
+        encoder.memoryBarrier(resources: [cellTopologySignatures, contactWorkState])
 
         if auditInvariants {
             encoder.setComputePipelineState(auditContactMomentumPipeline)
@@ -3633,6 +3779,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setComputePipelineState(clearActiveCellContactEffectsPipeline)
         encoder.setBuffer(cellContactEffects, offset: 0, index: 0)
         encoder.setBuffer(membraneContactEffects, offset: 0, index: 1)
+        encoder.setBuffer(cellTopologySignatures, offset: 0, index: 2)
         dispatchCells(encoder, pipeline: clearActiveCellContactEffectsPipeline)
 
         encoder.setComputePipelineState(clearOwnerCellListsPipeline)
@@ -3641,7 +3788,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(activeComponentCount, offset: 0, index: 2)
         dispatchActiveComponents(encoder, pipeline: clearOwnerCellListsPipeline)
         encoder.memoryBarrier(resources: [
-            cellContactEffects, membraneContactEffects, ownerCellHeads
+            cellContactEffects, membraneContactEffects, cellTopologySignatures, ownerCellHeads
         ])
 
         encoder.setComputePipelineState(buildCellSpatialHashPipeline)
@@ -3665,19 +3812,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         _ encoder: Metal4ComputeCommandEncoderAdapter,
         uniforms: inout SimulationUniforms
     ) {
-        encoder.fill(buffer: cellComponentParents, value: 0xff)
-        encoder.fill(buffer: cellComponentCounts, value: 0)
-        encoder.fill(buffer: cellComponentAccumulation, value: 0)
-        encoder.fill(buffer: cellComponentOwners, value: 0xff)
-        encoder.fill(buffer: ownerPrimaryRoots, value: 0xff)
-        encoder.fill(buffer: cellComponentPrograms, value: 0)
-        encoder.fill(buffer: componentCellHeads, value: 0xff)
-        encoder.fill(buffer: componentCellNext, value: 0xff)
-        encoder.memoryBarrier(resources: [
-            cellComponentParents, cellComponentCounts, cellComponentAccumulation,
-            cellComponentOwners, ownerPrimaryRoots, cellComponentPrograms,
-            componentCellHeads, componentCellNext
-        ])
         encoder.setComputePipelineState(initializeCellComponentsPipeline)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 0)
         encoder.setBuffer(cellIdentities, offset: 0, index: 1)
@@ -3689,6 +3823,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellComponentPrograms, offset: 0, index: 7)
         encoder.setBuffer(componentCellHeads, offset: 0, index: 8)
         encoder.setBuffer(componentCellNext, offset: 0, index: 9)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 28)
         dispatchCells(encoder, pipeline: initializeCellComponentsPipeline)
         encoder.memoryBarrier(resources: [
             cellIdentities, cellComponentParents, cellComponentCounts,
@@ -3703,19 +3838,24 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellOccupancy, offset: 0, index: 3)
         encoder.setBuffer(membraneVertices, offset: 0, index: 4)
         encoder.setBuffer(cellIdentities, offset: 0, index: 5)
-        encoder.setBuffer(cellSpatialHashHeads, offset: 0, index: 6)
-        encoder.setBuffer(cellSpatialHashNext, offset: 0, index: 7)
+        encoder.setBuffer(membraneContactPairs, offset: 0, index: 6)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 7)
         encoder.setBuffer(cellComponentParents, offset: 0, index: 8)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 9)
         encoder.setBuffer(heritablePrograms, offset: 0, index: 10)
         encoder.setBuffer(identityCounters, offset: 0, index: 11)
-        dispatchCells(encoder, pipeline: unionCellComponentsPipeline)
+        encoder.dispatchThreadgroups(
+            indirectBuffer: contactPairDispatchArguments,
+            indirectBufferOffset: 0,
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+        )
         encoder.memoryBarrier(resources: [cellComponentParents, identityCounters])
 
         encoder.setComputePipelineState(compressCellComponentsPipeline)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 0)
         encoder.setBuffer(cellComponentParents, offset: 0, index: 1)
         encoder.setBuffer(cellIdentities, offset: 0, index: 2)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 28)
         dispatchCells(encoder, pipeline: compressCellComponentsPipeline)
         encoder.memoryBarrier(resources: [cellComponentParents, cellIdentities])
 
@@ -3724,6 +3864,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellIdentities, offset: 0, index: 1)
         encoder.setBuffer(componentCellHeads, offset: 0, index: 2)
         encoder.setBuffer(componentCellNext, offset: 0, index: 3)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 28)
         dispatchCells(encoder, pipeline: buildCellComponentListsPipeline)
         encoder.memoryBarrier(resources: [componentCellHeads, componentCellNext])
 
@@ -3734,6 +3875,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellComponentCounts, offset: 0, index: 3)
         encoder.setBuffer(cellComponentAccumulation, offset: 0, index: 4)
         encoder.setBuffer(cellComponentOwners, offset: 0, index: 5)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 28)
         dispatchCells(encoder, pipeline: accumulateCellComponentsPipeline)
         encoder.memoryBarrier(resources: [
             cellComponentCounts, cellComponentAccumulation, cellComponentOwners
@@ -3748,6 +3890,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(ownerPrimaryRoots, offset: 0, index: 5)
         encoder.setBuffer(activeComponentIndices, offset: 0, index: 6)
         encoder.setBuffer(activeComponentCount, offset: 0, index: 7)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 28)
         dispatchActiveComponents(encoder, pipeline: selectPrimaryCellComponentsPipeline)
         encoder.memoryBarrier(resources: [ownerPrimaryRoots])
 
@@ -3775,6 +3918,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(componentCellHeads, offset: 0, index: 20)
         encoder.setBuffer(componentCellNext, offset: 0, index: 21)
         encoder.setBuffer(programSlots, offset: 0, index: 22)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 28)
         dispatchCells(encoder, pipeline: assignCellComponentOwnersPipeline)
         encoder.memoryBarrier(resources: [
             agentState, agentOccupancy, cellComponentOwners, cellAggregates,
@@ -3800,11 +3944,21 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellJunctions, offset: 0, index: 12)
         encoder.setBuffer(ownerCellHeads, offset: 0, index: 13)
         encoder.setBuffer(ownerCellNext, offset: 0, index: 14)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 28)
         dispatchCells(encoder, pipeline: reassignCellComponentsPipeline)
         encoder.memoryBarrier(resources: [
             cellState, cellOccupancy, cellIdentities, programSlots, identityCounters,
             cellJunctions
         ])
+
+        encoder.setComputePipelineState(finalizeCellTopologyPipeline)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 0)
+        encoder.setBuffer(activeCellCount, offset: 0, index: 1)
+        encoder.dispatchThreads(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+        encoder.memoryBarrier(resources: [contactWorkState])
     }
 
     private func encodeOwnerCellLists(_ encoder: Metal4ComputeCommandEncoderAdapter) {
@@ -4000,6 +4154,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 range: MemoryLayout<UInt32>.stride..<(2 * MemoryLayout<UInt32>.stride),
                 value: 0
             )
+            blit.fill(
+                buffer: cellMeshDrawArguments,
+                range: 0..<MemoryLayout<UInt32>.stride,
+                value: 0
+            )
             blit.endEncoding()
         }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -4017,6 +4176,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellIdentities, offset: 0, index: 5)
         encoder.setBuffer(agentState, offset: 0, index: 6)
         encoder.setBuffer(cellState, offset: 0, index: 7)
+        encoder.setBuffer(cellMeshDrawArguments, offset: 0, index: 8)
         dispatchCells(encoder, pipeline: compactCellRenderPipeline)
         encoder.endEncoding()
     }
@@ -4106,24 +4266,52 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.drawPrimitives(type: MTLPrimitiveType.triangle, vertexStart: 0, vertexCount: 3)
 
         if observationZoom > 0.35, observationZoom < 180 {
-            encoder.setRenderPipelineState(cellRenderPipeline)
-            encoder.setVertexBuffer(agentState, offset: 0, index: 0)
-            encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
-            encoder.setVertexBuffer(cellState, offset: 0, index: 2)
-            encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
-            encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
-            encoder.setVertexBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 5)
-            encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
-            encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
-            encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
-            encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
-            encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
-            encoder.drawPrimitives(
-                type: MTLPrimitiveType.triangle,
-                indirectBuffer: cellDrawArguments,
-                indirectBufferOffset: 0
-            )
+            if tuningProfile == .m4Optimized {
+                encoder.setRenderPipelineState(cellMeshRenderPipeline)
+                encoder.setMeshBuffer(agentState, offset: 0, index: 0)
+                encoder.setMeshBuffer(agentOccupancy, offset: 0, index: 1)
+                encoder.setMeshBuffer(cellState, offset: 0, index: 2)
+                encoder.setMeshBuffer(cellOccupancy, offset: 0, index: 3)
+                encoder.setMeshBuffer(membraneVertices, offset: 0, index: 4)
+                encoder.setMeshBytes(
+                    &uniforms,
+                    length: MemoryLayout<SimulationUniforms>.stride,
+                    index: 5
+                )
+                encoder.setMeshBuffer(visibleCellIndices, offset: 0, index: 6)
+                encoder.setMeshBuffer(cellIdentities, offset: 0, index: 7)
+                encoder.setMeshBuffer(heritablePrograms, offset: 0, index: 8)
+                encoder.setMeshBuffer(programInteractions, offset: 0, index: 9)
+                encoder.setMeshBuffer(programSlots, offset: 0, index: 10)
+                encoder.drawMeshThreadgroups(
+                    indirectBuffer: cellMeshDrawArguments,
+                    indirectBufferOffset: 0,
+                    threadsPerMeshThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+                )
+            } else {
+                encoder.setRenderPipelineState(cellRenderPipeline)
+                encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+                encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+                encoder.setVertexBuffer(cellState, offset: 0, index: 2)
+                encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
+                encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+                encoder.setVertexBytes(
+                    &uniforms,
+                    length: MemoryLayout<SimulationUniforms>.stride,
+                    index: 5
+                )
+                encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
+                encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
+                encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
+                encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
+                encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
+                encoder.drawPrimitives(
+                    type: MTLPrimitiveType.triangle,
+                    indirectBuffer: cellDrawArguments,
+                    indirectBufferOffset: 0
+                )
+            }
         }
         encoder.writeTimestamp(ending: "scene raster")
         encoder.endEncoding()

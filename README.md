@@ -138,6 +138,7 @@ Interactive `1x`, `3x`, `6x`, and `24x` speeds execute that many unchanged biolo
 | Connectivity state | Parents, counts, centroid/ATP/integrity reductions, root owners, primary roots, and up to sixteen preserved source-program mappings per root | Atomic `UInt32` / `Int32` | GPU private | Union-find labeling, recognition-gated fusion, unconditional nonempty-root identity, program-preserving separation, and owner reassignment |
 | Membrane vertices | `9,216 x 12 x 32 B` | Position, velocity, and local mechanics | GPU private | Deformable cell membranes with edge, bending, pressure, integrity, and contact state; bounded quadratic interpolation converts each physical edge into four raster segments without changing the simulated geometry |
 | Cell spatial hash | `16,384` heads + `9,216` links | Atomic `UInt32` heads and `UInt32` links | GPU private | Broad phase for same-owner junction mechanics, exposed-edge tests, and cross-owner contact |
+| Membrane-contact work queue | Up to `524,288` cell-index pairs + indirect-dispatch state | `uint2` pairs and atomic `UInt32` counters | GPU private | One bounded spatial-hash traversal materializes candidate pairs for equal-and-opposite contact mechanics and component union; overflow is a persistent invariant failure |
 | Persistent junction table | `32,768 x 32 B` | Cell-pair key, permanent-ID fingerprint, last-seen step, rest distance, strength, age, load | GPU private | Generation-independent pair persistence with stale-entry replacement |
 | Cell contact effects | Center impulses plus `12` vertex-local force/pressure triplets per cell | Atomic fixed-point integers | GPU private | Equal-and-opposite pair accumulation before cell-local and membrane-local application |
 | Cellular energy exchange | `193 x 193 x 8` atomic integers | Available A/B/detritus, claimed A/B/detritus, returned detritus, exported heat | GPU private | Exact resource claims and one-step texture settlement without CPU synchronization |
@@ -1011,10 +1012,11 @@ flowchart LR
 | Deformable membrane mechanics | Compacted living cells x 12 vertices | `evolveCellMembranes` |
 | Cell-contact reset | `16,384` hash heads plus compacted living-cell effects | `clearCellSpatialHash`, `clearActiveCellContactEffects` |
 | Cell-contact hash insertion | Compacted living cells | `buildCellSpatialHash` |
-| Membrane-pair narrow phase | Compacted living cells, bounded hash traversal | `resolveMembraneContacts` |
+| Contact-pair construction | Compacted living cells, bounded hash traversal | `resetMembraneContactWork`, `buildMembraneContactPairs`, `prepareMembraneContactDispatch` |
+| Membrane-pair narrow phase | Indirect dispatch over compacted candidate pairs | `resolveMembraneContacts` |
 | Local contact application | Compacted living cells | `applyCellContactEffects` |
 | Physical edge exposure | Compacted living cells, bounded hash traversal | `measureCellMembraneExposure` |
-| Connectivity initialization and union | Compacted living cells | `initializeCellComponents`, `unionCellComponents` |
+| Conditional connectivity rebuild | Living roots plus indirect contact pairs, on edge-signature changes or every 256 steps | `detectCellTopologyChanges`, `initializeCellComponents`, `unionCellComponents`, `finalizeCellTopology` |
 | Root compression and segmented lists | Compacted living cells | `compressCellComponents`, `buildCellComponentLists` |
 | Component viability accumulation | Compacted living cells | `accumulateCellComponents` |
 | Primary-component selection | Compacted living components, up to `9,216` | `selectPrimaryCellComponents` |
@@ -1026,7 +1028,7 @@ flowchart LR
 | Measurement | `193²` / `1024²` | `measureWorld`, `measureQuantumField` |
 | Field rendering | One full-screen triangle, six scale-selected pipelines | ecology, morphology, cellular, molecule, wave, or spinor surface |
 | Visible-cell compaction | Compacted living cells with conservative viewport rejection | `compactVisibleCells` |
-| Tissue-contour rendering | GPU-compacted living-cell count, forty-eight-segment membrane fans | `cellVertex`, `cellFragment` |
+| Tissue-contour rendering | One indirect mesh threadgroup per visible cell on M4; indexed vertex fallback on generic Metal 4 | `cellContourMesh` or `cellVertex`, then `cellFragment` |
 | Bloom downsample and filtering | One thirteen-tap dispatch at quarter drawable dimensions | `bloomPrefilter` |
 | Display composition | One full-screen triangle | `compositeFragment` |
 | Resolved spinor display | One direct-to-drawable full-screen triangle | `spinorDisplayFragment` |
@@ -1041,7 +1043,9 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Explicit residency.** Causal buffers, textures, pipelines, checkpoint banks, readback rings, and uniform arenas occupy a stable residency set. Resizable render targets and presentation resources use separate dynamic sets.
 - **AOT pipeline archive.** `metal-tt` packages all captured Metal 4 descriptors. Runtime telemetry distinguishes archive hits from compiler fallback; the reference release reports zero misses.
 - **True ping-pong state.** The renderer swaps `MTLTexture` references after each update instead of blitting entire state textures back into fixed roles.
-- **Dependency barriers.** Cell topology and contact insert pass barriers only between hash/list clear, insertion, narrow-phase accumulation, local application, union-find stages, owner reassignment, list reconstruction, and reduction. Redundant logical-encoder barriers are suppressed.
+- **Shared contact work queue.** One bounded spatial-hash traversal produces a compact pair stream and GPU indirect-dispatch arguments. Contact mechanics and connectivity consume the same candidate set, avoiding a second neighborhood search while retaining equal-and-opposite fixed-point force accumulation.
+- **Event-driven topology.** Each cell records the count and hashed identity of its current physical membrane connections. Any edge addition or removal triggers union-find reconstruction in the same biological step; a periodic 256-step pass guards against signature collisions. Initialization clears only living roots, so stable tissues do not repeatedly clear and scan all `9,216` component slots.
+- **Dependency barriers.** Cell topology and contact insert pass barriers only between hash/list clear, insertion, pair construction, narrow-phase accumulation, local application, conditional union-find stages, owner reassignment, list reconstruction, and reduction. Redundant logical-encoder barriers are suppressed.
 - **Consume-and-zero forcing.** Cells accumulate contraction impulses into a private signed fixed-point buffer. `evolveMechanicalField` uses relaxed atomic exchange to consume and clear each vector element in the same pass, eliminating a separate `193²` clear dispatch per simulation step.
 - **Power-of-two addressing.** The `1024²` spinor lattice uses integer masks instead of modulus for periodic neighbors.
 - **Prepared quantum coupling.** One `193²` `RGBA32Float` field stores coin and potential sine/cosine values. The `1024²` spinor update samples it instead of repeating trigonometry and biological-field reads for every quantum pixel.
@@ -1057,7 +1061,9 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Measured process chains.** Every observation scale exposes four compact observer nodes linking its measured input, state transition, and downstream output. These SwiftUI summaries read asynchronous reductions and never write simulation state.
 - **Exact deep-lattice sampling.** At `420x` and above, the spinor instrument uses nearest-cell `RGBA32Float` samples instead of blending adjacent lattice states. Wave-scale views retain linear filtering.
 - **Morphology from membrane construction.** The renderer contains no abdomen, leg, jaw, spine, or insect body primitive. Predatory protrusions, armor, sensory extensions, and locomotor extensions are visible only where exposed cells deform their simulated membrane vertices under the corresponding inherited regulatory output.
-- **Contour antialiasing.** Bounded quadratic interpolation expands each simulated twelve-edge membrane into forty-eight render segments. `fwidth`-derived transitions smooth that measured contour without changing collision geometry.
+- **M4 adaptive mesh contours.** The M4 profile dispatches one Metal 4 mesh threadgroup per visible cell and emits twenty-four segments below `6x` or forty-eight segments at cellular inspection scales. The generic Metal 4 profile retains the indexed vertex path; both interpolate the same twelve physical membrane vertices.
+- **Physical membrane radiometry.** Local vertex integrity, pressure, strain, ATP-funded repair, and leakage determine boundary thickness, continuity, repair fronts, pressure fronts, and damage gaps. These values are render-only readings of causal state; no decorative organism envelope or stage-dependent pulse exists.
+- **Contour antialiasing.** Bounded quadratic interpolation expands each simulated twelve-edge membrane into the selected render segments. `fwidth`-derived transitions smooth that measured contour without changing collision geometry.
 - **Single-pass quarter-resolution bloom.** One thirteen-tap tent filter combines HDR downsampling, finite-value rejection, soft-knee extraction, and spatial filtering. This removes two compute dispatches, two device barriers, one quarter-resolution texture, and the associated read/write traffic from every blooming frame.
 - **Direct spinor presentation.** At the resolved spinor scale, no translucent tissue or bloom is composited. `spinorDisplayFragment` performs the same hue-preserving display map while writing directly to the drawable, avoiding the full-resolution HDR store/reload and a second full-screen render pass.
 - **Hue-preserving display map.** Peak-channel exponential compression applies one scalar to all RGB channels, followed by a small scale-specific saturation correction and `1/1023` temporal dither.
@@ -1086,7 +1092,7 @@ The reproducible headless reference command is:
   --output /tmp/numi-metal4-reference.jsonl
 ```
 
-On the development M4, the migration runs completed all `12,000` steps at `757-1,002 steps/s` with invariant flags `0x0`; the lower endpoint was measured while another Metal simulator workload was active. After moving argument tables into completion-retired submission slots, the same command completed at `1,175.8 steps/s` with invariant flags `0x0`. The untouched pre-migration commit measured approximately `1,043 steps/s`. These launches are scheduling-sensitive engineering measurements, so the later result is not treated as a controlled causal attribution. The proposed `1,750 steps/s` acceptance threshold remains unmet and is not claimed. Pipeline initialization reports `61` archive hits, zero misses, and approximately `5.3 ms` total lookup time on the reference installation.
+On the development M4, the migration runs completed all `12,000` steps at `757-1,002 steps/s` with invariant flags `0x0`; the lower endpoint was measured while another Metal simulator workload was active. Moving argument tables into completion-retired submission slots produced `1,175.8 steps/s`. The shared contact-pair queue and edge-signature-driven topology path then completed the same command at `1,557.3 steps/s`, with nine living cells and invariant flags `0x0`. This is a `32.4%` increase over the immediately preceding measurement, but scheduling-sensitive single launches are engineering measurements rather than controlled causal attribution. The untouched pre-migration commit measured approximately `1,043 steps/s`; the proposed `1,750 steps/s` acceptance threshold remains unmet and is not claimed. Pipeline initialization reports `67` archive hits, zero misses, and `3.488 ms` total lookup time on the reference installation.
 
 Set `NUMI_GPU_TIMING_LOG=1` to sample one submission in sixty and emit total GPU duration plus the chemistry, mechanics, cell physiology, contact, topology, quantum, scene-raster, bloom, and display-composite timestamp intervals. The diagnostic is observer-only and never binds timing data to a causal kernel.
 

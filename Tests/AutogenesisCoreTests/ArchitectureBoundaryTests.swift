@@ -200,7 +200,7 @@ struct ArchitectureBoundaryTests {
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
             encoding: .utf8
         )
-        let start = try #require(shader.range(of: "vertex CellRasterData cellVertex"))
+        let start = try #require(shader.range(of: "inline CellRasterData makeCellRasterData"))
         let end = try #require(shader.range(
             of: "fragment float4 cellFragment",
             range: start.upperBound..<shader.endIndex
@@ -285,7 +285,105 @@ struct ArchitectureBoundaryTests {
         )
         #expect(execution.contains("let computeArgumentTable: MTL4ArgumentTable"))
         #expect(execution.contains("private let vertexArgumentTables: [MTL4ArgumentTable]"))
+        #expect(execution.contains("private let meshArgumentTables: [MTL4ArgumentTable]"))
         #expect(execution.contains("slot.resetArgumentTables()"))
         #expect(execution.contains("slot.nextRenderArgumentTables()"))
+    }
+
+    @Test
+    func contactAndConnectivityReuseOneBoundedPairStream() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let pairBuilderStart = try #require(shader.range(of: "kernel void buildMembraneContactPairs"))
+        let resolverStart = try #require(shader.range(
+            of: "kernel void resolveMembraneContacts",
+            range: pairBuilderStart.upperBound..<shader.endIndex
+        ))
+        let applyStart = try #require(shader.range(
+            of: "kernel void applyCellContactEffects",
+            range: resolverStart.upperBound..<shader.endIndex
+        ))
+        let unionStart = try #require(shader.range(of: "kernel void unionCellComponents"))
+        let compressStart = try #require(shader.range(
+            of: "kernel void compressCellComponents",
+            range: unionStart.upperBound..<shader.endIndex
+        ))
+        let resolver = String(shader[resolverStart.lowerBound..<applyStart.lowerBound])
+        let union = String(shader[unionStart.lowerBound..<compressStart.lowerBound])
+        #expect(shader.contains("constant uint membraneContactPairCapacity = 524288u"))
+        #expect(resolver.contains("device const uint2* contactPairs"))
+        #expect(union.contains("device const uint2* contactPairs"))
+        #expect(!resolver.contains("hashHeads"))
+        #expect(!union.contains("hashHeads"))
+        #expect(shader.contains("invariantContactPairOverflow"))
+    }
+
+    @Test
+    func componentTopologyIsEventDrivenAndClearsOnlyLivingRoots() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("componentTopologyReconciliationStride = 256u"))
+        #expect(shader.contains("kernel void detectCellTopologyChanges"))
+        #expect(shader.contains("currentCount != previousCount || currentHash != previousHash"))
+        #expect(shader.contains("bool newSameOwnerConnection"))
+        #expect(shader.contains("bool fusionCandidate"))
+        #expect(shader.contains("kernel void finalizeCellTopology"))
+        #expect(shader.contains("&componentAccumulation[gid * 5u + channel]"))
+        #expect(!renderer.contains("encoder.fill(buffer: cellComponentParents"))
+        #expect(!renderer.contains("encoder.fill(buffer: cellComponentAccumulation"))
+    }
+
+    @Test
+    func m4UsesAdaptiveMeshContoursWithVertexFallback() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let execution = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Metal4Execution.swift"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("using CellContourMesh = metal::mesh"))
+        #expect(shader.contains("void cellContourMesh("))
+        #expect(shader.contains("output.set_primitive_count(segmentCount)"))
+        #expect(renderer.contains("if tuningProfile == .m4Optimized"))
+        #expect(renderer.contains("cellMeshRenderPipeline"))
+        #expect(renderer.contains("cellRenderPipeline"))
+        #expect(execution.contains("MTL4MeshRenderPipelineDescriptor"))
+        #expect(execution.contains("drawMeshThreadgroups("))
+    }
+
+    @Test
+    func membraneRenderingUsesLocalPhysicalState() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("float4 localMembrane"))
+        #expect(shader.contains("saturate(localVertex.mechanics.y)"))
+        #expect(shader.contains("saturate(localVertex.mechanics.z * 120.0)"))
+        #expect(shader.contains("saturate(abs(localVertex.mechanics.w) * 18.0)"))
+        #expect(shader.contains("float membraneContinuity"))
+        #expect(shader.contains("float repairFront"))
+        #expect(shader.contains("float leakage"))
     }
 }

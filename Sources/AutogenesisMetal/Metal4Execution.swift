@@ -135,6 +135,52 @@ final class Metal4PipelineFactory {
         return pipeline
     }
 
+    func makeMeshRenderPipeline(
+        label: String,
+        mesh: String,
+        fragment: String,
+        pixelFormat: MTLPixelFormat,
+        blending: Bool = false
+    ) throws -> MTLRenderPipelineState {
+        let meshFunction = MTL4LibraryFunctionDescriptor()
+        meshFunction.library = library
+        meshFunction.name = mesh
+        let fragmentFunction = MTL4LibraryFunctionDescriptor()
+        fragmentFunction.library = library
+        fragmentFunction.name = fragment
+
+        let descriptor = MTL4MeshRenderPipelineDescriptor()
+        descriptor.label = label
+        descriptor.meshFunctionDescriptor = meshFunction
+        descriptor.fragmentFunctionDescriptor = fragmentFunction
+        descriptor.maxTotalThreadsPerMeshThreadgroup = 64
+        descriptor.requiredThreadsPerMeshThreadgroup = MTLSize(width: 64, height: 1, depth: 1)
+        descriptor.meshThreadgroupSizeIsMultipleOfThreadExecutionWidth = true
+        let attachment = descriptor.colorAttachments[0]!
+        attachment.pixelFormat = pixelFormat
+        if blending {
+            attachment.blendingState = .enabled
+            attachment.rgbBlendOperation = .add
+            attachment.alphaBlendOperation = .add
+            attachment.sourceRGBBlendFactor = .sourceAlpha
+            attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            attachment.sourceAlphaBlendFactor = .one
+            attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        }
+        if let pipeline = try? archive?.makeRenderPipelineState(descriptor: descriptor) {
+            archiveHits += 1
+            pipelineCount += 1
+            return pipeline
+        }
+        archiveMisses += 1
+        let pipeline = try compiler.makeRenderPipelineState(
+            descriptor: descriptor,
+            compilerTaskOptions: taskOptions
+        )
+        pipelineCount += 1
+        return pipeline
+    }
+
     func finalize() -> Metal4PipelineBuildTelemetry {
         let captureScript = ProcessInfo.processInfo.environment[
             "NUMI_CAPTURE_METAL4_PIPELINES"
@@ -250,6 +296,7 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
     let counterHeap: any MTL4CounterHeap
     let computeArgumentTable: MTL4ArgumentTable
     private let vertexArgumentTables: [MTL4ArgumentTable]
+    private let meshArgumentTables: [MTL4ArgumentTable]
     private let fragmentArgumentTables: [MTL4ArgumentTable]
     private var renderArgumentTableIndex = 0
     var isInFlight = false
@@ -285,6 +332,12 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
                 label: "Numi vertex arguments \(index).\($0)"
             )
         }
+        meshArgumentTables = try (0..<Self.renderEncoderCapacity).map {
+            try Self.makeArgumentTable(
+                device: device,
+                label: "Numi mesh arguments \(index).\($0)"
+            )
+        }
         fragmentArgumentTables = try (0..<Self.renderEncoderCapacity).map {
             try Self.makeArgumentTable(
                 device: device,
@@ -299,6 +352,7 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
 
     func nextRenderArgumentTables() -> (
         vertex: MTL4ArgumentTable,
+        mesh: MTL4ArgumentTable,
         fragment: MTL4ArgumentTable
     ) {
         precondition(
@@ -307,7 +361,9 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
         )
         let index = renderArgumentTableIndex
         renderArgumentTableIndex += 1
-        return (vertexArgumentTables[index], fragmentArgumentTables[index])
+        return (
+            vertexArgumentTables[index], meshArgumentTables[index], fragmentArgumentTables[index]
+        )
     }
 
     private static func makeArgumentTable(
@@ -691,15 +747,16 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         if !priorEncoderStages.isEmpty {
             encoder.barrier(
                 afterQueueStages: priorEncoderStages,
-                beforeStages: [.vertex, .fragment],
+                beforeStages: [.vertex, .mesh, .fragment],
                 visibilityOptions: .device
             )
         }
-        priorEncoderStages = [.vertex, .fragment]
+        priorEncoderStages = [.vertex, .mesh, .fragment]
         let tables = slot.nextRenderArgumentTables()
         return Metal4RenderCommandEncoderAdapter(
             encoder: encoder,
             vertexTable: tables.vertex,
+            meshTable: tables.mesh,
             fragmentTable: tables.fragment,
             uniformArena: slot.uniformArena,
             timestampRecorder: { [unowned self] encoder, label in
@@ -1047,6 +1104,7 @@ final class Metal4BlitCommandEncoderAdapter {
 final class Metal4RenderCommandEncoderAdapter {
     private let encoder: MTL4RenderCommandEncoder
     private let vertexTable: MTL4ArgumentTable
+    private let meshTable: MTL4ArgumentTable
     private let fragmentTable: MTL4ArgumentTable
     private let uniformArena: Metal4UniformArena
     private let timestampRecorder: (MTL4RenderCommandEncoder, String) -> Void
@@ -1054,12 +1112,14 @@ final class Metal4RenderCommandEncoderAdapter {
     init(
         encoder: MTL4RenderCommandEncoder,
         vertexTable: MTL4ArgumentTable,
+        meshTable: MTL4ArgumentTable,
         fragmentTable: MTL4ArgumentTable,
         uniformArena: Metal4UniformArena,
         timestampRecorder: @escaping (MTL4RenderCommandEncoder, String) -> Void
     ) {
         self.encoder = encoder
         self.vertexTable = vertexTable
+        self.meshTable = meshTable
         self.fragmentTable = fragmentTable
         self.uniformArena = uniformArena
         self.timestampRecorder = timestampRecorder
@@ -1083,6 +1143,17 @@ final class Metal4RenderCommandEncoderAdapter {
 
     func setVertexBytes(_ bytes: UnsafeRawPointer, length: Int, index: Int) {
         vertexTable.setAddress(uniformArena.copy(bytes: bytes, length: length), index: index)
+    }
+
+    func setMeshBuffer(_ buffer: MTLBuffer?, offset: Int, index: Int) {
+        meshTable.setAddress(
+            buffer.map { $0.gpuAddress + MTLGPUAddress(offset) } ?? 0,
+            index: index
+        )
+    }
+
+    func setMeshBytes(_ bytes: UnsafeRawPointer, length: Int, index: Int) {
+        meshTable.setAddress(uniformArena.copy(bytes: bytes, length: length), index: index)
     }
 
     func setFragmentTexture(_ texture: MTLTexture?, index: Int) {
@@ -1114,6 +1185,19 @@ final class Metal4RenderCommandEncoderAdapter {
         )
     }
 
+    func drawMeshThreadgroups(
+        indirectBuffer: MTLBuffer,
+        indirectBufferOffset: Int,
+        threadsPerMeshThreadgroup: MTLSize
+    ) {
+        bindTables()
+        encoder.drawMeshThreadgroups(
+            indirectBuffer: indirectBuffer.gpuAddress + MTLGPUAddress(indirectBufferOffset),
+            threadsPerObjectThreadgroup: MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerMeshThreadgroup: threadsPerMeshThreadgroup
+        )
+    }
+
     func writeTimestamp(ending phase: String) {
         timestampRecorder(encoder, phase)
     }
@@ -1124,6 +1208,7 @@ final class Metal4RenderCommandEncoderAdapter {
 
     private func bindTables() {
         encoder.setArgumentTable(vertexTable, stages: .vertex)
+        encoder.setArgumentTable(meshTable, stages: .mesh)
         encoder.setArgumentTable(fragmentTable, stages: .fragment)
     }
 }
