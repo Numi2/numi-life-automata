@@ -1,6 +1,6 @@
 import Foundation
 
-public enum CandidatePartitionLevel: String, Codable, Sendable, Equatable {
+public enum CandidatePartitionLevel: String, Codable, Sendable, Equatable, CaseIterable {
     case cell
     case membraneConnectedComponent
 }
@@ -235,6 +235,7 @@ public struct SelectionPartition: Codable, Sendable, Equatable {
     public let transmissionConfidence: ConfidenceInterval?
     public let collectiveHeritability: ConfidenceInterval?
     public let independentDescendantCount: Int
+    public let transmittedVariantCount: Int
 
     public init(
         betweenComponentSelection: Double,
@@ -245,7 +246,8 @@ public struct SelectionPartition: Codable, Sendable, Equatable {
         withinComponentConfidence: ConfidenceInterval? = nil,
         transmissionConfidence: ConfidenceInterval? = nil,
         collectiveHeritability: ConfidenceInterval? = nil,
-        independentDescendantCount: Int = 0
+        independentDescendantCount: Int = 0,
+        transmittedVariantCount: Int = 0
     ) {
         self.betweenComponentSelection = betweenComponentSelection
         self.withinComponentSelection = withinComponentSelection
@@ -256,6 +258,7 @@ public struct SelectionPartition: Codable, Sendable, Equatable {
         self.transmissionConfidence = transmissionConfidence
         self.collectiveHeritability = collectiveHeritability
         self.independentDescendantCount = independentDescendantCount
+        self.transmittedVariantCount = transmittedVariantCount
     }
 }
 
@@ -280,7 +283,10 @@ public struct EvidenceClaim: Codable, Sendable, Equatable {
 
 public struct IndividualityEvidence: Codable, Sendable, Equatable {
     public let mechanochemicalAutonomy: EvidenceClaim
-    public let darwinianLineage: EvidenceClaim
+    public let physicalDescent: EvidenceClaim
+    public let heritableVariation: EvidenceClaim
+    public let differentialTransmission: EvidenceClaim
+    public let darwinianEvolution: EvidenceClaim
     public let collectiveLevelIndividuality: EvidenceClaim
     public let selection: SelectionPartition
     public let autocorrelationTime: Double
@@ -288,14 +294,20 @@ public struct IndividualityEvidence: Codable, Sendable, Equatable {
 
     public init(
         mechanochemicalAutonomy: EvidenceClaim,
-        darwinianLineage: EvidenceClaim,
+        physicalDescent: EvidenceClaim,
+        heritableVariation: EvidenceClaim,
+        differentialTransmission: EvidenceClaim,
+        darwinianEvolution: EvidenceClaim,
         collectiveLevelIndividuality: EvidenceClaim,
         selection: SelectionPartition,
         autocorrelationTime: Double,
         observationWindows: Int
     ) {
         self.mechanochemicalAutonomy = mechanochemicalAutonomy
-        self.darwinianLineage = darwinianLineage
+        self.physicalDescent = physicalDescent
+        self.heritableVariation = heritableVariation
+        self.differentialTransmission = differentialTransmission
+        self.darwinianEvolution = darwinianEvolution
         self.collectiveLevelIndividuality = collectiveLevelIndividuality
         self.selection = selection
         self.autocorrelationTime = autocorrelationTime
@@ -307,9 +319,21 @@ public struct IndividualityEvidence: Codable, Sendable, Equatable {
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
             reason: "Insufficient autocorrelation-adjusted observations."
         ),
-        darwinianLineage: EvidenceClaim(
+        physicalDescent: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
             reason: "No independently separated descendant sample."
+        ),
+        heritableVariation: EvidenceClaim(
+            state: .inconclusive, estimate: nil, nullUpperBound: nil,
+            reason: "No inherited program variant has been transmitted to a separated component."
+        ),
+        differentialTransmission: EvidenceClaim(
+            state: .inconclusive, estimate: nil, nullUpperBound: nil,
+            reason: "Differential program transmission has not been resolved statistically."
+        ),
+        darwinianEvolution: EvidenceClaim(
+            state: .inconclusive, estimate: nil, nullUpperBound: nil,
+            reason: "Physical descent, heritable variation, and differential transmission must all be supported."
         ),
         collectiveLevelIndividuality: EvidenceClaim(
             state: .inconclusive, estimate: nil, nullUpperBound: nil,
@@ -324,6 +348,79 @@ public struct IndividualityEvidence: Codable, Sendable, Equatable {
         autocorrelationTime: 0,
         observationWindows: 0
     )
+}
+
+public enum EvolutionaryEvidence {
+    public static func evaluate(
+        selection: SelectionPartition,
+        maximumComponentDescentDepth: UInt32,
+        conservationValid: Bool
+    ) -> (
+        physicalDescent: EvidenceClaim,
+        heritableVariation: EvidenceClaim,
+        differentialTransmission: EvidenceClaim,
+        darwinianEvolution: EvidenceClaim
+    ) {
+        let descentSupported = selection.independentDescendantCount > 0 &&
+            maximumComponentDescentDepth > 0
+        let physicalDescent = EvidenceClaim(
+            state: descentSupported ? .supported : .inconclusive,
+            estimate: nil,
+            nullUpperBound: nil,
+            reason: descentSupported
+                ? "Inherited programs remain represented after independent physical separation."
+                : "No independently separated descendant currently carries a transmitted program."
+        )
+        let variationSupported = selection.transmittedVariantCount > 0
+        let heritableVariation = EvidenceClaim(
+            state: variationSupported ? .supported : .inconclusive,
+            estimate: nil,
+            nullUpperBound: nil,
+            reason: variationSupported
+                ? "At least one mutated program is represented in an independently separated descendant."
+                : "Mutation alone is insufficient; no variant has yet been transmitted through physical descent."
+        )
+        let confidenceIntervals = [
+            selection.betweenComponentConfidence,
+            selection.withinComponentConfidence,
+            selection.transmissionConfidence
+        ].compactMap { $0 }
+        let nonzeroIntervals = confidenceIntervals.filter {
+            $0.lower > 0 || $0.upper < 0
+        }
+        let transmissionSupported = selection.covarianceSampleCount >= 8 &&
+            !nonzeroIntervals.isEmpty
+        let differentialTransmission = EvidenceClaim(
+            state: conservationValid
+                ? (transmissionSupported ? .supported : .inconclusive)
+                : .notSupported,
+            estimate: nonzeroIntervals.first,
+            nullUpperBound: 0,
+            reason: !conservationValid
+                ? "Conservation or ownership invariant failure invalidates selection inference."
+                : transmissionSupported
+                    ? "A multilevel Price term has a nonzero 95% bootstrap interval across transmitted descendants."
+                    : "Differential transmission requires at least eight contributing parent-component samples and a nonzero 95% interval."
+        )
+        let darwinianSupported = descentSupported && variationSupported &&
+            transmissionSupported && conservationValid
+        let darwinianEvolution = EvidenceClaim(
+            state: conservationValid
+                ? (darwinianSupported ? .supported : .inconclusive)
+                : .notSupported,
+            estimate: differentialTransmission.estimate,
+            nullUpperBound: 0,
+            reason: darwinianSupported
+                ? "Physical descent, inherited variation, and differential transmission are independently supported."
+                : "Darwinian evolution is not claimed until descent, heritable variation, and differential transmission are all supported."
+        )
+        return (
+            physicalDescent,
+            heritableVariation,
+            differentialTransmission,
+            darwinianEvolution
+        )
+    }
 }
 
 public struct RendererRuntimeTelemetry: Codable, Sendable, Equatable {

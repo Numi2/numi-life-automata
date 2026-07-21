@@ -99,4 +99,40 @@ struct ArchitectureBoundaryTests {
         #expect(!reassignment.contains("&cellOccupancy[gid], 0u"))
         #expect(reassignment.contains("retry component assignment"))
     }
+
+    @Test
+    func cellDivisionCreatesAPersistentCytokineticMidbody() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(of: "kernel void divideAndReduceOrganismCells"))
+        let end = try #require(shader.range(
+            of: "kernel void resetActiveComponentDispatch",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let division = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(division.contains("findOrCreateCellJunction"))
+        #expect(division.contains("cytokineticPairKey"))
+        #expect(division.contains("midbodyStrength"))
+    }
+
+    @Test
+    func selectionUsesGenerationTaggedProgramIdentityRatherThanGenomeHash() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let start = try #require(renderer.range(of: "let programID = permanentProgramID"))
+        let end = try #require(renderer.range(
+            of: "let currentProgramRepresentations",
+            range: start.upperBound..<renderer.endIndex
+        ))
+        let representation = String(renderer[start.lowerBound..<end.lowerBound])
+        #expect(representation.contains("identity.programIndex"))
+        #expect(representation.contains("identity.programGeneration"))
+        #expect(!representation.contains("UInt64(program.genomeHash)"))
+    }
 }

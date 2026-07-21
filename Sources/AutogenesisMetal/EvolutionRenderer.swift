@@ -58,6 +58,13 @@ private struct ProgramRepresentationAccumulator {
     var collectiveTrait: Double
 }
 
+private func permanentProgramID(index: UInt32, generation: UInt32) -> UInt64 {
+    (UInt64(generation) << 32) | UInt64(index)
+}
+
+private let permanentProgramSlotCapacity: UInt32 = 4_096
+private let identityReadbackCounterCount = 13
+
 extension EvolutionRenderer {
     func runHeadlessExperiment(
         configuration: HeadlessExperimentConfiguration,
@@ -95,7 +102,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 9,
+            schemaVersion: 10,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -116,6 +123,8 @@ extension EvolutionRenderer {
         var componentContributions: Set<ComponentContribution> = []
         var previousProgramRepresentations: [ProgramRepresentation] = []
         var selectionIntervals: [MultilevelSelectionInterval] = []
+        var individualityObserver = IndividualityObserverEngine()
+        var latestObserverResult: IndividualityObserverResult?
 
         while totalSteps < configuration.steps {
             let remaining = configuration.steps - totalSteps
@@ -205,7 +214,9 @@ extension EvolutionRenderer {
                     programMutations: &programMutations,
                     componentContributions: &componentContributions,
                     previousProgramRepresentations: &previousProgramRepresentations,
-                    selectionIntervals: &selectionIntervals
+                    selectionIntervals: &selectionIntervals,
+                    individualityObserver: &individualityObserver,
+                    latestObserverResult: &latestObserverResult
                 )
                 if let latestSample {
                     observationSamples.append(latestSample)
@@ -256,7 +267,9 @@ extension EvolutionRenderer {
                         programMutations: &programMutations,
                         componentContributions: &componentContributions,
                         previousProgramRepresentations: &previousProgramRepresentations,
-                        selectionIntervals: &selectionIntervals
+                        selectionIntervals: &selectionIntervals,
+                        individualityObserver: &individualityObserver,
+                        latestObserverResult: &latestObserverResult
                     )
                     if let latestSample,
                        observationSamples.last?.step != latestSample.step {
@@ -278,7 +291,9 @@ extension EvolutionRenderer {
                     programMutations: programMutations,
                     invariantReport: report,
                     individualityEvidence: individualityEvidence(
-                        samples: observationSamples,
+                        observerResult: latestObserverResult,
+                        maximumComponentDescentDepth: observationSamples
+                            .map(\.maximumComponentDescentDepth).max() ?? 0,
                         selection: MultilevelPriceAnalysis.summarize(selectionIntervals),
                         invariantReport: report
                     ),
@@ -309,7 +324,9 @@ extension EvolutionRenderer {
             programMutations: programMutations,
             invariantReport: finalReport,
             individualityEvidence: individualityEvidence(
-                samples: observationSamples,
+                observerResult: latestObserverResult,
+                maximumComponentDescentDepth: observationSamples
+                    .map(\.maximumComponentDescentDepth).max() ?? 0,
                 selection: MultilevelPriceAnalysis.summarize(selectionIntervals),
                 invariantReport: finalReport
             ),
@@ -437,35 +454,18 @@ extension EvolutionRenderer {
     }
 
     private func individualityEvidence(
-        samples: [ExperimentSample],
+        observerResult: IndividualityObserverResult?,
+        maximumComponentDescentDepth: UInt32,
         selection: SelectionPartition,
         invariantReport: ExperimentInvariantReport
     ) -> IndividualityEvidence {
-        let estimate = IndividualityStatistics.conditionalSelfPredictiveInformation(
-            state: samples.map(\.meanMechanochemicalClosure),
-            environment: samples.map(\.meanFrequencyMatch),
-            resamples: 96
-        )
-        let autonomyClaim = EvidenceClaim(
-            state: estimate?.state ?? .inconclusive,
-            estimate: estimate?.observed,
-            nullUpperBound: estimate?.shuffledNull.upper,
-            reason: estimate == nil
-                ? "Insufficient autocorrelation-adjusted observations."
-                : "Conditional self-predictive information is tested against block-shuffled nulls."
-        )
-        let lineageObserved = selection.independentDescendantCount > 0 &&
-            (samples.map(\.maximumComponentDescentDepth).max() ?? 0) > 0
-        let lineageClaim = EvidenceClaim(
-            state: lineageObserved ? .supported : .inconclusive,
-            estimate: nil,
-            nullUpperBound: nil,
-            reason: lineageObserved
-                ? "Transmitted programs remain in independently separated descendants."
-                : "Independent descendant representation has not been observed."
-        )
         let conservationFailure = invariantReport.flags != 0 ||
             invariantReport.maximumEnergyResidual > 0.001
+        let evolutionary = EvolutionaryEvidence.evaluate(
+            selection: selection,
+            maximumComponentDescentDepth: maximumComponentDescentDepth,
+            conservationValid: !conservationFailure
+        )
         let collectiveSupport = selection.covarianceSampleCount >= 8 &&
             (selection.betweenComponentConfidence?.lower ?? -.infinity) > 0 &&
             (selection.collectiveHeritability?.lower ?? -.infinity) > 0
@@ -481,14 +481,16 @@ extension EvolutionRenderer {
                     : "Collective support requires at least eight transmitted parent components plus positive 95% intervals for between-component covariance and collective resemblance."
         )
         return IndividualityEvidence(
-            mechanochemicalAutonomy: autonomyClaim,
-            darwinianLineage: lineageClaim,
+            mechanochemicalAutonomy: observerResult?.autonomyClaim ??
+                IndividualityEvidence.inconclusive.mechanochemicalAutonomy,
+            physicalDescent: evolutionary.physicalDescent,
+            heritableVariation: evolutionary.heritableVariation,
+            differentialTransmission: evolutionary.differentialTransmission,
+            darwinianEvolution: evolutionary.darwinianEvolution,
             collectiveLevelIndividuality: collectiveClaim,
             selection: selection,
-            autocorrelationTime: estimate?.autocorrelationTime ?? 0,
-            observationWindows: estimate.map {
-                Int(Double(samples.count) / max($0.autocorrelationTime, 1))
-            } ?? 0
+            autocorrelationTime: observerResult?.autocorrelationTime ?? 0,
+            observationWindows: observerResult?.observationWindows ?? 0
         )
     }
 
@@ -505,11 +507,13 @@ extension EvolutionRenderer {
         programMutations: inout UInt64,
         componentContributions: inout Set<ComponentContribution>,
         previousProgramRepresentations: inout [ProgramRepresentation],
-        selectionIntervals: inout [MultilevelSelectionInterval]
+        selectionIntervals: inout [MultilevelSelectionInterval],
+        individualityObserver: inout IndividualityObserverEngine,
+        latestObserverResult: inout IndividualityObserverResult?
     ) throws -> ExperimentSample {
         let counters = readback.identityCounters.contents().bindMemory(
             to: UInt32.self,
-            capacity: 5
+            capacity: Self.identityCounterCount
         )
         let writeSequence = counters[2]
         guard writeSequence >= lastEventSequence else {
@@ -574,6 +578,16 @@ extension EvolutionRenderer {
                     parentBirthID: record.parentBirthID == UInt32.max
                         ? nil : record.parentBirthID,
                     generation: record.generation,
+                    programID: permanentProgramID(
+                        index: record.programAncestry.x,
+                        generation: record.programAncestry.y
+                    ),
+                    parentProgramID: record.programAncestry.z <
+                        UInt32(Self.maxHeritableProgramCount)
+                        ? permanentProgramID(
+                            index: record.programAncestry.z,
+                            generation: record.programAncestry.w
+                        ) : nil,
                     genomeHash: record.genomeHash,
                     topologyHash: record.topologyHash,
                     mutationDistance: record.mutationDistance,
@@ -706,10 +720,11 @@ extension EvolutionRenderer {
             )), 0.25)
         }
 
+        var observerCandidates: [IndividualityCandidate] = []
+        observerCandidates.reserveCapacity(living.count + livingCellCount)
         let componentAutonomyVectors = living.map { owner -> AutonomyVector in
             let aggregate = aggregates[owner]
-            return AutonomyVector.measured(
-                from: ComponentObservation(
+            let observation = ComponentObservation(
                     step: totalSteps,
                     candidateID: UInt64(agents[owner].birthID),
                     partitionLevel: .membraneConnectedComponent,
@@ -733,7 +748,19 @@ extension EvolutionRenderer {
                     )),
                     descendantRepresentation: agents[owner].generation > 0 ? 1 : 0,
                     parentResemblance: exp(-Double(max(agents[owner].mutationDistance, 0)))
-                ),
+                )
+            observerCandidates.append(IndividualityCandidate(
+                observation: observation,
+                positionX: Double(agents[owner].position.x),
+                positionY: Double(agents[owner].position.y),
+                isSeparatedDescendant: agents[owner].generation > 0,
+                environmentalDependence: Double(
+                    abs(aggregate.environment.x) + abs(aggregate.environment.y) +
+                    (1 - min(max(aggregate.environment.w, 0), 1))
+                )
+            ))
+            return AutonomyVector.measured(
+                from: observation,
                 conditionalSelfPredictiveInformation: 0
             )
         }
@@ -753,8 +780,7 @@ extension EvolutionRenderer {
             let interaction = interactions[cellIndex]
             let exposedPerimeter = max(cell.membrane.y, 0) *
                 min(max(cell.tissueGeometry.z, 0), 1)
-            cellAutonomyVectors.append(AutonomyVector.measured(
-                from: ComponentObservation(
+            let cellObservation = ComponentObservation(
                     step: totalSteps,
                     candidateID: UInt64(identity.persistentID),
                     partitionLevel: .cell,
@@ -776,26 +802,51 @@ extension EvolutionRenderer {
                     withinComponentReplicationAdvantage: Double(max(interaction.w, 0)),
                     descendantRepresentation: 0,
                     parentResemblance: 0
-                ),
+                )
+            observerCandidates.append(IndividualityCandidate(
+                observation: cellObservation,
+                positionX: Double(cell.position.x),
+                positionY: Double(cell.position.y),
+                isSeparatedDescendant: agents[owner].generation > 0,
+                environmentalDependence: Double(
+                    abs(cell.environment.x) + abs(cell.environment.y) +
+                    (1 - min(max(cell.environment.w, 0), 1))
+                )
+            ))
+            cellAutonomyVectors.append(AutonomyVector.measured(
+                from: cellObservation,
                 conditionalSelfPredictiveInformation: 0
             ))
 
             let program = programRecords[programIndex]
-            let programID = UInt64(program.genomeHash)
+            let programID = permanentProgramID(
+                index: identity.programIndex,
+                generation: identity.programGeneration
+            )
             let key = ComponentProgramKey(
                 componentID: UInt64(agents[owner].birthID),
                 programID: programID
             )
             var accumulator = representationCounts[key] ?? ProgramRepresentationAccumulator(
-                parentProgramID: program.parentGenomeHash == 0 ||
-                    program.parentGenomeHash == program.genomeHash
-                    ? nil : UInt64(program.parentGenomeHash),
+                parentProgramID: program.parentProgramIndex <
+                    UInt32(Self.maxHeritableProgramCount)
+                    ? permanentProgramID(
+                        index: program.parentProgramIndex,
+                        generation: program.parentProgramGeneration
+                    ) : nil,
                 cellCount: 0,
                 inheritedTrait: mechanochemicalTrait(programIndex: programIndex),
                 collectiveTrait: collectiveTrait(owner: owner)
             )
             accumulator.cellCount += 1
             representationCounts[key] = accumulator
+        }
+        if let observerResult = individualityObserver.observe(
+            observerCandidates,
+            evaluationStride: 1,
+            resamples: 48
+        ) {
+            latestObserverResult = observerResult
         }
         let currentProgramRepresentations = representationCounts.map { key, value in
             ProgramRepresentation(
@@ -886,6 +937,21 @@ extension EvolutionRenderer {
             fusions: fusions,
             cellDivisions: cellDivisions,
             programMutations: programMutations,
+            crossComponentContactSamples: counters[5],
+            membraneBreachSamples: counters[6],
+            resistedAttackSamples: counters[7],
+            trophicTransferSamples: counters[8],
+            transferredEnergy: Double(counters[9]) / Self.energyAuditScale,
+            deflectedAttackImpulse: Double(counters[10]) / Self.energyAuditScale,
+            fusionContactSamples: counters[11],
+            successfulFusionContactSamples: counters[12],
+            resolvedIndividuals: latestObserverResult?.resolvedIndividuals.count ?? 0,
+            resolvedCellIndividuals: latestObserverResult?.resolvedCellCount ?? 0,
+            resolvedCollectiveIndividuals:
+                latestObserverResult?.resolvedCollectiveCount ?? 0,
+            observerAutocorrelationTime:
+                latestObserverResult?.autocorrelationTime ?? 0,
+            observerWindows: latestObserverResult?.observationWindows ?? 0,
             activePrograms: invariantValues[14],
             livingProgramReferences: invariantValues[15],
             recycledProgramClaims: recycledProgramClaims,
@@ -1037,6 +1103,7 @@ private struct CellObservationRecord {
     var geometry: SIMD4<Float>
     var identity: SIMD4<UInt32>
     var programLineage: SIMD4<UInt32>
+    var programAncestry: SIMD4<UInt32>
     var inheritedTraits: SIMD4<Float>
     var energetic: SIMD4<Float>
     var boundary: SIMD4<Float>
@@ -1088,6 +1155,8 @@ private struct HeritableProgram {
     var parentGenomeHash: UInt32
     var originBirthID: UInt32
     var generation: UInt32
+    var parentProgramIndex: UInt32
+    var parentProgramGeneration: UInt32
 }
 
 private struct ProgramSlotState {
@@ -1195,6 +1264,7 @@ private struct LineageEventRecord {
     var morphologyDistance: Float
     var energy: Float
     var morphology: SIMD4<Float>
+    var programAncestry: SIMD4<UInt32>
 }
 
 struct AgentObservation: Sendable, Equatable {
@@ -1226,6 +1296,8 @@ struct CellObservation: Sendable, Equatable {
     let owner: Int
     let componentBirthID: UInt32
     let programReplicationGeneration: UInt32
+    let programID: UInt64
+    let parentProgramID: UInt64?
     let programGenomeHash: UInt32
     let parentProgramGenomeHash: UInt32
     let inheritedMechanochemicalTrait: Float
@@ -1254,6 +1326,8 @@ struct RecordedLineageEvent: Sendable, Equatable {
     let parentBirthID: UInt32
     let step: UInt32
     let generation: UInt32
+    let programID: UInt64
+    let parentProgramID: UInt64?
     let genomeHash: UInt32
     let topologyHash: UInt32
     let mutationDistance: Float
@@ -1321,6 +1395,16 @@ private final class LineageEventDeliveryState: @unchecked Sendable {
                 parentBirthID: record.parentBirthID,
                 step: record.step,
                 generation: record.generation,
+                programID: permanentProgramID(
+                    index: record.programAncestry.x,
+                    generation: record.programAncestry.y
+                ),
+                parentProgramID: record.programAncestry.z <
+                    permanentProgramSlotCapacity
+                    ? permanentProgramID(
+                        index: record.programAncestry.z,
+                        generation: record.programAncestry.w
+                    ) : nil,
                 genomeHash: record.genomeHash,
                 topologyHash: record.topologyHash,
                 mutationDistance: record.mutationDistance,
@@ -1454,6 +1538,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let cellJunctionCapacity = 32_768
     private static let energyExchangeChannelCount = 8
     private static let energyAuditChannelCount = 10
+    private static let identityCounterCount = 13
     private static let invariantStateCount = 20
     private static let invariantScratchHeaderCount = 16
     private static let invariantScratchCount = invariantScratchHeaderCount +
@@ -1662,10 +1747,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     init(view: MTKView) throws {
         precondition(MemoryLayout<AgentState>.stride == 192, "AgentState Metal ABI drift")
         precondition(MemoryLayout<AgentObservationRecord>.stride == 176, "AgentObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellObservationRecord>.stride == 144, "CellObservationRecord Metal ABI drift")
+        precondition(MemoryLayout<CellObservationRecord>.stride == 160, "CellObservationRecord Metal ABI drift")
         precondition(MemoryLayout<CellState>.stride == 288, "CellState Metal ABI drift")
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
-        precondition(MemoryLayout<HeritableProgram>.stride == 96, "HeritableProgram Metal ABI drift")
+        precondition(MemoryLayout<HeritableProgram>.stride == 112, "HeritableProgram Metal ABI drift")
         precondition(MemoryLayout<ProgramSlotState>.stride == 16, "ProgramSlotState Metal ABI drift")
         precondition(MemoryLayout<CellJunctionState>.stride == 32, "CellJunctionState Metal ABI drift")
         precondition(MemoryLayout<CellAggregate>.stride == 336, "CellAggregate Metal ABI drift")
@@ -1675,7 +1760,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         precondition(MemoryLayout<ResonanceGenome>.stride == 32, "ResonanceGenome Metal ABI drift")
         precondition(MemoryLayout<ProgramMetricRecord>.stride == 160, "ProgramMetricRecord Metal ABI drift")
         precondition(MemoryLayout<MembraneVertex>.stride == 32, "MembraneVertex Metal ABI drift")
-        precondition(MemoryLayout<LineageEventRecord>.stride == 64, "LineageEventRecord Metal ABI drift")
+        precondition(MemoryLayout<LineageEventRecord>.stride == 80, "LineageEventRecord Metal ABI drift")
         guard let device = view.device ?? MTLCreateSystemDefaultDevice() else {
             throw EvolutionRendererError.noMetalDevice
         }
@@ -1963,7 +2048,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let activeComponentIndexLength = Self.maxAgentCount * MemoryLayout<UInt32>.stride
         let activeComponentCountLength = MemoryLayout<UInt32>.stride
         let activeComponentDispatchLength = 3 * MemoryLayout<UInt32>.stride
-        let identityCounterLength = 5 * MemoryLayout<UInt32>.stride
+        let identityCounterLength = Self.identityCounterCount * MemoryLayout<UInt32>.stride
         let lineageEventLength = Self.lineageEventCapacity * MemoryLayout<LineageEventRecord>.stride
         let mechanicalForcingLength = Self.gridSize * Self.gridSize * Self.worldCount * 2 *
             MemoryLayout<Int32>.stride
@@ -3198,16 +3283,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellSpatialHashNext, offset: 0, index: 6)
         encoder.setBuffer(cellContactEffects, offset: 0, index: 7)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 8)
-        encoder.setBuffer(developmentalGenomes, offset: 0, index: 9)
         encoder.setBuffer(cellIdentities, offset: 0, index: 9)
         encoder.setBuffer(heritablePrograms, offset: 0, index: 10)
         encoder.setBuffer(cellJunctions, offset: 0, index: 11)
         encoder.setBuffer(membraneContactEffects, offset: 0, index: 12)
         encoder.setBuffer(programSlots, offset: 0, index: 13)
         encoder.setBuffer(energyAudit, offset: 0, index: 14)
+        encoder.setBuffer(identityCounters, offset: 0, index: 15)
         dispatchCells(encoder, pipeline: resolveCellContactsPipeline)
         encoder.memoryBarrier(resources: [
-            cellContactEffects, membraneContactEffects, cellJunctions, energyAudit
+            cellContactEffects, membraneContactEffects, cellJunctions, energyAudit,
+            identityCounters
         ])
 
         if auditInvariants {
@@ -3273,13 +3359,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(lineageEvents, offset: 0, index: 20)
         encoder.setBuffer(activeComponentIndices, offset: 0, index: 21)
         encoder.setBuffer(activeComponentCount, offset: 0, index: 22)
+        encoder.setBuffer(cellJunctions, offset: 0, index: 23)
         dispatchActiveComponents(encoder, pipeline: divideAndReduceCellPipeline)
         encoder.memoryBarrier(resources: [
             agentState, cellState, cellOccupancy, cellIdentities, cellAggregates,
             ownerCellHeads, ownerCellNext, regulatoryStates, membraneVertices,
             identityCounters, programInteractions, programSlots, developmentalGenomes,
-            regulatoryNodes, regulatoryEdges, resonanceGenomes, heritablePrograms
-            , lineageEvents
+            regulatoryNodes, regulatoryEdges, resonanceGenomes, heritablePrograms,
+            lineageEvents, cellJunctions
         ])
 
         encoder.setComputePipelineState(evolveMechanicalPipeline)
@@ -3436,8 +3523,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellComponentParents, offset: 0, index: 8)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 9)
         encoder.setBuffer(heritablePrograms, offset: 0, index: 10)
+        encoder.setBuffer(identityCounters, offset: 0, index: 11)
         dispatchCells(encoder, pipeline: unionCellComponentsPipeline)
-        encoder.memoryBarrier(resources: [cellComponentParents])
+        encoder.memoryBarrier(resources: [cellComponentParents, identityCounters])
 
         encoder.setComputePipelineState(compressCellComponentsPipeline)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 0)
@@ -4061,6 +4149,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     owner: Int(record.identity.y),
                     componentBirthID: record.identity.z,
                     programReplicationGeneration: record.identity.w,
+                    programID: permanentProgramID(
+                        index: record.programAncestry.x,
+                        generation: record.programAncestry.y
+                    ),
+                    parentProgramID: record.programAncestry.z <
+                        permanentProgramSlotCapacity
+                        ? permanentProgramID(
+                            index: record.programAncestry.z,
+                            generation: record.programAncestry.w
+                        ) : nil,
                     programGenomeHash: record.programLineage.x,
                     parentProgramGenomeHash: record.programLineage.y,
                     inheritedMechanochemicalTrait: record.inheritedTraits.x,
@@ -4078,7 +4176,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 to: LineageEventRecord.self,
                 capacity: lineageCapacity
             )
-            let counters = buffers.identityCounters.contents().bindMemory(to: UInt32.self, capacity: 5)
+            let counters = buffers.identityCounters.contents().bindMemory(
+                to: UInt32.self, capacity: identityReadbackCounterCount
+            )
             let events = deliveryState.consume(
                 records: eventRecords,
                 writeSequence: counters[2],
@@ -4117,7 +4217,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
         let identityCounterValues = slot.identityCounters.contents().bindMemory(
             to: UInt32.self,
-            capacity: 5
+            capacity: Self.identityCounterCount
         )
         let energyAuditValues = slot.energyAudit.contents().bindMemory(
             to: Int32.self,
@@ -4524,6 +4624,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 metrics: champion.metrics,
                 fitness: champion.fitness
             )
+            latestSnapshot.crossComponentContactSamples = identityCounterValues[5]
+            latestSnapshot.membraneBreachSamples = identityCounterValues[6]
+            latestSnapshot.resistedAttackSamples = identityCounterValues[7]
+            latestSnapshot.trophicTransferSamples = identityCounterValues[8]
+            latestSnapshot.transferredEnergy =
+                Double(identityCounterValues[9]) / Self.energyAuditScale
+            latestSnapshot.deflectedAttackImpulse =
+                Double(identityCounterValues[10]) / Self.energyAuditScale
+            latestSnapshot.fusionContactSamples = identityCounterValues[11]
+            latestSnapshot.successfulFusionContactSamples = identityCounterValues[12]
 #if DEBUG
             let netCellularPower = cellularEnergyHarvest - cellularEnergyDemand -
                 cellularEnergyDissipation

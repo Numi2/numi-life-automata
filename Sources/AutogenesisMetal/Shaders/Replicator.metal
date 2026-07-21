@@ -164,6 +164,9 @@ struct HeritableProgram {
     uint parentGenomeHash;
     uint originBirthID;
     uint generation;
+    // Exact immutable parent identity: generation-tagged recyclable slot handle.
+    uint parentProgramIndex;
+    uint parentProgramGeneration;
 };
 
 struct ProgramSlotState {
@@ -326,6 +329,8 @@ struct CellObservationRecord {
     uint4 identity;
     // Genome hash, parent genome hash, slot generation, and slot index.
     uint4 programLineage;
+    // Exact current and parent program handles: index, generation, index, generation.
+    uint4 programAncestry;
     // Inherited mechanochemical-loop trait, signaling cost, detachment, investment.
     float4 inheritedTraits;
     // Harvested ATP, imported ATP, repair flux, and membrane integrity.
@@ -353,6 +358,7 @@ struct LineageEventRecord {
     float morphologyDistance;
     float energy;
     float4 morphology;
+    uint4 programAncestry;
 };
 
 inline uint hash32(uint value) {
@@ -498,6 +504,8 @@ inline HeritableProgram emptyHeritableProgram() {
     program.parentGenomeHash = 0u;
     program.originBirthID = 0u;
     program.generation = 0u;
+    program.parentProgramIndex = maxHeritableProgramCount;
+    program.parentProgramGeneration = 0u;
     return program;
 }
 
@@ -528,7 +536,9 @@ inline AgentState agentWithCellProgram(
 
 inline HeritableProgram heritableProgramFromAgent(
     AgentState agent,
-    uint parentGenomeHash
+    uint parentGenomeHash,
+    uint parentProgramIndex,
+    uint parentProgramGeneration
 ) {
     HeritableProgram program;
     program.geneA = agent.geneA;
@@ -540,6 +550,8 @@ inline HeritableProgram heritableProgramFromAgent(
     program.parentGenomeHash = parentGenomeHash;
     program.originBirthID = agent.birthID;
     program.generation = agent.programReplicationGeneration;
+    program.parentProgramIndex = parentProgramIndex;
+    program.parentProgramGeneration = parentProgramGeneration;
     return program;
 }
 
@@ -1007,6 +1019,10 @@ inline void recordLineageEvent(
         aggregate.shape.z,
         aggregate.dynamics.y
     );
+    event.programAncestry = uint4(
+        agent.dominantProgramIndex, agent.dominantProgramGeneration,
+        maxHeritableProgramCount, 0u
+    );
     events[slot] = event;
 }
 
@@ -1043,6 +1059,10 @@ inline void recordCellLineageEvent(
         child.physiology.w,
         child.signals.z,
         child.physiology.z
+    );
+    event.programAncestry = uint4(
+        childIdentity.programIndex, childIdentity.programGeneration,
+        program.parentProgramIndex, program.parentProgramGeneration
     );
     events[slot] = event;
 }
@@ -2590,7 +2610,11 @@ inline AgentState mutateCellProgram(
         childResonance, developmentalGenomes[childProgramIndex]
     );
     heritablePrograms[childProgramIndex] = heritableProgramFromAgent(
-        child, heritablePrograms[parentProgramIndex].genomeHash
+        child, heritablePrograms[parentProgramIndex].genomeHash,
+        parentProgramIndex,
+        atomic_load_explicit(
+            &programSlots[parentProgramIndex].generation, memory_order_relaxed
+        )
     );
     publishHeritableProgram(programSlots, childProgramIndex, child.genomeHash);
     return child;
@@ -2856,6 +2880,9 @@ kernel void initializeAgents(
         atomic_store_explicit(&identityCounters[2], 0u, memory_order_relaxed);
         atomic_store_explicit(&identityCounters[3], 1u, memory_order_relaxed);
         atomic_store_explicit(&identityCounters[4], 0u, memory_order_relaxed);
+        for (uint counter = 5u; counter < 13u; ++counter) {
+            atomic_store_explicit(&identityCounters[counter], 0u, memory_order_relaxed);
+        }
     }
 }
 
@@ -2992,6 +3019,10 @@ kernel void collectCellObservations(
     observation.programLineage = uint4(
         program.genomeHash, program.parentGenomeHash,
         identity.programGeneration, identity.programIndex
+    );
+    observation.programAncestry = uint4(
+        identity.programIndex, identity.programGeneration,
+        program.parentProgramIndex, program.parentProgramGeneration
     );
     float4 inheritedGains = abs(float4(
         developmental.mechanochemistryA.x,
@@ -3162,7 +3193,9 @@ kernel void nucleateAutogenicFounder(
         founder, developmentalGenomes[programIndex].topology.z, resonance,
         developmentalGenomes[programIndex]
     );
-    heritablePrograms[programIndex] = heritableProgramFromAgent(founder, 0u);
+    heritablePrograms[programIndex] = heritableProgramFromAgent(
+        founder, 0u, maxHeritableProgramCount, 0u
+    );
     publishHeritableProgram(programSlots, programIndex, founder.genomeHash);
     agents[0] = founder;
     uint founderCellIndex = seedOrganismCells(
@@ -3354,6 +3387,7 @@ kernel void unionCellComponents(
     device atomic_uint* componentParents [[buffer(8)]],
     constant SimulationUniforms& uniforms [[buffer(9)]],
     device const HeritableProgram* heritablePrograms [[buffer(10)]],
+    device atomic_uint* identityCounters [[buffer(11)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxCellCount ||
@@ -3463,6 +3497,17 @@ kernel void unionCellComponents(
                     bool connected = sameOwner
                         ? integrity > 0.10 && distance <= junctionDistance
                         : fusionDrive > 0.38 && distance <= junctionDistance;
+                    if (!sameOwner && distance <=
+                        (supportA.x + supportB.x + 0.018) * scale) {
+                        atomic_fetch_add_explicit(
+                            &identityCounters[11], 1u, memory_order_relaxed
+                        );
+                        if (connected) {
+                            atomic_fetch_add_explicit(
+                                &identityCounters[12], 1u, memory_order_relaxed
+                            );
+                        }
+                    }
                     if (connected) {
                         unionCellComponentPair(
                             componentParents, cellIdentities, gid, otherIndex
@@ -4015,7 +4060,9 @@ kernel void injectFounder(
         founder, developmentalGenomes[programIndex].topology.z, resonance,
         developmentalGenomes[programIndex]
     );
-    heritablePrograms[programIndex] = heritableProgramFromAgent(founder, 0u);
+    heritablePrograms[programIndex] = heritableProgramFromAgent(
+        founder, 0u, maxHeritableProgramCount, 0u
+    );
     publishHeritableProgram(programSlots, programIndex, founder.genomeHash);
     agents[claimed] = founder;
     uint founderCellIndex = seedOrganismCells(
@@ -4675,14 +4722,14 @@ kernel void evolveOrganismCells(
             incomingRejection * 0.00040,
         0.0, 1.0
     );
-    float permeabilityTurnover = permeabilityProgram * 0.000035 *
+    float permeabilityTurnover = permeabilityProgram * 0.000024 *
         mix(0.18, 1.0, metabolicReadiness);
     float membraneRepair = repairProgram *
-        (atp * 0.00022 + metabolicReadiness * 0.000030);
-    float membraneATPSetpoint = mix(0.18, 0.38, metabolicReadiness);
+        (atp * 0.00031 + metabolicReadiness * 0.000044);
+    float membraneATPSetpoint = mix(0.12, 0.27, metabolicReadiness);
     float membraneIntegrity = clamp(
         cell.physiology.w + (atp - membraneATPSetpoint) * 0.00020 + membraneRepair -
-            stress * 0.00030 - apoptosis * 0.00045 - permeabilityTurnover -
+            stress * 0.00022 - apoptosis * 0.00031 - permeabilityTurnover -
             incomingRejection * 0.00026,
         0.0, 1.0
     );
@@ -5435,6 +5482,7 @@ kernel void resolveMembraneContacts(
     device atomic_int* membraneContactEffects [[buffer(12)]],
     device const ProgramSlotState* programSlots [[buffer(13)]],
     device atomic_int* energyAudit [[buffer(14)]],
+    device atomic_uint* identityCounters [[buffer(15)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid >= maxCellCount ||
@@ -5516,6 +5564,11 @@ kernel void resolveMembraneContacts(
                         bool sameOwner = otherOwner == owner;
                         float interactionRange = sameOwner ? 0.090 : 0.012;
                         if (localGap < interactionRange) {
+                            if (!sameOwner) {
+                                atomic_fetch_add_explicit(
+                                    &identityCounters[5], 1u, memory_order_relaxed
+                                );
+                            }
                             float localOverlap = max(-localGap, 0.0);
                             float supportSpan = max(
                                 length(supportA.point) + length(supportB.point), 0.0001
@@ -5568,6 +5621,32 @@ kernel void resolveMembraneContacts(
                                 (1.0 - smoothstep(0.18, 0.42, other.physiology.w));
                             float transferFromA = contactStrength * attackB * breachA * 0.0018;
                             float transferFromB = contactStrength * attackA * breachB * 0.0018;
+                            if (!sameOwner && attackA + attackB > 0.000001) {
+                                bool breached = (attackB > 0.0 && breachA > 0.05) ||
+                                    (attackA > 0.0 && breachB > 0.05);
+                                atomic_fetch_add_explicit(
+                                    &identityCounters[breached ? 6 : 7],
+                                    1u, memory_order_relaxed
+                                );
+                                float transferred = transferFromA + transferFromB;
+                                if (transferred > 0.0000001) {
+                                    atomic_fetch_add_explicit(
+                                        &identityCounters[8], 1u, memory_order_relaxed
+                                    );
+                                    atomic_fetch_add_explicit(
+                                        &identityCounters[9],
+                                        uint(min(transferred * 1048576.0, 4294967295.0)),
+                                        memory_order_relaxed
+                                    );
+                                }
+                                float deflected = contactStrength *
+                                    (attackB * defenseA + attackA * defenseB);
+                                atomic_fetch_add_explicit(
+                                    &identityCounters[10],
+                                    uint(min(deflected * 1048576.0, 4294967295.0)),
+                                    memory_order_relaxed
+                                );
+                            }
                             float trophicA = transferFromB * 0.68 - transferFromA;
                             float trophicB = transferFromA * 0.68 - transferFromB;
                             float trophicLossHeat = max(
@@ -6202,6 +6281,7 @@ kernel void divideAndReduceOrganismCells(
     device LineageEventRecord* lineageEvents [[buffer(20)]],
     device const uint* activeComponents [[buffer(21)]],
     device const atomic_uint* activeComponentCount [[buffer(22)]],
+    device CellJunctionState* cellJunctions [[buffer(23)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
     if (compactIndex >= atomic_load_explicit(activeComponentCount, memory_order_relaxed)) { return; }
@@ -6434,6 +6514,24 @@ kernel void divideAndReduceOrganismCells(
             cellIdentities[divisionTarget] = childIdentity;
             cellParentIDs[divisionTarget] = parentIdentity.persistentID;
             programInteractions[divisionTarget] = float4(0.0, 0.0, -1.0, 0.0);
+            uint cytokineticPairKey = cellPairKey(divisionParent, divisionTarget);
+            uint cytokineticFingerprint = cellPairFingerprint(
+                cellIdentities, divisionParent, divisionTarget
+            );
+            float daughterAdhesion = min(parent.phenotype.x, child.phenotype.x);
+            float midbodyStrength = clamp(
+                0.46 + daughterAdhesion * 0.34 +
+                    min(parent.physiology.w, child.physiology.w) * 0.20,
+                0.46, 0.94
+            );
+            uint midbodyJunction = findOrCreateCellJunction(
+                cellJunctions, cytokineticPairKey, cytokineticFingerprint,
+                uniforms.step, length(child.position - parent.position), midbodyStrength
+            );
+            if (midbodyJunction < cellJunctionCapacity) {
+                cellJunctions[midbodyJunction].flags = 3u;
+                cellJunctions[midbodyJunction].age = 8.0;
+            }
             uint ownerHead = atomic_load_explicit(
                 &ownerCellHeads[owner], memory_order_relaxed
             );

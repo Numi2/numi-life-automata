@@ -66,6 +66,7 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
     var auditInterval: UInt64 = 1
     var quantumStride: UInt64 = 3
     var strictInvariants = true
+    var allowConcurrent = false
     var mechanosensing = MechanosensingSchedule()
     var environmentalScaffold = EnvironmentalScaffoldSchedule()
     var outputPath = ""
@@ -92,6 +93,7 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
       --post-barrier-gain X   Mechanical barrier gain after --intervention-step
       --output PATH         JSONL output path
       --no-strict           Record invariant failures without stopping
+      --allow-concurrent    Bypass the exclusive GPU experiment lock
       --help                Show this help
     """
 
@@ -205,6 +207,8 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
                 configuration.outputPath = try value(after: argument)
             case "--no-strict":
                 configuration.strictInvariants = false
+            case "--allow-concurrent":
+                configuration.allowConcurrent = true
             case "--help", "-h":
                 print(usage)
                 exit(EXIT_SUCCESS)
@@ -253,6 +257,8 @@ struct ExperimentEvent: Codable {
     let birthID: UInt32
     let parentBirthID: UInt32?
     let generation: UInt32
+    let programID: UInt64
+    let parentProgramID: UInt64?
     let genomeHash: UInt32
     let topologyHash: UInt32
     let mutationDistance: Float
@@ -304,6 +310,19 @@ struct ExperimentSample: Codable {
     let fusions: UInt64
     let cellDivisions: UInt64
     let programMutations: UInt64
+    let crossComponentContactSamples: UInt32
+    let membraneBreachSamples: UInt32
+    let resistedAttackSamples: UInt32
+    let trophicTransferSamples: UInt32
+    let transferredEnergy: Double
+    let deflectedAttackImpulse: Double
+    let fusionContactSamples: UInt32
+    let successfulFusionContactSamples: UInt32
+    let resolvedIndividuals: Int
+    let resolvedCellIndividuals: Int
+    let resolvedCollectiveIndividuals: Int
+    let observerAutocorrelationTime: Double
+    let observerWindows: Int
     let activePrograms: UInt32
     let livingProgramReferences: UInt32
     let recycledProgramClaims: UInt64
@@ -430,6 +449,10 @@ enum HeadlessExperimentCLI {
     @MainActor
     static func run(arguments: ArraySlice<String>) throws {
         let configuration = try HeadlessExperimentConfiguration.parse(arguments)
+        let admissionLock = try ExperimentAdmissionLock.acquire(
+            unless: configuration.allowConcurrent
+        )
+        defer { withExtendedLifetime(admissionLock) {} }
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw EvolutionRendererError.noMetalDevice
         }

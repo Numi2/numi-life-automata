@@ -13,6 +13,7 @@ struct PairedCausalExperimentConfiguration: Codable, Sendable {
     var auditInterval: UInt64 = 1
     var quantumStride: UInt64 = 3
     var strictInvariants = true
+    var allowConcurrent = false
     var outputPath = ""
 
     static let usage = """
@@ -28,6 +29,7 @@ struct PairedCausalExperimentConfiguration: Codable, Sendable {
       --quantum-stride N    Biological steps per quantum step (default: 3)
       --output PATH         Paired-estimate JSONL output path
       --no-strict           Record invariant failures without stopping
+      --allow-concurrent    Bypass the exclusive GPU experiment lock
       --help                Show this help
     """
 
@@ -93,6 +95,8 @@ struct PairedCausalExperimentConfiguration: Codable, Sendable {
                 configuration.outputPath = try value(after: argument)
             case "--no-strict":
                 configuration.strictInvariants = false
+            case "--allow-concurrent":
+                configuration.allowConcurrent = true
             case "--help", "-h":
                 print(usage)
                 exit(EXIT_SUCCESS)
@@ -282,6 +286,10 @@ enum PairedCausalExperimentCLI {
     @MainActor
     static func run(arguments: ArraySlice<String>) throws {
         let configuration = try PairedCausalExperimentConfiguration.parse(arguments)
+        let admissionLock = try ExperimentAdmissionLock.acquire(
+            unless: configuration.allowConcurrent
+        )
+        defer { withExtendedLifetime(admissionLock) {} }
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw EvolutionRendererError.noMetalDevice
         }

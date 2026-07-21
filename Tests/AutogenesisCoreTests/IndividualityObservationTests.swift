@@ -86,9 +86,21 @@ struct IndividualityObservationTests {
         )
         let evidence = IndividualityEvidence(
             mechanochemicalAutonomy: autonomy,
-            darwinianLineage: .init(
+            physicalDescent: .init(
                 state: .supported, estimate: nil, nullUpperBound: nil,
                 reason: "Programs persist in separated descendants."
+            ),
+            heritableVariation: .init(
+                state: .supported, estimate: nil, nullUpperBound: nil,
+                reason: "A transmitted descendant carries a mutated program."
+            ),
+            differentialTransmission: .init(
+                state: .supported, estimate: nil, nullUpperBound: 0,
+                reason: "Transmission differs among inherited programs."
+            ),
+            darwinianEvolution: .init(
+                state: .supported, estimate: nil, nullUpperBound: 0,
+                reason: "All three Darwinian evidence terms are supported."
             ),
             collectiveLevelIndividuality: .init(
                 state: .inconclusive, estimate: nil, nullUpperBound: nil,
@@ -105,8 +117,35 @@ struct IndividualityObservationTests {
         )
 
         #expect(evidence.mechanochemicalAutonomy.state == .supported)
-        #expect(evidence.darwinianLineage.state == .supported)
+        #expect(evidence.physicalDescent.state == .supported)
+        #expect(evidence.heritableVariation.state == .supported)
+        #expect(evidence.differentialTransmission.state == .supported)
+        #expect(evidence.darwinianEvolution.state == .supported)
         #expect(evidence.collectiveLevelIndividuality.state == .inconclusive)
+    }
+
+    @Test
+    func physicalDescentAloneDoesNotEstablishDarwinianEvolution() {
+        let claims = EvolutionaryEvidence.evaluate(
+            selection: SelectionPartition(
+                betweenComponentSelection: 0,
+                withinComponentSelection: 0,
+                transmissionChange: 0,
+                covarianceSampleCount: 12,
+                betweenComponentConfidence: ConfidenceInterval(
+                    estimate: 0, lower: 0, upper: 0, effectiveSampleCount: 12
+                ),
+                independentDescendantCount: 4,
+                transmittedVariantCount: 0
+            ),
+            maximumComponentDescentDepth: 2,
+            conservationValid: true
+        )
+
+        #expect(claims.physicalDescent.state == .supported)
+        #expect(claims.heritableVariation.state == .inconclusive)
+        #expect(claims.differentialTransmission.state == .inconclusive)
+        #expect(claims.darwinianEvolution.state == .inconclusive)
     }
 
     @Test

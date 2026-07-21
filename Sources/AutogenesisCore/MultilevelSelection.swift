@@ -53,6 +53,7 @@ public struct MultilevelSelectionInterval: Codable, Sendable, Equatable {
     public let transmissionChange: Double
     public let contributingParentComponents: Int
     public let independentDescendantComponents: Int
+    public let transmittedVariantCount: Int
     public let collectiveResemblance: [TraitResemblancePair]
 
     public init(
@@ -61,6 +62,7 @@ public struct MultilevelSelectionInterval: Codable, Sendable, Equatable {
         transmissionChange: Double,
         contributingParentComponents: Int,
         independentDescendantComponents: Int,
+        transmittedVariantCount: Int,
         collectiveResemblance: [TraitResemblancePair]
     ) {
         self.betweenComponentSelection = betweenComponentSelection
@@ -68,6 +70,7 @@ public struct MultilevelSelectionInterval: Codable, Sendable, Equatable {
         self.transmissionChange = transmissionChange
         self.contributingParentComponents = contributingParentComponents
         self.independentDescendantComponents = independentDescendantComponents
+        self.transmittedVariantCount = transmittedVariantCount
         self.collectiveResemblance = collectiveResemblance
     }
 }
@@ -137,6 +140,7 @@ public enum MultilevelPriceAnalysis {
 
         var componentOutcomes: [ComponentOutcome] = []
         var independentDescendants: Set<UInt64> = []
+        var transmittedVariants: Set<UInt64> = []
         var resemblance: [TraitResemblancePair] = []
 
         for (componentID, parentRows) in parentByComponent {
@@ -167,6 +171,9 @@ public enum MultilevelPriceAnalysis {
                 let transmitted = descendantComponents.values.flatMap { $0 }.filter {
                     programDescends($0.programID, from: parentRow.programID)
                 }
+                transmittedVariants.formUnion(transmitted.compactMap {
+                    $0.programID == parentRow.programID ? nil : $0.programID
+                })
                 let representation = Double(transmitted.reduce(0) { $0 + $1.cellCount })
                 let descendantTrait = representation > 0 ? transmitted.reduce(0.0) {
                     $0 + $1.inheritedTrait * Double($1.cellCount)
@@ -204,6 +211,7 @@ public enum MultilevelPriceAnalysis {
                 transmissionChange: 0,
                 contributingParentComponents: componentOutcomes.count,
                 independentDescendantComponents: independentDescendants.count,
+                transmittedVariantCount: transmittedVariants.count,
                 collectiveResemblance: resemblance
             )
         }
@@ -230,6 +238,7 @@ public enum MultilevelPriceAnalysis {
             transmissionChange: transmissionNumerator / initialTotal / meanFitness,
             contributingParentComponents: componentOutcomes.count,
             independentDescendantComponents: independentDescendants.count,
+            transmittedVariantCount: transmittedVariants.count,
             collectiveResemblance: resemblance
         )
     }
@@ -267,6 +276,9 @@ public enum MultilevelPriceAnalysis {
             ),
             independentDescendantCount: informative.reduce(0) {
                 $0 + $1.independentDescendantComponents
+            },
+            transmittedVariantCount: informative.reduce(0) {
+                $0 + $1.transmittedVariantCount
             }
         )
     }

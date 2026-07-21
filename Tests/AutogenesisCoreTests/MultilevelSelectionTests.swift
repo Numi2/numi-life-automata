@@ -58,6 +58,7 @@ struct MultilevelSelectionTests {
         )
 
         #expect(interval.transmissionChange > 0.19)
+        #expect(interval.transmittedVariantCount == 1)
     }
 
     @Test
@@ -107,6 +108,7 @@ struct MultilevelSelectionTests {
                 transmissionChange: 0.01 + sample * 0.001,
                 contributingParentComponents: 3,
                 independentDescendantComponents: 2,
+                transmittedVariantCount: 1,
                 collectiveResemblance: [pair]
             ))
         }
@@ -117,5 +119,6 @@ struct MultilevelSelectionTests {
         #expect(summary.withinComponentConfidence != nil)
         #expect(summary.transmissionConfidence != nil)
         #expect(summary.collectiveHeritability != nil)
+        #expect(summary.transmittedVariantCount == 6)
     }
 }

@@ -42,9 +42,15 @@ enum RecoveryProbeCLI {
     static func run(arguments: ArraySlice<String>) throws {
         var targetStep: UInt64 = 2_640
         var faultStep: UInt64 = 1_800
+        var allowConcurrent = false
         var index = arguments.startIndex
         while index < arguments.endIndex {
             let option = arguments[index]
+            if option == "--allow-concurrent" {
+                allowConcurrent = true
+                index = arguments.index(after: index)
+                continue
+            }
             let valueIndex = arguments.index(after: index)
             guard valueIndex < arguments.endIndex,
                   let value = UInt64(arguments[valueIndex]) else {
@@ -62,6 +68,8 @@ enum RecoveryProbeCLI {
                 "Use --fault-step above 1200 and --steps above the fault step."
             )
         }
+        let admissionLock = try ExperimentAdmissionLock.acquire(unless: allowConcurrent)
+        defer { withExtendedLifetime(admissionLock) {} }
 
         setenv("NUMI_SYNTHETIC_METAL_FAULT_STEP", String(faultStep), 1)
         defer { unsetenv("NUMI_SYNTHETIC_METAL_FAULT_STEP") }

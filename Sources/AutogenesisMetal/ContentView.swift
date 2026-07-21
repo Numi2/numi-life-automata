@@ -514,7 +514,10 @@ struct ContentView: View {
                 evidenceCount("PGEN", value: Int(store.maximumProgramReplicationGeneration), tint: .pink)
             }
             evidenceRow("AUTONOMY", claim: store.individualityEvidence.mechanochemicalAutonomy)
-            evidenceRow("DARWINIAN LINEAGE", claim: store.individualityEvidence.darwinianLineage)
+            evidenceRow("PHYSICAL DESCENT", claim: store.individualityEvidence.physicalDescent)
+            evidenceRow("HERITABLE VARIATION", claim: store.individualityEvidence.heritableVariation)
+            evidenceRow("DIFF TRANSMISSION", claim: store.individualityEvidence.differentialTransmission)
+            evidenceRow("DARWINIAN EVOLUTION", claim: store.individualityEvidence.darwinianEvolution)
             evidenceRow("COLLECTIVE LEVEL", claim: store.individualityEvidence.collectiveLevelIndividuality)
         }
     }
@@ -643,6 +646,31 @@ struct ContentView: View {
                     "TRANSMITTED COMPONENTS",
                     value: "\(store.individualityEvidence.selection.independentDescendantCount)",
                     tint: .cyan
+                )
+                measuredAutonomyValue(
+                    "TRANSMITTED VARIANTS",
+                    value: "\(store.individualityEvidence.selection.transmittedVariantCount)",
+                    tint: .pink
+                )
+                measuredAutonomyValue(
+                    "CROSS-COMPONENT CONTACT",
+                    value: "\(store.snapshot.crossComponentContactSamples)",
+                    tint: .cyan
+                )
+                measuredAutonomyValue(
+                    "BREACH / RESIST",
+                    value: "\(store.snapshot.membraneBreachSamples) / \(store.snapshot.resistedAttackSamples)",
+                    tint: .red
+                )
+                measuredAutonomyValue(
+                    "TROPHIC TRANSFER",
+                    value: "\(store.snapshot.trophicTransferSamples) / \(compactScientific(store.snapshot.transferredEnergy)) E",
+                    tint: .yellow
+                )
+                measuredAutonomyValue(
+                    "FUSION CONTACT / JOIN",
+                    value: "\(store.snapshot.fusionContactSamples) / \(store.snapshot.successfulFusionContactSamples)",
+                    tint: .mint
                 )
             }
             Text("Population-weighted measurements are copied from the GPU. Observer inference uses autocorrelation-adjusted windows, block-shuffled nulls, and bootstrap intervals and is never returned to a causal kernel.")

@@ -176,6 +176,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanProgramRejection: Double = 0
     var meanProgramRecognitionCompatibility: Double = -1
     var meanProgramNetContribution: Double = 0
+    var crossComponentContactSamples: UInt32 = 0
+    var membraneBreachSamples: UInt32 = 0
+    var resistedAttackSamples: UInt32 = 0
+    var trophicTransferSamples: UInt32 = 0
+    var transferredEnergy: Double = 0
+    var deflectedAttackImpulse: Double = 0
+    var fusionContactSamples: UInt32 = 0
+    var successfulFusionContactSamples: UInt32 = 0
     var metrics: WorldMetrics = .empty
     var fitness = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
 
@@ -472,22 +480,6 @@ final class EvolutionStore: ObservableObject {
     private var lastRecordedGeneration = 0
     private var observedAgents: [AgentObservation] = []
     private var followedBirthID: UInt32?
-    private struct ObserverCandidateKey: Hashable {
-        let level: CandidatePartitionLevel
-        let id: UInt64
-    }
-    private struct ObserverHistory {
-        var steps: [UInt64] = []
-        var internalState: [Double] = []
-        var environment: [Double] = []
-    }
-    private struct ObserverCandidate {
-        let key: ObserverCandidateKey
-        let position: SIMD2<Float>
-        let observation: ComponentObservation
-        let isSeparatedDescendant: Bool
-        let environmentalDependence: Double
-    }
     private struct ObservedProgramKey: Hashable {
         let componentID: UInt64
         let programID: UInt64
@@ -498,9 +490,7 @@ final class EvolutionStore: ObservableObject {
         let collectiveTrait: Double
         var cellCount: Int
     }
-    private var observerHistories: [ObserverCandidateKey: ObserverHistory] = [:]
-    private var observerPersistence: [ObserverCandidateKey: Int] = [:]
-    private var observerEvaluationCounter = 0
+    private var individualityObserver = IndividualityObserverEngine()
     private var previousProgramRepresentations: [ProgramRepresentation] = []
     private var selectionIntervals: [MultilevelSelectionInterval] = []
     private var currentSelection = SelectionPartition(
@@ -581,9 +571,7 @@ final class EvolutionStore: ObservableObject {
         followedEnergeticIndependence = 0
         followedMechanochemicalClosure = 0
         observedAgents.removeAll(keepingCapacity: true)
-        observerHistories.removeAll(keepingCapacity: true)
-        observerPersistence.removeAll(keepingCapacity: true)
-        observerEvaluationCounter = 0
+        individualityObserver.reset()
         previousProgramRepresentations.removeAll(keepingCapacity: true)
         selectionIntervals.removeAll(keepingCapacity: true)
         currentSelection = SelectionPartition(
@@ -814,18 +802,7 @@ final class EvolutionStore: ObservableObject {
             componentAncestryEdges = componentAncestryEdges.filter {
                 UInt64($0.step) <= telemetry.scientificallyCommittedStep
             }
-            for key in observerHistories.keys {
-                guard var candidateHistory = observerHistories[key] else { continue }
-                while let step = candidateHistory.steps.last,
-                      step > telemetry.scientificallyCommittedStep {
-                    candidateHistory.steps.removeLast()
-                    candidateHistory.internalState.removeLast()
-                    candidateHistory.environment.removeLast()
-                }
-                observerHistories[key] = candidateHistory
-            }
-            observerHistories = observerHistories.filter { !$0.value.steps.isEmpty }
-            observerPersistence.removeAll(keepingCapacity: true)
+            individualityObserver.rollback(after: telemetry.scientificallyCommittedStep)
             previousProgramRepresentations.removeAll(keepingCapacity: true)
             selectionIntervals.removeAll(keepingCapacity: true)
             currentSelection = SelectionPartition(
@@ -856,7 +833,7 @@ final class EvolutionStore: ObservableObject {
             runtimeTelemetry.scientificallyCommittedStep,
             snapshot.totalSteps
         )
-        var candidates: [ObserverCandidate] = agents.map { agent in
+        var candidates: [IndividualityCandidate] = agents.map { agent in
             let cellCount = max(Int((agent.morphology.x * 24).rounded()), 1)
             let observation = ComponentObservation(
                 step: observationStep,
@@ -881,13 +858,10 @@ final class EvolutionStore: ObservableObject {
                 descendantRepresentation: agent.componentDescentDepth > 0 ? 1 : 0,
                 parentResemblance: exp(-Double(agent.mutationDistance))
             )
-            return ObserverCandidate(
-                key: ObserverCandidateKey(
-                    level: .membraneConnectedComponent,
-                    id: UInt64(agent.birthID)
-                ),
-                position: agent.position,
+            return IndividualityCandidate(
                 observation: observation,
+                positionX: Double(agent.position.x),
+                positionY: Double(agent.position.y),
                 isSeparatedDescendant: agent.componentDescentDepth > 0,
                 environmentalDependence: Double(
                     abs(agent.environment.x) + abs(agent.environment.y) +
@@ -919,10 +893,10 @@ final class EvolutionStore: ObservableObject {
                 descendantRepresentation: 0,
                 parentResemblance: 0
             )
-            return ObserverCandidate(
-                key: ObserverCandidateKey(level: .cell, id: UInt64(cell.persistentID)),
-                position: cell.position,
+            return IndividualityCandidate(
                 observation: observation,
+                positionX: Double(cell.position.x),
+                positionY: Double(cell.position.y),
                 isSeparatedDescendant: false,
                 environmentalDependence: Double(
                     abs(cell.environment.x) + abs(cell.environment.y) +
@@ -931,119 +905,21 @@ final class EvolutionStore: ObservableObject {
             )
         })
 
-        let livingKeys = Set(candidates.map(\.key))
-        observerHistories = observerHistories.filter { livingKeys.contains($0.key) }
-        observerPersistence = observerPersistence.filter { livingKeys.contains($0.key) }
-        for candidate in candidates {
-            var history = observerHistories[candidate.key] ?? ObserverHistory()
-            let autonomy = AutonomyVector.measured(
-                from: candidate.observation,
-                conditionalSelfPredictiveInformation: 0
-            )
-            history.steps.append(observationStep)
-            history.internalState.append(autonomy.mechanochemicalClosure)
-            history.environment.append(candidate.environmentalDependence)
-            if history.internalState.count > 256 {
-                let excess = history.internalState.count - 256
-                history.steps.removeFirst(excess)
-                history.internalState.removeFirst(excess)
-                history.environment.removeFirst(excess)
-            }
-            observerHistories[candidate.key] = history
-        }
+        guard let observerResult = individualityObserver.observe(
+            candidates,
+            evaluationStride: 8,
+            resamples: 48
+        ) else { return }
+        resolvedCellIndividualCount = observerResult.resolvedCellCount
+        resolvedCollectiveIndividualCount = observerResult.resolvedCollectiveCount
+        resolvedIndividualCount = observerResult.resolvedIndividuals.count
+        resolvedDescendantCount = observerResult.resolvedDescendantCount
+        autonomyVectors = observerResult.resolvedIndividuals.map(\.autonomy)
 
-        observerEvaluationCounter += 1
-        guard observerEvaluationCounter.isMultiple(of: 8) else { return }
-        var estimates: [ObserverCandidateKey: SelfPredictiveInformationEstimate] = [:]
-        for candidate in candidates.prefix(128) {
-            guard let history = observerHistories[candidate.key],
-                  let estimate = IndividualityStatistics.conditionalSelfPredictiveInformation(
-                    state: history.internalState,
-                    environment: history.environment,
-                    resamples: 48,
-                    seed: candidate.key.id ^ observationStep
-                  ) else { continue }
-            estimates[candidate.key] = estimate
-        }
-
-        let spatialRadiusSquared: Float = 0.08 * 0.08
-        let instantaneousMaxima = candidates.filter { candidate in
-            guard let estimate = estimates[candidate.key], estimate.state == .supported,
-                  let history = observerHistories[candidate.key],
-                  Double(history.internalState.count) >= 3 * estimate.autocorrelationTime else {
-                return false
-            }
-            return !candidates.contains { neighbor in
-                guard neighbor.key != candidate.key,
-                      simd_distance_squared(neighbor.position, candidate.position) <= spatialRadiusSquared,
-                      let neighborEstimate = estimates[neighbor.key] else { return false }
-                return neighborEstimate.observed.estimate > estimate.observed.estimate
-            }
-        }
-        let instantaneousKeys = Set(instantaneousMaxima.map(\.key))
-        for candidate in candidates {
-            observerPersistence[candidate.key] = instantaneousKeys.contains(candidate.key)
-                ? (observerPersistence[candidate.key] ?? 0) + 1 : 0
-        }
-        let localMaxima = instantaneousMaxima.filter { candidate in
-            guard let estimate = estimates[candidate.key] else { return false }
-            let requiredEvaluationWindows = max(
-                Int(ceil(estimate.autocorrelationTime / 8)),
-                1
-            )
-            return (observerPersistence[candidate.key] ?? 0) >= requiredEvaluationWindows
-        }
-        resolvedCellIndividualCount = localMaxima.count {
-            $0.key.level == .cell
-        }
-        resolvedCollectiveIndividualCount = localMaxima.count {
-            $0.key.level == .membraneConnectedComponent
-        }
-        resolvedIndividualCount = localMaxima.count
-        resolvedDescendantCount = localMaxima.count {
-            $0.key.level == .membraneConnectedComponent && $0.isSeparatedDescendant
-        }
-        autonomyVectors = localMaxima.compactMap { candidate in
-            estimates[candidate.key].map {
-                AutonomyVector.measured(
-                    from: candidate.observation,
-                    conditionalSelfPredictiveInformation: $0.observed.estimate
-                )
-            }
-        }
-
-        let bestCandidate = localMaxima.max {
-            (estimates[$0.key]?.observed.estimate ?? 0) <
-                (estimates[$1.key]?.observed.estimate ?? 0)
-        }
-        let best = bestCandidate.flatMap { estimates[$0.key] }
-        let autonomyClaim: EvidenceClaim
-        if let best {
-            autonomyClaim = EvidenceClaim(
-                state: best.state,
-                estimate: best.observed,
-                nullUpperBound: best.shuffledNull.upper,
-                reason: "Conditional self-predictive information is compared with autocorrelation-preserving block-shuffled nulls."
-            )
-        } else {
-            autonomyClaim = EvidenceClaim(
-                state: estimates.isEmpty ? .inconclusive : .notSupported,
-                estimate: nil,
-                nullUpperBound: nil,
-                reason: estimates.isEmpty
-                    ? "The observer has fewer than three empirical autocorrelation windows."
-                    : "No persistent local maximum exceeds its block-shuffled null."
-            )
-        }
-        let hasSeparatedLivingDescendant = currentSelection.independentDescendantCount > 0 &&
-            agents.contains { $0.componentDescentDepth > 0 }
-        let lineageClaim = EvidenceClaim(
-            state: hasSeparatedLivingDescendant ? .supported : .inconclusive,
-            estimate: nil,
-            nullUpperBound: nil,
-            reason: hasSeparatedLivingDescendant
-                ? "Inherited programs remain represented in independently separated living components."
-                : "No independently separated living descendant currently carries transmitted programs."
+        let evolutionary = EvolutionaryEvidence.evaluate(
+            selection: currentSelection,
+            maximumComponentDescentDepth: agents.map(\.componentDescentDepth).max() ?? 0,
+            conservationValid: runtimeTelemetry.lastError == nil
         )
         let collectiveSupport = currentSelection.covarianceSampleCount >= 8 &&
             (currentSelection.betweenComponentConfidence?.lower ?? -.infinity) > 0 &&
@@ -1057,17 +933,15 @@ final class EvolutionStore: ObservableObject {
                 : "Collective support requires eight transmitted parent components and positive 95% intervals for between-component covariance and collective resemblance."
         )
         individualityEvidence = IndividualityEvidence(
-            mechanochemicalAutonomy: autonomyClaim,
-            darwinianLineage: lineageClaim,
+            mechanochemicalAutonomy: observerResult.autonomyClaim,
+            physicalDescent: evolutionary.physicalDescent,
+            heritableVariation: evolutionary.heritableVariation,
+            differentialTransmission: evolutionary.differentialTransmission,
+            darwinianEvolution: evolutionary.darwinianEvolution,
             collectiveLevelIndividuality: collectiveClaim,
             selection: currentSelection,
-            autocorrelationTime: best?.autocorrelationTime ?? 0,
-            observationWindows: bestCandidate.flatMap { candidate in
-                best.map {
-                    Int(Double(observerHistories[candidate.key]?.internalState.count ?? 0) /
-                        max($0.autocorrelationTime, 1))
-                }
-            } ?? 0
+            autocorrelationTime: observerResult.autocorrelationTime,
+            observationWindows: observerResult.observationWindows
         )
     }
 
@@ -1086,14 +960,12 @@ final class EvolutionStore: ObservableObject {
             return (UInt64(agent.birthID), trait)
         })
         var counts: [ObservedProgramKey: ObservedProgramCount] = [:]
-        for cell in cells where cell.programGenomeHash != 0 {
+        for cell in cells where cell.programID != 0 {
             let componentID = UInt64(cell.componentBirthID)
-            let programID = UInt64(cell.programGenomeHash)
+            let programID = cell.programID
             let key = ObservedProgramKey(componentID: componentID, programID: programID)
             var count = counts[key] ?? ObservedProgramCount(
-                parentProgramID: cell.parentProgramGenomeHash == 0 ||
-                    cell.parentProgramGenomeHash == cell.programGenomeHash
-                    ? nil : UInt64(cell.parentProgramGenomeHash),
+                parentProgramID: cell.parentProgramID,
                 inheritedTrait: Double(cell.inheritedMechanochemicalTrait),
                 collectiveTrait: collectiveTraits[componentID] ?? 0,
                 cellCount: 0
