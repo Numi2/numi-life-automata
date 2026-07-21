@@ -1305,8 +1305,8 @@ struct ContentView: View {
         case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
         case 2: "Local chemical affinity is sqrt(A·B) times permeability and toxin inhibition. Quantum order and mechanical activity add catalyst; catalyst then gates stored-energy production. Quantum order, catalyst, and E set the membrane target, while catalyst-dependent mineralization returns detritus to both substrates. Cells consume these fields for ATP and return mechanical work and detritus, closing the cross-scale loop."
-        case 3: "A bounded sparse graph maps eight local inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Cell-cycle and biomass dynamics use measured substrate harvest relative to maintenance, work, and dissipation together with ATP reserve, exposed membrane, crowding, stress, and inherited regulation. Inherited morphogen source, decay, receptor, and diffusivity parameters operate across persistent junctions; their local imbalance updates fate memory and polarity. Exposed membrane edges define geometry, and cell-local gradients, ERK* state, and developmental polarity generate external traction."
-        case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Fission transmits programs already present in cells without mutation; mutation occurs only during ATP-funded cell division. Permanent cell IDs and acquired states persist through ownership changes."
+        case 3: "A bounded sparse graph maps sixteen local mechanochemical and ecological inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Cell-cycle and biomass dynamics use measured substrate harvest relative to maintenance, work, and dissipation together with ATP reserve, exposed membrane, crowding, stress, and inherited regulation. Persistent junction ribbons read physical load and strain directly; amber packets show signed ATP sharing, cyan and magenta lanes show conductance-gated Ca*/ERK* propagation, and blue-green wound boundaries show ATP-funded repair. These render diagnostics never feed the cell update."
+        case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Lineage-colored junction rails identify contact between different generation-tagged programs. Fission transmits programs already present in cells without mutation; mutation occurs only during ATP-funded cell division."
         default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
         }
     }
@@ -1488,13 +1488,17 @@ struct ContentView: View {
                     ("Fate", .mint), ("Polarity", .white), ("Junction flux", .blue)
                 ]
             }
-            return [("Ca*", .cyan), ("ERK*", .pink), ("Traction", .mint), ("ATP", .orange), ("Vₘ", .red), ("Membrane", .blue)]
+            return [
+                ("Tension", .orange), ("ATP flow", .yellow),
+                ("Ca* wave", .cyan), ("ERK* wave", .pink),
+                ("Repair", .blue), ("Lineage mix", .purple)
+            ]
         }
         if store.observationZoom >= 6 {
             return [
-                ("Exposed membrane", .white), ("Cell identity", .cyan),
-                ("Nucleus / ERK*", .pink), ("Junction", .mint),
-                ("ATP", .yellow), ("Traction", .green)
+                ("Tension", .orange), ("ATP flow", .yellow),
+                ("Signal", .cyan), ("Damage", .red),
+                ("Repair", .blue), ("Lineage mix", .purple)
             ]
         }
         if store.displayMode == .ecology {
@@ -1527,7 +1531,7 @@ struct ContentView: View {
         return store.observationZoom >= 512 ? "Spinor components" :
             store.observationZoom >= 160 ? "Quantum observables" :
             store.observationZoom >= 64 ? "Reaction pools and flux" :
-            store.observationZoom >= 18 ? "Electromechanical cell state" : store.displayMode.label
+            store.observationZoom >= 18 ? "Causal tissue channels" : store.displayMode.label
     }
 
     private func percent(_ value: Double) -> String {

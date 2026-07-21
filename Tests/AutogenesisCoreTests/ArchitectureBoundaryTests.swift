@@ -321,6 +321,41 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func causalTissueOverlayUsesPhysicalJunctionStateWithoutFeedingSimulation() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let causalStart = try #require(shader.range(of: "kernel void evolveOrganismCells"))
+        let causalEnd = try #require(shader.range(
+            of: "kernel void detectCellTopologyChanges",
+            range: causalStart.upperBound..<shader.endIndex
+        ))
+        let causalCellEvolution = String(shader[causalStart.lowerBound..<causalEnd.lowerBound])
+        #expect(!causalCellEvolution.contains("visibleJunctionIndices"))
+        #expect(!causalCellEvolution.contains("drawArguments"))
+        #expect(shader.contains("kernel void compactVisibleJunctions"))
+        #expect(shader.contains("vertex JunctionRasterData junctionVertex"))
+        #expect(shader.contains("fragment float4 junctionFragment"))
+        #expect(shader.contains("MembraneSupportSample supportA = membraneSupportSample"))
+        #expect(shader.contains("bool finiteSupport = all(isfinite(supportA.point))"))
+        #expect(shader.contains("length(supportA.point) <= 0.30"))
+        #expect(shader.contains("junctionStates[junctionIndex].load / 0.0028"))
+        #expect(shader.contains("interactionB.x - interactionA.x"))
+        #expect(shader.contains("stateA.signaling.x - stateB.signaling.x"))
+        #expect(shader.contains("identityA.programIndex != identityB.programIndex"))
+        #expect(renderer.contains("compactJunctionRenderPipeline"))
+        #expect(renderer.contains("junctionRenderPipeline"))
+        #expect(renderer.contains("indirectBuffer: junctionDrawArguments"))
+    }
+
+    @Test
     func renderPathUsesSinglePassBloomAndDirectSpinorDisplay() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
@@ -448,7 +483,10 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("saturate(localVertex.mechanics.z * 120.0)"))
         #expect(shader.contains("saturate(abs(localVertex.mechanics.w) * 18.0)"))
         #expect(shader.contains("float membraneContinuity"))
+        #expect(shader.contains("float woundArc"))
+        #expect(shader.contains("float repairDemand"))
         #expect(shader.contains("float repairFront"))
+        #expect(shader.contains("float repairBoundary"))
         #expect(shader.contains("float leakage"))
     }
 }

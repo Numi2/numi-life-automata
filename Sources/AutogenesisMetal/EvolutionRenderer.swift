@@ -1710,9 +1710,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let accumulateSimulationInvariantsPipeline: MTLComputePipelineState
     private let finalizeSimulationInvariantsPipeline: MTLComputePipelineState
     private let compactCellRenderPipeline: MTLComputePipelineState
+    private let compactJunctionRenderPipeline: MTLComputePipelineState
     private let scaleSurfacePipelines: [MTLRenderPipelineState]
     private let cellRenderPipeline: MTLRenderPipelineState
     private let cellMeshRenderPipeline: MTLRenderPipelineState
+    private let junctionRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
     private let spinorDisplayPipeline: MTLRenderPipelineState
@@ -1786,6 +1788,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let visibleCellIndices: MTLBuffer
     private let cellDrawArguments: MTLBuffer
     private let cellMeshDrawArguments: MTLBuffer
+    private let visibleJunctionIndices: MTLBuffer
+    private let junctionDrawArguments: MTLBuffer
     private let activeComponentIndices: MTLBuffer
     private let activeComponentCount: MTLBuffer
     private let activeComponentDispatchArguments: MTLBuffer
@@ -1963,6 +1967,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         accumulateSimulationInvariantsPipeline = try pipelineFactory.makeComputePipeline(named: "accumulateSimulationInvariants")
         finalizeSimulationInvariantsPipeline = try pipelineFactory.makeComputePipeline(named: "finalizeSimulationInvariants")
         compactCellRenderPipeline = try pipelineFactory.makeComputePipeline(named: "compactVisibleCells")
+        compactJunctionRenderPipeline = try pipelineFactory.makeComputePipeline(
+            named: "compactVisibleJunctions"
+        )
         bloomPrefilterPipeline = try pipelineFactory.makeComputePipeline(named: "bloomPrefilter")
 
         scaleSurfacePipelines = try [
@@ -1991,6 +1998,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             label: "M4 adaptive membrane contour renderer",
             mesh: "cellContourMesh",
             fragment: "cellFragment",
+            pixelFormat: .rg11b10Float,
+            blending: true
+        )
+        junctionRenderPipeline = try pipelineFactory.makeRenderPipeline(
+            label: "Causal intercellular transport renderer",
+            vertex: "junctionVertex",
+            fragment: "junctionFragment",
             pixelFormat: .rg11b10Float,
             blending: true
         )
@@ -2094,6 +2108,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let invariantStateLength = Self.invariantStateCount * MemoryLayout<UInt32>.stride
         let invariantScratchLength = Self.invariantScratchCount * MemoryLayout<Int32>.stride
         let visibleCellIndexLength = Self.maxCellCount * MemoryLayout<UInt32>.stride
+        let visibleJunctionIndexLength = Self.cellJunctionCapacity * MemoryLayout<UInt32>.stride
         let drawArgumentLength = 4 * MemoryLayout<UInt32>.stride
         let meshDrawArgumentLength = 3 * MemoryLayout<UInt32>.stride
         let activeComponentIndexLength = Self.maxAgentCount * MemoryLayout<UInt32>.stride
@@ -2214,6 +2229,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 length: meshDrawArgumentLength,
                 options: .storageModeShared
               ),
+              let visibleJunctionIndices = device.makeBuffer(
+                length: visibleJunctionIndexLength,
+                options: .storageModePrivate
+              ),
+              let junctionDrawArguments = device.makeBuffer(
+                length: drawArgumentLength,
+                options: .storageModeShared
+              ),
               let activeComponentIndices = device.makeBuffer(
                 length: activeComponentIndexLength,
                 options: .storageModePrivate
@@ -2289,6 +2312,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         visibleCellIndices.label = "GPU-compacted visible cell indices"
         cellDrawArguments.label = "Indirect living-cell draw arguments"
         cellMeshDrawArguments.label = "Indirect M4 cell-mesh dispatch arguments"
+        visibleJunctionIndices.label = "GPU-compacted visible persistent junctions"
+        junctionDrawArguments.label = "Indirect causal-junction draw arguments"
         activeComponentIndices.label = "Compacted active component handles"
         activeComponentCount.label = "Active component count"
         activeComponentDispatchArguments.label = "Indirect active component dispatch arguments"
@@ -2309,6 +2334,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         meshDrawArguments[0] = 0
         meshDrawArguments[1] = 1
         meshDrawArguments[2] = 1
+        let junctionArguments = junctionDrawArguments.contents().bindMemory(
+            to: UInt32.self,
+            capacity: 4
+        )
+        junctionArguments[0] = 6
+        junctionArguments[1] = 0
+        junctionArguments[2] = 0
+        junctionArguments[3] = 0
         identityCounters.label = "Permanent identity and innovation counters"
         lineageEvents.label = "GPU lineage event ring"
         mechanicalForcing.label = "Cell contractile forcing"
@@ -2355,6 +2388,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.visibleCellIndices = visibleCellIndices
         self.cellDrawArguments = cellDrawArguments
         self.cellMeshDrawArguments = cellMeshDrawArguments
+        self.visibleJunctionIndices = visibleJunctionIndices
+        self.junctionDrawArguments = junctionDrawArguments
         self.activeComponentIndices = activeComponentIndices
         self.activeComponentCount = activeComponentCount
         self.activeComponentDispatchArguments = activeComponentDispatchArguments
@@ -2858,7 +2893,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             divideAndReduceCellPipeline, initializeInvariantPipeline,
             clearInvariantScratchPipeline, auditContactMomentumPipeline,
             accumulateSimulationInvariantsPipeline, finalizeSimulationInvariantsPipeline,
-            compactCellRenderPipeline, cellRenderPipeline, cellMeshRenderPipeline,
+            compactCellRenderPipeline, compactJunctionRenderPipeline,
+            cellRenderPipeline, cellMeshRenderPipeline, junctionRenderPipeline,
             bloomPrefilterPipeline,
             compositePipeline, spinorDisplayPipeline
         ]
@@ -2872,7 +2908,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         var buffers = checkpointBufferSources()
         buffers.append(contentsOf: [
             reactionAgentState, reactionCellState, visibleCellIndices, cellDrawArguments,
-            cellMeshDrawArguments,
+            cellMeshDrawArguments, visibleJunctionIndices, junctionDrawArguments,
             activeComponentIndices, activeComponentCount, activeComponentDispatchArguments,
             activeCellIndices, activeCellCount, activeCellDispatchArguments,
             membraneContactPairs, contactPairDispatchArguments
@@ -4170,10 +4206,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 range: 0..<MemoryLayout<UInt32>.stride,
                 value: 0
             )
+            blit.fill(
+                buffer: junctionDrawArguments,
+                range: MemoryLayout<UInt32>.stride..<(2 * MemoryLayout<UInt32>.stride),
+                value: 0
+            )
             blit.endEncoding()
         }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.label = "Compact visible living cells"
+        encoder.label = "Compact visible cells and causal junctions"
         if !settings.isRunning {
             encodeActiveCellCompaction(encoder)
         }
@@ -4189,6 +4230,25 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellState, offset: 0, index: 7)
         encoder.setBuffer(cellMeshDrawArguments, offset: 0, index: 8)
         dispatchCells(encoder, pipeline: compactCellRenderPipeline)
+
+        encoder.setComputePipelineState(compactJunctionRenderPipeline)
+        encoder.setBuffer(cellJunctions, offset: 0, index: 0)
+        encoder.setBuffer(cellOccupancy, offset: 0, index: 1)
+        encoder.setBuffer(cellIdentities, offset: 0, index: 2)
+        encoder.setBuffer(agentState, offset: 0, index: 3)
+        encoder.setBuffer(agentOccupancy, offset: 0, index: 4)
+        encoder.setBuffer(cellState, offset: 0, index: 5)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 6)
+        encoder.setBuffer(visibleJunctionIndices, offset: 0, index: 7)
+        encoder.setBuffer(junctionDrawArguments, offset: 0, index: 8)
+        let junctionThreadWidth = threadsPerThreadgroup1D(
+            pipeline: compactJunctionRenderPipeline,
+            count: Self.cellJunctionCapacity
+        )
+        encoder.dispatchThreads(
+            MTLSize(width: Self.cellJunctionCapacity, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: junctionThreadWidth, height: 1, depth: 1)
+        )
         encoder.endEncoding()
     }
 
@@ -4323,6 +4383,29 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     indirectBufferOffset: 0
                 )
             }
+
+            encoder.setRenderPipelineState(junctionRenderPipeline)
+            encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+            encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+            encoder.setVertexBuffer(cellState, offset: 0, index: 2)
+            encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
+            encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+            encoder.setVertexBytes(
+                &uniforms,
+                length: MemoryLayout<SimulationUniforms>.stride,
+                index: 5
+            )
+            encoder.setVertexBuffer(visibleJunctionIndices, offset: 0, index: 6)
+            encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
+            encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
+            encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
+            encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
+            encoder.setVertexBuffer(cellJunctions, offset: 0, index: 11)
+            encoder.drawPrimitives(
+                type: .triangle,
+                indirectBuffer: junctionDrawArguments,
+                indirectBufferOffset: 0
+            )
         }
         encoder.writeTimestamp(ending: "scene raster")
         encoder.endEncoding()
