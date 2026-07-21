@@ -242,11 +242,16 @@ final class Metal4UniformArena: @unchecked Sendable {
 
 final class Metal4SubmissionSlot: @unchecked Sendable {
     static let counterCapacity = 256
+    private static let renderEncoderCapacity = 6
 
     let index: Int
     var allocator: MTL4CommandAllocator
     let uniformArena: Metal4UniformArena
     let counterHeap: any MTL4CounterHeap
+    let computeArgumentTable: MTL4ArgumentTable
+    private let vertexArgumentTables: [MTL4ArgumentTable]
+    private let fragmentArgumentTables: [MTL4ArgumentTable]
+    private var renderArgumentTableIndex = 0
     var isInFlight = false
     var submissionEpoch: UInt64 = 0
     var firstStep: UInt64 = 0
@@ -270,6 +275,52 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
             capacity: 4 * 1_024 * 1_024,
             label: "Numi Metal 4 uniform arena \(index)"
         )
+        computeArgumentTable = try Self.makeArgumentTable(
+            device: device,
+            label: "Numi compute arguments \(index)"
+        )
+        vertexArgumentTables = try (0..<Self.renderEncoderCapacity).map {
+            try Self.makeArgumentTable(
+                device: device,
+                label: "Numi vertex arguments \(index).\($0)"
+            )
+        }
+        fragmentArgumentTables = try (0..<Self.renderEncoderCapacity).map {
+            try Self.makeArgumentTable(
+                device: device,
+                label: "Numi fragment arguments \(index).\($0)"
+            )
+        }
+    }
+
+    func resetArgumentTables() {
+        renderArgumentTableIndex = 0
+    }
+
+    func nextRenderArgumentTables() -> (
+        vertex: MTL4ArgumentTable,
+        fragment: MTL4ArgumentTable
+    ) {
+        precondition(
+            renderArgumentTableIndex < Self.renderEncoderCapacity,
+            "Metal 4 submission exceeded its render-encoder argument-table capacity"
+        )
+        let index = renderArgumentTableIndex
+        renderArgumentTableIndex += 1
+        return (vertexArgumentTables[index], fragmentArgumentTables[index])
+    }
+
+    private static func makeArgumentTable(
+        device: MTLDevice,
+        label: String
+    ) throws -> MTL4ArgumentTable {
+        let descriptor = MTL4ArgumentTableDescriptor()
+        descriptor.label = label
+        descriptor.maxBufferBindCount = 31
+        descriptor.maxTextureBindCount = 128
+        descriptor.maxSamplerStateBindCount = 16
+        descriptor.initializeBindings = true
+        return try device.makeArgumentTable(descriptor: descriptor)
     }
 }
 
@@ -400,6 +451,7 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         slot.lastStep = lastStep
         slot.checkpointStep = checkpointStep
         slot.uniformArena.reset()
+        slot.resetArgumentTables()
         slot.counterHeap.invalidateCounterRange(0..<Metal4SubmissionSlot.counterCapacity)
         nextSlotIndex = (selectedIndex + 1) % slots.count
         maximumObservedInFlight = max(
@@ -549,7 +601,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
 
     private var computeEncoder: MTL4ComputeCommandEncoder?
     private var priorEncoderStages: MTLStages = []
-    private lazy var computeTable = makeArgumentTable(label: "Numi compute arguments")
+    private let computeTable: MTL4ArgumentTable
     private let completionLock = NSLock()
     private let completionSemaphore = DispatchSemaphore(value: 0)
     private var completionHandlers: [@Sendable (Metal4CommandBufferContext) -> Void] = []
@@ -566,6 +618,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         self.owner = owner
         self.commandBuffer = commandBuffer
         self.slot = slot
+        computeTable = slot.computeArgumentTable
     }
 
     var label: String? {
@@ -643,11 +696,15 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
             )
         }
         priorEncoderStages = [.vertex, .fragment]
+        let tables = slot.nextRenderArgumentTables()
         return Metal4RenderCommandEncoderAdapter(
             encoder: encoder,
-            vertexTable: makeArgumentTable(label: "Numi vertex arguments"),
-            fragmentTable: makeArgumentTable(label: "Numi fragment arguments"),
-            uniformArena: slot.uniformArena
+            vertexTable: tables.vertex,
+            fragmentTable: tables.fragment,
+            uniformArena: slot.uniformArena,
+            timestampRecorder: { [unowned self] encoder, label in
+                self.recordTimestamp(encoder: encoder, ending: label)
+            }
         )
     }
 
@@ -734,9 +791,13 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         for index in 1..<timestamps.count where timestamps[index] >= timestamps[index - 1] {
             let phase = timestampLabels[index]
             if accumulated[phase] == nil { order.append(phase) }
-            accumulated[phase, default: 0] += Double(
+            let milliseconds = Double(
                 timestamps[index] - timestamps[index - 1]
             ) * conversion
+            guard milliseconds <= totalGPUMilliseconds * 1.05 + 0.001 else {
+                continue
+            }
+            accumulated[phase, default: 0] += milliseconds
         }
         return order.compactMap { phase in
             accumulated[phase].map { Metal4PhaseSample(phase: phase, milliseconds: $0) }
@@ -778,7 +839,23 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         guard timestampLabels.count < Metal4SubmissionSlot.counterCapacity else { return }
         let index = timestampLabels.count
         encoder.writeTimestamp(
-            granularity: .relaxed,
+            granularity: .precise,
+            counterHeap: slot.counterHeap,
+            index: index
+        )
+        timestampLabels.append(phase)
+    }
+
+    private func recordTimestamp(
+        encoder: MTL4RenderCommandEncoder,
+        ending phase: String
+    ) {
+        guard phaseTimingEnabled else { return }
+        guard timestampLabels.count < Metal4SubmissionSlot.counterCapacity else { return }
+        let index = timestampLabels.count
+        encoder.writeTimestamp(
+            granularity: .precise,
+            after: .fragment,
             counterHeap: slot.counterHeap,
             index: index
         )
@@ -790,15 +867,6 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         computeEncoder = nil
     }
 
-    private func makeArgumentTable(label: String) -> MTL4ArgumentTable {
-        let descriptor = MTL4ArgumentTableDescriptor()
-        descriptor.label = label
-        descriptor.maxBufferBindCount = 31
-        descriptor.maxTextureBindCount = 128
-        descriptor.maxSamplerStateBindCount = 16
-        descriptor.initializeBindings = true
-        return try! owner.device.makeArgumentTable(descriptor: descriptor)
-    }
 }
 
 final class Metal4ComputeCommandEncoderAdapter {
@@ -981,17 +1049,20 @@ final class Metal4RenderCommandEncoderAdapter {
     private let vertexTable: MTL4ArgumentTable
     private let fragmentTable: MTL4ArgumentTable
     private let uniformArena: Metal4UniformArena
+    private let timestampRecorder: (MTL4RenderCommandEncoder, String) -> Void
 
     init(
         encoder: MTL4RenderCommandEncoder,
         vertexTable: MTL4ArgumentTable,
         fragmentTable: MTL4ArgumentTable,
-        uniformArena: Metal4UniformArena
+        uniformArena: Metal4UniformArena,
+        timestampRecorder: @escaping (MTL4RenderCommandEncoder, String) -> Void
     ) {
         self.encoder = encoder
         self.vertexTable = vertexTable
         self.fragmentTable = fragmentTable
         self.uniformArena = uniformArena
+        self.timestampRecorder = timestampRecorder
     }
 
     var label: String? {
@@ -1041,6 +1112,10 @@ final class Metal4RenderCommandEncoderAdapter {
             primitiveType: type,
             indirectBuffer: indirectBuffer.gpuAddress + MTLGPUAddress(indirectBufferOffset)
         )
+    }
+
+    func writeTimestamp(ending phase: String) {
+        timestampRecorder(encoder, phase)
     }
 
     func endEncoding() {

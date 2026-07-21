@@ -1025,11 +1025,11 @@ flowchart LR
 | Spinor update | `1024²`, sampling prepared coupling | `evolveQuantumField` |
 | Measurement | `193²` / `1024²` | `measureWorld`, `measureQuantumField` |
 | Field rendering | One full-screen triangle, six scale-selected pipelines | ecology, morphology, cellular, molecule, wave, or spinor surface |
-| Visible-cell compaction | `9,216` candidate slots | `compactVisibleCells` |
+| Visible-cell compaction | Compacted living cells with conservative viewport rejection | `compactVisibleCells` |
 | Tissue-contour rendering | GPU-compacted living-cell count, forty-eight-segment membrane fans | `cellVertex`, `cellFragment` |
-| Bright-pass extraction | Quarter drawable dimensions | `bloomPrefilter` |
-| Separable bloom | Two quarter-resolution dispatches | `blurBloom` |
+| Bloom downsample and filtering | One thirteen-tap dispatch at quarter drawable dimensions | `bloomPrefilter` |
 | Display composition | One full-screen triangle | `compositeFragment` |
+| Resolved spinor display | One direct-to-drawable full-screen triangle | `spinorDisplayFragment` |
 
 Threadgroup dimensions are selected from each compute pipeline's `threadExecutionWidth` and `maxTotalThreadsPerThreadgroup`. Two-dimensional kernels use one execution width across `x` and up to eight rows; one-dimensional kernels use execution-width-aligned groups up to `256` threads.
 
@@ -1037,7 +1037,7 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 
 - **Private simulation textures.** Reaction and spinor texture pairs use `MTLStorageMode.private`; only compact observation and reduction buffers are CPU-visible.
 - **Native Metal 4 submission.** Three reusable allocator slots encode through `MTL4CommandBuffer`, submit through `MTL4CommandQueue`, and retire through commit feedback. The CPU never blocks to admit a fourth unfinished submission.
-- **Argument-table binding.** Compute and render resources are bound by GPU address or resource ID through `MTL4ArgumentTable`; per-dispatch legacy encoder buffer and texture binding is absent.
+- **Submission-local argument tables.** Each of the three allocator slots owns one compute table and six render-stage table pairs. A slot resets its table cursor only after commit feedback retires the preceding submission, eliminating per-frame table allocation while preventing in-flight mutation across slots.
 - **Explicit residency.** Causal buffers, textures, pipelines, checkpoint banks, readback rings, and uniform arenas occupy a stable residency set. Resizable render targets and presentation resources use separate dynamic sets.
 - **AOT pipeline archive.** `metal-tt` packages all captured Metal 4 descriptors. Runtime telemetry distinguishes archive hits from compiler fallback; the reference release reports zero misses.
 - **True ping-pong state.** The renderer swaps `MTLTexture` references after each update instead of blitting entire state textures back into fixed roles.
@@ -1050,7 +1050,7 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Private persistent individuals.** Agent, cell, regulatory, resonance, polygon, lineage, occupancy, and aggregate buffers remain GPU-private. The CPU receives periodic reductions and asynchronous observation copies.
 - **Hot/cold cell identity split.** Owner, program index, permanent ID, and component root occupy one `16 B` record used by the cell kernels. Parent-cell IDs occupy a separate `4 B` buffer touched only when lineage is created, halving identity traffic in the hot passes and reducing combined identity storage by `37.5%`.
 - **Dominant-program cache.** Homogeneous cells use the inherited trait and recognition vectors already cached in their component's `AgentState`. Only a mixed-program cell whose program index differs from the component's dominant index reads the independent `96 B` program record.
-- **Linear HDR scene.** Scale-specialized field, cell, and organism fragments write unclamped values into a drawable-sized `RG11B10Float` target. Display transfer is deferred to the final composite.
+- **Linear HDR scene.** Scale-specialized field, cell, and organism fragments write unclamped values into a drawable-sized `RG11B10Float` target. Display transfer is deferred to the final composite wherever translucent tissue or bloom requires HDR layering.
 - **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; intermediate scales expose phase winding, density isolines, reaction channels, trait-dependent morphology, resource flux, and geological gradients.
 - **Static deep-scale fragments.** Molecule, wave, and spinor views use separate MSL 4.0 entry points instantiated from one scale template. Wave and spinor binaries contain no molecular-field path; the spinor binary selects nearest-lattice sampling without a runtime scale branch.
 - **Metal 4 counter heaps.** Sampled submissions timestamp chemistry, component mechanics, cell physiology, contact, topology, division, field mechanics, quantum evolution, rendering, and postprocessing without feeding timing data into causal kernels.
@@ -1058,13 +1058,14 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Exact deep-lattice sampling.** At `420x` and above, the spinor instrument uses nearest-cell `RGBA32Float` samples instead of blending adjacent lattice states. Wave-scale views retain linear filtering.
 - **Morphology from membrane construction.** The renderer contains no abdomen, leg, jaw, spine, or insect body primitive. Predatory protrusions, armor, sensory extensions, and locomotor extensions are visible only where exposed cells deform their simulated membrane vertices under the corresponding inherited regulatory output.
 - **Contour antialiasing.** Bounded quadratic interpolation expands each simulated twelve-edge membrane into forty-eight render segments. `fwidth`-derived transitions smooth that measured contour without changing collision geometry.
-- **Quarter-resolution bloom.** A soft-knee bright pass and two five-tap bilinear Gaussian dispatches isolate high-radiance events at wave, reaction, agent, and ecology scales. The `900x` spinor instrument bypasses bloom and its texture sample so component and lattice boundaries remain spatially exact.
+- **Single-pass quarter-resolution bloom.** One thirteen-tap tent filter combines HDR downsampling, finite-value rejection, soft-knee extraction, and spatial filtering. This removes two compute dispatches, two device barriers, one quarter-resolution texture, and the associated read/write traffic from every blooming frame.
+- **Direct spinor presentation.** At the resolved spinor scale, no translucent tissue or bloom is composited. `spinorDisplayFragment` performs the same hue-preserving display map while writing directly to the drawable, avoiding the full-resolution HDR store/reload and a second full-screen render pass.
 - **Hue-preserving display map.** Peak-channel exponential compression applies one scalar to all RGB channels, followed by a small scale-specific saturation correction and `1/1023` temporal dither.
 - **Single physical body path.** Ecology, organism, and cellular views all draw the same persistent cell membranes; there is no analytic organism envelope or duplicate organism canvas.
-- **GPU-compacted cell submission.** `compactVisibleCells` scans the `9,216` stable slots, atomically writes only living scale-visible cell indices, and writes the indirect instance count. The render pass submits only that count without a CPU readback.
+- **GPU-compacted cell submission.** `compactVisibleCells` consumes the ascending compact living-cell list, rejects cells outside a conservative membrane-expanded viewport, atomically writes the remaining indices, and writes the indirect instance count. The render pass submits only that count without a CPU readback.
 - **Explicit cell boundaries.** The indirect draw expands each compacted cell index into a forty-eight-triangle fan interpolated from twelve simulated membrane vertices.
 - **Scale-specialized cell shading.** Below `14x`, cells retain lineage, ATP, voltage, Ca*, ERK*, and causal encodings but skip intracellular noise, mitochondria, cleavage, and other high-frequency structures that cannot be resolved at that scale.
-- **Scale-cull before submission.** The same membrane draw remains available from ecological overview through cellular inspection and is omitted only outside its `0.35x` to `180x` physical visibility interval. Molecular and spinor views therefore avoid cell vertex and fragment work.
+- **Scale and viewport cull before submission.** The same membrane draw remains available from ecological overview through cellular inspection and is omitted outside its `0.35x` to `180x` physical visibility interval. Within that interval, conservative screen-space bounds prevent off-screen membrane fans from entering vertex binning or fragment shading.
 - **Execution-width-aligned dispatch.** Two-dimensional threadgroups use one pipeline execution width across x and up to eight rows, bounded by `maxTotalThreadsPerThreadgroup`. One-dimensional agent and cell dispatches use execution-width multiples up to `256` threads. The choice is queried per pipeline instead of assuming a fixed GPU width.
 - **Asynchronous readback.** Three observation slots and three metric slots prevent CPU access to in-flight buffers. Component and cell observations carry permanent identity, program provenance, morphology, dynamics, autonomy-loop terms, and current slot position; the same command blits the physical-event ring and monotonic write counter. GPU active-handle compaction bounds owner-level dispatch by the living component count rather than the `9,216`-handle capacity.
 - **Framebuffer-only drawable.** `MTKView.framebufferOnly = true` keeps the presentation resource render-target optimized.
@@ -1085,7 +1086,9 @@ The reproducible headless reference command is:
   --output /tmp/numi-metal4-reference.jsonl
 ```
 
-On the development M4, migration runs completed all `12,000` steps at `757-1,002 steps/s` with invariant flags `0x0`; the lower endpoint was measured while another Metal simulator workload was active. The untouched pre-migration commit measured approximately `1,043 steps/s` under the same command. The proposed `1,750 steps/s` acceptance threshold is therefore not met and is not claimed. The migration establishes native Metal 4 execution, deterministic recovery, active-cell indirect dispatch, AOT archive coverage, and richer telemetry, but further isolated profiling is required before asserting a throughput improvement. Pipeline initialization reports `61` archive hits, zero misses, and approximately `5.6 ms` total lookup time on the reference installation.
+On the development M4, the migration runs completed all `12,000` steps at `757-1,002 steps/s` with invariant flags `0x0`; the lower endpoint was measured while another Metal simulator workload was active. After moving argument tables into completion-retired submission slots, the same command completed at `1,175.8 steps/s` with invariant flags `0x0`. The untouched pre-migration commit measured approximately `1,043 steps/s`. These launches are scheduling-sensitive engineering measurements, so the later result is not treated as a controlled causal attribution. The proposed `1,750 steps/s` acceptance threshold remains unmet and is not claimed. Pipeline initialization reports `61` archive hits, zero misses, and approximately `5.3 ms` total lookup time on the reference installation.
+
+Set `NUMI_GPU_TIMING_LOG=1` to sample one submission in sixty and emit total GPU duration plus the chemistry, mechanics, cell physiology, contact, topology, quantum, scene-raster, bloom, and display-composite timestamp intervals. The diagnostic is observer-only and never binds timing data to a causal kernel.
 
 Historical frame traces below remain labeled by implementation stage. They are not evidence that the current Metal 4 graph is faster than the immediately preceding backend.
 

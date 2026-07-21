@@ -236,4 +236,56 @@ struct ArchitectureBoundaryTests {
         #expect(!activeFieldShaders.contains("biologicalEvents"))
         #expect(!activeFieldShaders.contains("localEvents"))
     }
+
+    @Test
+    func renderPathCullsOffscreenCellsBeforeRasterization() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(of: "kernel void compactVisibleCells"))
+        let end = try #require(shader.range(
+            of: "struct RasterData",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let compaction = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(compaction.contains("cellWorldPosition(agents[owner], cells[gid].position"))
+        #expect(compaction.contains("any(screenUV < -margin)"))
+        #expect(compaction.contains("any(screenUV > 1.0 + margin)"))
+    }
+
+    @Test
+    func renderPathUsesSinglePassBloomAndDirectSpinorDisplay() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(renderer.contains("spinorDisplayPipeline"))
+        #expect(renderer.contains("if renderScale == 5"))
+        #expect(renderer.contains("Single-pass quarter-resolution bloom"))
+        #expect(!renderer.contains("bloomBlurPipeline"))
+        #expect(!renderer.contains("bloomTextureB"))
+        #expect(shader.contains("fragment float4 spinorDisplayFragment"))
+        #expect(!shader.contains("kernel void blurBloom"))
+    }
+
+    @Test
+    func metal4SubmissionSlotsOwnReusableArgumentTables() throws {
+        let execution = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Metal4Execution.swift"),
+            encoding: .utf8
+        )
+        #expect(execution.contains("let computeArgumentTable: MTL4ArgumentTable"))
+        #expect(execution.contains("private let vertexArgumentTables: [MTL4ArgumentTable]"))
+        #expect(execution.contains("slot.resetArgumentTables()"))
+        #expect(execution.contains("slot.nextRenderArgumentTables()"))
+    }
 }

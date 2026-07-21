@@ -7152,6 +7152,8 @@ kernel void compactVisibleCells(
     device atomic_uint* drawArguments [[buffer(3)]],
     constant SimulationUniforms& uniforms [[buffer(4)]],
     device const CellIdentity* cellIdentities [[buffer(5)]],
+    device const AgentState* agents [[buffer(6)]],
+    device const CellState* cells [[buffer(7)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
@@ -7167,6 +7169,18 @@ kernel void compactVisibleCells(
     if (observationZoom <= 0.35 || observationZoom >= 180.0) { return; }
     if (uniforms.trackedAgentID != 0xffffffffu &&
         uniforms.trackedAgentID != owner && observationZoom >= 34.0) { return; }
+
+    float2 center = cellWorldPosition(agents[owner], cells[gid].position, uniforms);
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0
+        ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float2 screenUV = 0.5 + (center - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    float2 screenRadius = float2(0.30 * cellWorldScale(uniforms) * uniforms.cameraZoom) /
+        viewScale;
+    float2 margin = screenRadius + float2(0.004);
+    if (any(screenUV < -margin) || any(screenUV > 1.0 + margin)) { return; }
+
     uint target = atomic_fetch_add_explicit(&drawArguments[1], 1u, memory_order_relaxed);
     if (target < maxCellCount) {
         visibleCellIndices[target] = gid;
@@ -7232,11 +7246,27 @@ kernel void bloomPrefilter(
     constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
     float2 uv = (float2(gid) + 0.5) / float2(destination.get_width(), destination.get_height());
     float2 sourceTexel = 1.0 / max(uniforms.sourceSize, float2(1.0));
-    float3 color = float3(source.sample(linearSampler, uv).rgb) * 0.50;
-    color += float3(source.sample(linearSampler, uv + sourceTexel * float2(-1.25, -1.25)).rgb) * 0.125;
-    color += float3(source.sample(linearSampler, uv + sourceTexel * float2( 1.25, -1.25)).rgb) * 0.125;
-    color += float3(source.sample(linearSampler, uv + sourceTexel * float2(-1.25,  1.25)).rgb) * 0.125;
-    color += float3(source.sample(linearSampler, uv + sourceTexel * float2( 1.25,  1.25)).rgb) * 0.125;
+    float2 outer = sourceTexel * 6.0;
+    float2 inner = sourceTexel * 3.0;
+    float3 center = float3(source.sample(linearSampler, uv).rgb);
+    float3 axial =
+        float3(source.sample(linearSampler, uv + float2( outer.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-outer.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0,  outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0, -outer.y)).rgb);
+    float3 outerCorners =
+        float3(source.sample(linearSampler, uv + float2( outer.x,  outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-outer.x,  outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2( outer.x, -outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-outer.x, -outer.y)).rgb);
+    float3 innerCorners =
+        float3(source.sample(linearSampler, uv + float2( inner.x,  inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-inner.x,  inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2( inner.x, -inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-inner.x, -inner.y)).rgb);
+    float3 color = center * 0.125 + axial * 0.0625 +
+        outerCorners * 0.03125 + innerCorners * 0.125;
+    color = all(isfinite(color)) ? clamp(color, 0.0, 16.0) : float3(0.0);
 
     const float threshold = 0.92;
     const float knee = 0.38;
@@ -7247,34 +7277,12 @@ kernel void bloomPrefilter(
     destination.write(half4(half3(color * contribution), half(1.0)), gid);
 }
 
-kernel void blurBloom(
-    texture2d<half, access::sample> source [[texture(0)]],
-    texture2d<half, access::write> destination [[texture(1)]],
-    constant float2& direction [[buffer(1)]],
-    uint2 gid [[thread_position_in_grid]]
+inline float3 mapToDisplay(
+    float3 linearScene,
+    float3 linearBloom,
+    constant PostProcessUniforms& uniforms,
+    uint2 pixel
 ) {
-    if (gid.x >= destination.get_width() || gid.y >= destination.get_height()) { return; }
-    constexpr sampler linearSampler(coord::pixel, address::clamp_to_edge, filter::linear);
-    float2 position = float2(gid) + 0.5;
-    half3 color = source.sample(linearSampler, position).rgb * half(0.227027);
-    color += source.sample(linearSampler, position + direction * 1.384615).rgb * half(0.316216);
-    color += source.sample(linearSampler, position - direction * 1.384615).rgb * half(0.316216);
-    color += source.sample(linearSampler, position + direction * 3.230769).rgb * half(0.070270);
-    color += source.sample(linearSampler, position - direction * 3.230769).rgb * half(0.070270);
-    destination.write(half4(color, half(1.0)), gid);
-}
-
-fragment float4 compositeFragment(
-    RasterData input [[stage_in]],
-    texture2d<half, access::sample> scene [[texture(0)]],
-    texture2d<half, access::sample> bloom [[texture(1)]],
-    constant PostProcessUniforms& uniforms [[buffer(0)]]
-) {
-    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
-    float3 linearScene = float3(scene.sample(linearSampler, input.uv).rgb);
-    float3 linearBloom = uniforms.bloomIntensity > 0.001
-        ? float3(bloom.sample(linearSampler, input.uv).rgb)
-        : float3(0.0);
     if (!all(isfinite(linearScene))) { linearScene = float3(0.0); }
     if (!all(isfinite(linearBloom))) { linearBloom = float3(0.0); }
     linearScene = clamp(linearScene, 0.0, 16.0);
@@ -7290,11 +7298,25 @@ fragment float4 compositeFragment(
             (uniforms.observationZoom >= 64.0 ? 1.15 : 1.08));
     mapped = mix(float3(luminance), mapped, saturation);
 
-    uint2 pixel = uint2(input.position.xy);
     float dither = random01(pixel.x * 1597334677u ^ pixel.y * 3812015801u ^
         uniforms.frameIndex * 2246822519u) - 0.5;
-    mapped = saturate(mapped + dither / 1023.0);
-    return float4(mapped, 1.0);
+    return saturate(mapped + dither / 1023.0);
+}
+
+fragment float4 compositeFragment(
+    RasterData input [[stage_in]],
+    texture2d<half, access::sample> scene [[texture(0)]],
+    texture2d<half, access::sample> bloom [[texture(1)]],
+    constant PostProcessUniforms& uniforms [[buffer(0)]]
+) {
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float3 linearScene = float3(scene.sample(linearSampler, input.uv).rgb);
+    float3 linearBloom = uniforms.bloomIntensity > 0.001
+        ? float3(bloom.sample(linearSampler, input.uv).rgb)
+        : float3(0.0);
+    return float4(mapToDisplay(
+        linearScene, linearBloom, uniforms, uint2(input.position.xy)
+    ), 1.0);
 }
 
 inline float segmentDistance(float2 point, float2 start, float2 end) {
@@ -8432,6 +8454,27 @@ NUMI_QUANTUM_SURFACE(molecularSurfaceFragment, 3u)
 NUMI_QUANTUM_SURFACE(waveSurfaceFragment, 4u)
 NUMI_QUANTUM_SURFACE(spinorSurfaceFragment, 5u)
 #undef NUMI_QUANTUM_SURFACE
+
+fragment float4 spinorDisplayFragment(
+    RasterData input [[stage_in]],
+    texture2d<float, access::sample> quantum [[texture(0)]],
+    texture2d_array<float, access::sample> state [[texture(1)]],
+    texture2d_array<float, access::sample> ecology [[texture(2)]],
+    texture2d_array<float, access::sample> environment [[texture(3)]],
+    texture2d_array<float, access::sample> mechanicalField [[texture(4)]],
+    texture2d_array<float, access::sample> genomeA [[texture(5)]],
+    texture2d_array<float, access::sample> genomeC [[texture(6)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    constant PostProcessUniforms& postUniforms [[buffer(1)]]
+) {
+    float3 linearScene = quantumSurfaceForScale<5u>(
+        input, quantum, state, ecology, environment, mechanicalField,
+        genomeA, genomeC, uniforms
+    ).rgb;
+    return float4(mapToDisplay(
+        linearScene, float3(0.0), postUniforms, uint2(input.position.xy)
+    ), 1.0);
+}
 
 fragment float4 worldSurfaceFragment(
     RasterData input [[stage_in]],
