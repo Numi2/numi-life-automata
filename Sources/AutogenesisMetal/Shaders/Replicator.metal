@@ -4850,7 +4850,47 @@ kernel void assignCellComponentOwners(
         &componentOwners[root], memory_order_relaxed
     ) == mixedComponentOwner;
     if (crossOwnerFusion) {
-        atomic_store_explicit(&componentOwners[root], parentOwner, memory_order_relaxed);
+        // Reuse an existing owner only when this fused root is that owner's
+        // selected primary component. Otherwise simultaneous fusion and
+        // fission would leave the same owner attached to two disconnected
+        // roots. If no participant can donate its owner, the common allocation
+        // path below gives the detached fused material a fresh coordinate frame.
+        uint survivorOwner = maxAgentCount;
+        uint survivorBirthID = 0xffffffffu;
+        uint candidateCell = atomic_load_explicit(
+            &componentCellHeads[root], memory_order_relaxed
+        );
+        while (candidateCell != emptySpatialHashEntry) {
+            uint following = componentCellNext[candidateCell];
+            if (atomic_load_explicit(
+                &cellOccupancy[candidateCell], memory_order_relaxed
+            ) != 0u) {
+                uint candidateOwner = cellIdentities[candidateCell].owner;
+                if (candidateOwner < maxAgentCount &&
+                    atomic_load_explicit(
+                        &agentOccupancy[candidateOwner], memory_order_relaxed
+                    ) == 1u && atomic_load_explicit(
+                        &ownerPrimaryRoots[candidateOwner], memory_order_relaxed
+                    ) == root) {
+                    uint candidateBirthID = agents[candidateOwner].birthID;
+                    if (survivorOwner == maxAgentCount ||
+                        candidateBirthID < survivorBirthID ||
+                        (candidateBirthID == survivorBirthID &&
+                            candidateOwner < survivorOwner)) {
+                        survivorOwner = candidateOwner;
+                        survivorBirthID = candidateBirthID;
+                    }
+                }
+            }
+            candidateCell = following;
+        }
+        bool reusesParticipantOwner = survivorOwner < maxAgentCount;
+        if (reusesParticipantOwner) {
+            parentOwner = survivorOwner;
+            atomic_store_explicit(
+                &componentOwners[root], parentOwner, memory_order_relaxed
+            );
+        }
         uint mappingBase = root * maxProgramsPerPropagule;
         uint absorbedOwnerCount = 0u;
         uint cellIndex = atomic_load_explicit(
@@ -4893,7 +4933,7 @@ kernel void assignCellComponentOwners(
                 cellAggregates[parentOwner], uniforms.step
             );
         }
-        return;
+        if (reusesParticipantOwner) { return; }
     }
     if (root == primaryRoot) {
         atomic_store_explicit(&componentOwners[root], parentOwner, memory_order_relaxed);
