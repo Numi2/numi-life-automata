@@ -248,6 +248,14 @@ struct Metal4PhaseSample: Sendable {
     let milliseconds: Double
 }
 
+private final class Metal4DrawableLease: @unchecked Sendable {
+    let drawable: CAMetalDrawable
+
+    init(_ drawable: CAMetalDrawable) {
+        self.drawable = drawable
+    }
+}
+
 enum Metal4CommandStatus: String, Sendable, CustomStringConvertible {
     case notEnqueued
     case committed
@@ -275,21 +283,47 @@ final class Metal4UniformArena: @unchecked Sendable {
         usedBytes = 0
     }
 
-    func copy(bytes: UnsafeRawPointer, length: Int) -> MTLGPUAddress {
+    var remainingBytes: Int { buffer.length - usedBytes }
+
+    func minimumCapacity(forAdditionalBytes length: Int) -> Int {
         let alignedOffset = (usedBytes + Self.alignment - 1) & ~(Self.alignment - 1)
-        precondition(
-            alignedOffset + length <= buffer.length,
-            "Metal 4 uniform arena exhausted; increase the per-submission capacity"
-        )
+        let (required, overflow) = alignedOffset.addingReportingOverflow(length)
+        return overflow ? Int.max : required
+    }
+
+    func copy(bytes: UnsafeRawPointer, length: Int) -> MTLGPUAddress? {
+        let alignedOffset = (usedBytes + Self.alignment - 1) & ~(Self.alignment - 1)
+        guard length >= 0, alignedOffset <= buffer.length - length else { return nil }
         buffer.contents().advanced(by: alignedOffset).copyMemory(from: bytes, byteCount: length)
         usedBytes = alignedOffset + length
         return buffer.gpuAddress + MTLGPUAddress(alignedOffset)
     }
 }
 
+final class Metal4EncodingState: @unchecked Sendable {
+    private(set) var failureDescription: String?
+    private(set) var minimumUniformArenaCapacity = 0
+    private(set) var minimumRenderEncoderCapacity = 0
+
+    var isValid: Bool { failureDescription == nil }
+
+    func fail(
+        _ description: String,
+        minimumUniformArenaCapacity: Int = 0,
+        minimumRenderEncoderCapacity: Int = 0
+    ) {
+        if failureDescription == nil { failureDescription = description }
+        self.minimumUniformArenaCapacity = max(
+            self.minimumUniformArenaCapacity, minimumUniformArenaCapacity
+        )
+        self.minimumRenderEncoderCapacity = max(
+            self.minimumRenderEncoderCapacity, minimumRenderEncoderCapacity
+        )
+    }
+}
+
 final class Metal4SubmissionSlot: @unchecked Sendable {
     static let counterCapacity = 256
-    private static let renderEncoderCapacity = 6
 
     let index: Int
     var allocator: MTL4CommandAllocator
@@ -299,6 +333,7 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
     private let vertexArgumentTables: [MTL4ArgumentTable]
     private let meshArgumentTables: [MTL4ArgumentTable]
     private let fragmentArgumentTables: [MTL4ArgumentTable]
+    let renderEncoderCapacity: Int
     private var renderArgumentTableIndex = 0
     var isInFlight = false
     var submissionEpoch: UInt64 = 0
@@ -306,8 +341,14 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
     var lastStep: UInt64 = 0
     var checkpointStep: UInt64 = 0
 
-    init(index: Int, device: MTLDevice) throws {
+    init(
+        index: Int,
+        device: MTLDevice,
+        uniformArenaCapacity: Int,
+        renderEncoderCapacity: Int
+    ) throws {
         self.index = index
+        self.renderEncoderCapacity = renderEncoderCapacity
         guard let allocator = device.makeCommandAllocator() else {
             throw EvolutionRendererError.resourceAllocation("Metal 4 command allocator \(index)")
         }
@@ -320,26 +361,26 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
         self.counterHeap = counterHeap
         uniformArena = try Metal4UniformArena(
             device: device,
-            capacity: 4 * 1_024 * 1_024,
+            capacity: uniformArenaCapacity,
             label: "Numi Metal 4 uniform arena \(index)"
         )
         computeArgumentTable = try Self.makeArgumentTable(
             device: device,
             label: "Numi compute arguments \(index)"
         )
-        vertexArgumentTables = try (0..<Self.renderEncoderCapacity).map {
+        vertexArgumentTables = try (0..<renderEncoderCapacity).map {
             try Self.makeArgumentTable(
                 device: device,
                 label: "Numi vertex arguments \(index).\($0)"
             )
         }
-        meshArgumentTables = try (0..<Self.renderEncoderCapacity).map {
+        meshArgumentTables = try (0..<renderEncoderCapacity).map {
             try Self.makeArgumentTable(
                 device: device,
                 label: "Numi mesh arguments \(index).\($0)"
             )
         }
-        fragmentArgumentTables = try (0..<Self.renderEncoderCapacity).map {
+        fragmentArgumentTables = try (0..<renderEncoderCapacity).map {
             try Self.makeArgumentTable(
                 device: device,
                 label: "Numi fragment arguments \(index).\($0)"
@@ -355,11 +396,8 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
         vertex: MTL4ArgumentTable,
         mesh: MTL4ArgumentTable,
         fragment: MTL4ArgumentTable
-    ) {
-        precondition(
-            renderArgumentTableIndex < Self.renderEncoderCapacity,
-            "Metal 4 submission exceeded its render-encoder argument-table capacity"
-        )
+    )? {
+        guard renderArgumentTableIndex < renderEncoderCapacity else { return nil }
         let index = renderArgumentTableIndex
         renderArgumentTableIndex += 1
         return (
@@ -383,6 +421,8 @@ final class Metal4SubmissionSlot: @unchecked Sendable {
 
 final class Metal4ExecutionContext: @unchecked Sendable {
     static let maximumInFlightSubmissions = 3
+    private static let initialUniformArenaCapacity = 4 * 1_024 * 1_024
+    private static let initialRenderEncoderCapacity = 6
 
     let device: MTLDevice
     private(set) var commandQueue: MTL4CommandQueue
@@ -395,6 +435,8 @@ final class Metal4ExecutionContext: @unchecked Sendable {
     private var nextSlotIndex = 0
     private var maximumObservedInFlight = 0
     private var maximumUniformArenaBytes = 0
+    private var uniformArenaCapacity = Metal4ExecutionContext.initialUniformArenaCapacity
+    private var renderEncoderCapacity = Metal4ExecutionContext.initialRenderEncoderCapacity
     private var transientResidentBytes: UInt64 = 0
     private var claimedDrawableIDs: Set<ObjectIdentifier> = []
 
@@ -410,8 +452,15 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         residencyDescriptor.initialCapacity = 192
         stableResidencySet = try device.makeResidencySet(descriptor: residencyDescriptor)
 
+        let initialUniformArenaCapacity = Self.initialUniformArenaCapacity
+        let initialRenderEncoderCapacity = Self.initialRenderEncoderCapacity
         slots = try (0..<Self.maximumInFlightSubmissions).map {
-            try Metal4SubmissionSlot(index: $0, device: device)
+            try Metal4SubmissionSlot(
+                index: $0,
+                device: device,
+                uniformArenaCapacity: initialUniformArenaCapacity,
+                renderEncoderCapacity: initialRenderEncoderCapacity
+            )
         }
         for slot in slots {
             stableResidencySet.addAllocation(slot.uniformArena.buffer)
@@ -540,6 +589,14 @@ final class Metal4ExecutionContext: @unchecked Sendable {
     ) {
         context.finishEncoding()
         lock.lock()
+        uniformArenaCapacity = Self.grownCapacity(
+            current: uniformArenaCapacity,
+            required: context.minimumUniformArenaCapacity
+        )
+        renderEncoderCapacity = Self.grownCapacity(
+            current: renderEncoderCapacity,
+            required: context.minimumRenderEncoderCapacity
+        )
         maximumUniformArenaBytes = max(
             maximumUniformArenaBytes,
             context.slot.uniformArena.usedBytes
@@ -548,21 +605,33 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         context.commandBuffer.endCommandBuffer()
 
         let drawable = context.drawable
+        let drawableLease = drawable.map(Metal4DrawableLease.init)
         let drawableIdentifier = drawable.map { ObjectIdentifier($0 as AnyObject) }
+        let encodingFailureDescription = context.encodingFailureDescription
         let options = MTL4CommitOptions()
         let slot = context.slot
         options.addFeedbackHandler { [weak self] feedback in
             let gpuMilliseconds = max(feedback.gpuEndTime - feedback.gpuStartTime, 0) * 1_000
+            let gpuErrorDescription = feedback.error.map {
+                "\($0.localizedDescription) [\(String(describing: $0))]"
+            }
+            let failureDescriptions = [encodingFailureDescription, gpuErrorDescription]
+                .compactMap { $0 }
             let result = Metal4SubmissionFeedback(
-                errorDescription: feedback.error.map {
-                    "\($0.localizedDescription) [\(String(describing: $0))]"
-                },
+                errorDescription: failureDescriptions.isEmpty
+                    ? nil : failureDescriptions.joined(separator: "; "),
                 gpuStartTime: feedback.gpuStartTime,
                 gpuEndTime: feedback.gpuEndTime,
                 phaseSamples: context.resolvePhaseSamples(
                     totalGPUMilliseconds: gpuMilliseconds
                 )
             )
+            // Presentation is a commit point, not part of speculative GPU work. A
+            // failed command buffer never reaches WindowServer, so the layer retains
+            // the last known-good drawable instead of exposing partial or corrupt tiles.
+            if result.succeeded, let drawableLease {
+                drawableLease.drawable.present()
+            }
             if let drawableIdentifier {
                 self?.releaseDrawable(identifier: drawableIdentifier)
             }
@@ -576,7 +645,6 @@ final class Metal4ExecutionContext: @unchecked Sendable {
 
         if let drawable {
             commandQueue.signalDrawable(drawable)
-            drawable.present()
         }
     }
 
@@ -608,7 +676,12 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         queueDescriptor.label = "Numi Metal 4 recovery command queue"
         let nextQueue = try device.makeMTL4CommandQueue(descriptor: queueDescriptor)
         let nextSlots = try (0..<Self.maximumInFlightSubmissions).map {
-            try Metal4SubmissionSlot(index: $0, device: device)
+            try Metal4SubmissionSlot(
+                index: $0,
+                device: device,
+                uniformArenaCapacity: uniformArenaCapacity,
+                renderEncoderCapacity: renderEncoderCapacity
+            )
         }
         let stableDescriptor = MTLResidencySetDescriptor()
         stableDescriptor.label = "Numi recovered stable causal residency"
@@ -633,6 +706,12 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         claimedDrawableIDs.removeAll(keepingCapacity: true)
     }
 
+    private static func grownCapacity(current: Int, required: Int) -> Int {
+        guard required > current else { return current }
+        let (doubled, overflow) = current.multipliedReportingOverflow(by: 2)
+        return max(overflow ? required : doubled, required)
+    }
+
     private func release(slot: Metal4SubmissionSlot, resetAllocator: Bool) {
         lock.lock()
         if resetAllocator {
@@ -649,6 +728,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
     fileprivate let slot: Metal4SubmissionSlot
     fileprivate var drawable: CAMetalDrawable?
 
+    private let encodingState = Metal4EncodingState()
     private var computeEncoder: MTL4ComputeCommandEncoder?
     private var priorEncoderStages: MTLStages = []
     private let computeTable: MTL4ArgumentTable
@@ -678,6 +758,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
     }
 
     var uniformBytesUsed: Int { slot.uniformArena.usedBytes }
+    var remainingUniformBytes: Int { slot.uniformArena.remainingBytes }
     var submissionSlotIndex: Int { slot.index }
 
     var status: Metal4CommandStatus {
@@ -722,6 +803,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
             encoder: encoder,
             table: computeTable,
             uniformArena: slot.uniformArena,
+            encodingState: encodingState,
             timestampRecorder: { [unowned self] encoder, label in
                 self.recordTimestamp(encoder: encoder, ending: label)
             }
@@ -730,14 +812,22 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
 
     func makeBlitCommandEncoder() -> Metal4BlitCommandEncoderAdapter? {
         guard let encoder = activeComputeEncoder() else { return nil }
-        return Metal4BlitCommandEncoderAdapter(encoder: encoder)
+        return Metal4BlitCommandEncoderAdapter(encoder: encoder, encodingState: encodingState)
     }
 
     func makeRenderCommandEncoder(
         descriptor: MTL4RenderPassDescriptor
     ) -> Metal4RenderCommandEncoderAdapter? {
         closeComputeEncoder()
+        guard let tables = slot.nextRenderArgumentTables() else {
+            invalidateEncoding(
+                "Metal 4 render argument-table capacity exhausted",
+                minimumRenderEncoderCapacity: slot.renderEncoderCapacity + 1
+            )
+            return nil
+        }
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
+            invalidateEncoding("Metal 4 could not create a render command encoder")
             return nil
         }
         encoder.barrier(
@@ -748,13 +838,13 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
             visibilityOptions: .device
         )
         priorEncoderStages = [.vertex, .mesh, .fragment]
-        let tables = slot.nextRenderArgumentTables()
         return Metal4RenderCommandEncoderAdapter(
             encoder: encoder,
             vertexTable: tables.vertex,
             meshTable: tables.mesh,
             fragmentTable: tables.fragment,
             uniformArena: slot.uniformArena,
+            encodingState: encodingState,
             timestampRecorder: { [unowned self] encoder, label in
                 self.recordTimestamp(encoder: encoder, ending: label)
             }
@@ -762,6 +852,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
     }
 
     func claimPresentation(_ drawable: CAMetalDrawable) -> Bool {
+        guard encodingState.isValid else { return false }
         guard owner.claimDrawable(drawable) else { return false }
         self.drawable = drawable
         return true
@@ -834,6 +925,18 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         closeComputeEncoder()
     }
 
+    fileprivate var encodingFailureDescription: String? {
+        encodingState.failureDescription
+    }
+
+    fileprivate var minimumUniformArenaCapacity: Int {
+        encodingState.minimumUniformArenaCapacity
+    }
+
+    fileprivate var minimumRenderEncoderCapacity: Int {
+        encodingState.minimumRenderEncoderCapacity
+    }
+
     fileprivate func resolvePhaseSamples(
         totalGPUMilliseconds: Double
     ) -> [Metal4PhaseSample] {
@@ -884,8 +987,12 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
     }
 
     private func activeComputeEncoder() -> MTL4ComputeCommandEncoder? {
+        guard encodingState.isValid else { return nil }
         if let computeEncoder { return computeEncoder }
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            invalidateEncoding("Metal 4 could not create a compute command encoder")
+            return nil
+        }
         encoder.barrier(
             afterQueueStages: priorEncoderStages.isEmpty
                 ? [.dispatch, .blit, .vertex, .mesh, .fragment]
@@ -896,6 +1003,17 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         computeEncoder = encoder
         priorEncoderStages = [.dispatch, .blit]
         return encoder
+    }
+
+    private func invalidateEncoding(
+        _ description: String,
+        minimumRenderEncoderCapacity: Int = 0
+    ) {
+        encodingState.fail(
+            description,
+            minimumRenderEncoderCapacity: minimumRenderEncoderCapacity
+        )
+        cancelPresentation()
     }
 
     private func recordTimestamp(
@@ -940,6 +1058,7 @@ final class Metal4ComputeCommandEncoderAdapter {
     private let encoder: MTL4ComputeCommandEncoder
     private let table: MTL4ArgumentTable
     private let uniformArena: Metal4UniformArena
+    private let encodingState: Metal4EncodingState
     private let timestampRecorder: (MTL4ComputeCommandEncoder, String) -> Void
     private var hasUnbarrieredCommands = false
 
@@ -947,11 +1066,13 @@ final class Metal4ComputeCommandEncoderAdapter {
         encoder: MTL4ComputeCommandEncoder,
         table: MTL4ArgumentTable,
         uniformArena: Metal4UniformArena,
+        encodingState: Metal4EncodingState,
         timestampRecorder: @escaping (MTL4ComputeCommandEncoder, String) -> Void
     ) {
         self.encoder = encoder
         self.table = table
         self.uniformArena = uniformArena
+        self.encodingState = encodingState
         self.timestampRecorder = timestampRecorder
     }
 
@@ -976,15 +1097,26 @@ final class Metal4ComputeCommandEncoderAdapter {
     }
 
     func setBytes(_ bytes: UnsafeRawPointer, length: Int, index: Int) {
-        table.setAddress(uniformArena.copy(bytes: bytes, length: length), index: index)
+        guard let address = uniformArena.copy(bytes: bytes, length: length) else {
+            encodingState.fail(
+                "Metal 4 uniform arena capacity exhausted",
+                minimumUniformArenaCapacity: uniformArena.minimumCapacity(
+                    forAdditionalBytes: length
+                )
+            )
+            return
+        }
+        table.setAddress(address, index: index)
     }
 
     func fill(buffer: MTLBuffer, value: UInt8) {
+        guard encodingState.isValid else { return }
         encoder.fill(buffer: buffer, range: 0..<buffer.length, value: value)
         hasUnbarrieredCommands = true
     }
 
     func dispatchThreads(_ threads: MTLSize, threadsPerThreadgroup: MTLSize) {
+        guard encodingState.isValid else { return }
         encoder.setArgumentTable(table)
         encoder.dispatchThreads(
             threadsPerGrid: threads,
@@ -994,6 +1126,7 @@ final class Metal4ComputeCommandEncoderAdapter {
     }
 
     func dispatchThreadgroups(_ groups: MTLSize, threadsPerThreadgroup: MTLSize) {
+        guard encodingState.isValid else { return }
         encoder.setArgumentTable(table)
         encoder.dispatchThreadgroups(
             threadgroupsPerGrid: groups,
@@ -1007,6 +1140,7 @@ final class Metal4ComputeCommandEncoderAdapter {
         indirectBufferOffset: Int,
         threadsPerThreadgroup: MTLSize
     ) {
+        guard encodingState.isValid else { return }
         encoder.setArgumentTable(table)
         encoder.dispatchThreadgroups(
             indirectBuffer: indirectBuffer.gpuAddress + MTLGPUAddress(indirectBufferOffset),
@@ -1016,7 +1150,7 @@ final class Metal4ComputeCommandEncoderAdapter {
     }
 
     func memoryBarrier(resources: [MTLResource]) {
-        guard !resources.isEmpty else { return }
+        guard encodingState.isValid, !resources.isEmpty else { return }
         encoder.barrier(
             afterEncoderStages: [.dispatch, .blit],
             beforeEncoderStages: [.dispatch, .blit],
@@ -1042,10 +1176,12 @@ final class Metal4ComputeCommandEncoderAdapter {
 
 final class Metal4BlitCommandEncoderAdapter {
     private let encoder: MTL4ComputeCommandEncoder
+    private let encodingState: Metal4EncodingState
     private var hasUnbarrieredCommands = false
 
-    init(encoder: MTL4ComputeCommandEncoder) {
+    init(encoder: MTL4ComputeCommandEncoder, encodingState: Metal4EncodingState) {
         self.encoder = encoder
+        self.encodingState = encodingState
     }
 
     var label: String? {
@@ -1054,6 +1190,7 @@ final class Metal4BlitCommandEncoderAdapter {
     }
 
     func fill(buffer: MTLBuffer, range: Range<Int>, value: UInt8) {
+        guard encodingState.isValid else { return }
         encoder.fill(buffer: buffer, range: range, value: value)
         hasUnbarrieredCommands = true
     }
@@ -1065,6 +1202,7 @@ final class Metal4BlitCommandEncoderAdapter {
         destinationOffset: Int,
         size: Int
     ) {
+        guard encodingState.isValid else { return }
         encoder.copy(
             sourceBuffer: source,
             sourceOffset: sourceOffset,
@@ -1086,6 +1224,7 @@ final class Metal4BlitCommandEncoderAdapter {
         destinationLevel: Int,
         destinationOrigin: MTLOrigin
     ) {
+        guard encodingState.isValid else { return }
         encoder.copy(
             sourceTexture: source,
             sourceSlice: sourceSlice,
@@ -1117,6 +1256,7 @@ final class Metal4RenderCommandEncoderAdapter {
     private let meshTable: MTL4ArgumentTable
     private let fragmentTable: MTL4ArgumentTable
     private let uniformArena: Metal4UniformArena
+    private let encodingState: Metal4EncodingState
     private let timestampRecorder: (MTL4RenderCommandEncoder, String) -> Void
 
     init(
@@ -1125,6 +1265,7 @@ final class Metal4RenderCommandEncoderAdapter {
         meshTable: MTL4ArgumentTable,
         fragmentTable: MTL4ArgumentTable,
         uniformArena: Metal4UniformArena,
+        encodingState: Metal4EncodingState,
         timestampRecorder: @escaping (MTL4RenderCommandEncoder, String) -> Void
     ) {
         self.encoder = encoder
@@ -1132,6 +1273,7 @@ final class Metal4RenderCommandEncoderAdapter {
         self.meshTable = meshTable
         self.fragmentTable = fragmentTable
         self.uniformArena = uniformArena
+        self.encodingState = encodingState
         self.timestampRecorder = timestampRecorder
     }
 
@@ -1152,7 +1294,16 @@ final class Metal4RenderCommandEncoderAdapter {
     }
 
     func setVertexBytes(_ bytes: UnsafeRawPointer, length: Int, index: Int) {
-        vertexTable.setAddress(uniformArena.copy(bytes: bytes, length: length), index: index)
+        guard let address = uniformArena.copy(bytes: bytes, length: length) else {
+            encodingState.fail(
+                "Metal 4 uniform arena capacity exhausted",
+                minimumUniformArenaCapacity: uniformArena.minimumCapacity(
+                    forAdditionalBytes: length
+                )
+            )
+            return
+        }
+        vertexTable.setAddress(address, index: index)
     }
 
     func setMeshBuffer(_ buffer: MTLBuffer?, offset: Int, index: Int) {
@@ -1163,7 +1314,16 @@ final class Metal4RenderCommandEncoderAdapter {
     }
 
     func setMeshBytes(_ bytes: UnsafeRawPointer, length: Int, index: Int) {
-        meshTable.setAddress(uniformArena.copy(bytes: bytes, length: length), index: index)
+        guard let address = uniformArena.copy(bytes: bytes, length: length) else {
+            encodingState.fail(
+                "Metal 4 uniform arena capacity exhausted",
+                minimumUniformArenaCapacity: uniformArena.minimumCapacity(
+                    forAdditionalBytes: length
+                )
+            )
+            return
+        }
+        meshTable.setAddress(address, index: index)
     }
 
     func setFragmentTexture(_ texture: MTLTexture?, index: Int) {
@@ -1171,10 +1331,20 @@ final class Metal4RenderCommandEncoderAdapter {
     }
 
     func setFragmentBytes(_ bytes: UnsafeRawPointer, length: Int, index: Int) {
-        fragmentTable.setAddress(uniformArena.copy(bytes: bytes, length: length), index: index)
+        guard let address = uniformArena.copy(bytes: bytes, length: length) else {
+            encodingState.fail(
+                "Metal 4 uniform arena capacity exhausted",
+                minimumUniformArenaCapacity: uniformArena.minimumCapacity(
+                    forAdditionalBytes: length
+                )
+            )
+            return
+        }
+        fragmentTable.setAddress(address, index: index)
     }
 
     func drawPrimitives(type: MTLPrimitiveType, vertexStart: Int, vertexCount: Int) {
+        guard encodingState.isValid else { return }
         bindTables()
         encoder.drawPrimitives(
             primitiveType: type,
@@ -1188,6 +1358,7 @@ final class Metal4RenderCommandEncoderAdapter {
         indirectBuffer: MTLBuffer,
         indirectBufferOffset: Int
     ) {
+        guard encodingState.isValid else { return }
         bindTables()
         encoder.drawPrimitives(
             primitiveType: type,
@@ -1200,6 +1371,7 @@ final class Metal4RenderCommandEncoderAdapter {
         indirectBufferOffset: Int,
         threadsPerMeshThreadgroup: MTLSize
     ) {
+        guard encodingState.isValid else { return }
         bindTables()
         encoder.drawMeshThreadgroups(
             indirectBuffer: indirectBuffer.gpuAddress + MTLGPUAddress(indirectBufferOffset),

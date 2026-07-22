@@ -1999,6 +1999,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let quantumMetricScale = 1_000_000_000.0
     private static let energyAuditScale = 1_048_576.0
     private static let maximumInteractiveInFlightSubmissions = 2
+    private static let maximumInteractiveStepsPerSubmission = 24
+    private static let maximumWorldExpansionsPerSubmission = 1
+    // This is over sixteen times the current per-step uniform footprint. Keeping a
+    // fixed reserve for the render tail makes arena admission deterministic even as
+    // x24 population work approaches the cell and contact capacities.
+    private static let maximumUniformBytesPerSimulationStep = 128 * 1_024
+    private static let reservedUniformBytesForFrameTail = 512 * 1_024
     private static let runtimeTelemetryPublicationInterval = 1.0 / 12.0
     private static let singleBufferGPUThresholdMilliseconds = 8.0
     private static let doubleBufferGPUThresholdMilliseconds = 12.0
@@ -2985,13 +2992,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             resetEncoded = true
         }
 
-        while appliedExpansionToken < frameSettings.expansionToken {
+        var encodedExpansions = 0
+        while appliedExpansionToken < frameSettings.expansionToken,
+              encodedExpansions < Self.maximumWorldExpansionsPerSubmission {
             encodeWorldExpansion(
                 into: commandBuffer,
                 settings: frameSettings,
                 level: UInt32(truncatingIfNeeded: appliedExpansionToken + 1)
             )
             appliedExpansionToken &+= 1
+            encodedExpansions += 1
         }
 
         if frameSettings.addColonyToken != appliedAddColonyToken {
@@ -3005,7 +3015,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         var pendingMetricObservation: PendingMetricObservation?
         if frameSettings.isRunning {
-            for _ in 0..<max(frameSettings.stepsPerFrame, 1) {
+            let admittedStepCount = min(
+                max(frameSettings.stepsPerFrame, 1),
+                Self.maximumInteractiveStepsPerSubmission
+            )
+            for _ in 0..<admittedStepCount {
+                guard commandBuffer.remainingUniformBytes >=
+                    Self.maximumUniformBytesPerSimulationStep +
+                    Self.reservedUniformBytesForFrameTail else { break }
                 encodeSimulationStep(into: commandBuffer, settings: frameSettings)
                 totalSteps &+= 1
                 if totalSteps.isMultiple(of: Self.interactiveQuantumStride) {

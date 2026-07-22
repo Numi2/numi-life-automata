@@ -800,6 +800,10 @@ struct ArchitectureBoundaryTests {
         ))
         #expect(!execution.contains("guard claimedDrawableIDs.isEmpty"))
         #expect(renderer.contains("maximumInteractiveInFlightSubmissions = 2"))
+        #expect(renderer.contains("maximumInteractiveStepsPerSubmission = 24"))
+        #expect(renderer.contains("maximumWorldExpansionsPerSubmission = 1"))
+        #expect(renderer.contains("commandBuffer.remainingUniformBytes"))
+        #expect(renderer.contains("reservedUniformBytesForFrameTail"))
         #expect(renderer.contains(
             "layer.maximumDrawableCount = Metal4ExecutionContext.maximumInFlightSubmissions"
         ))
@@ -818,6 +822,21 @@ struct ArchitectureBoundaryTests {
         #expect(renderer.contains("var presentationEncoded = false"))
         #expect(renderer.contains("if !presentationEncoded"))
         #expect(renderer.contains("commandBuffer.cancelPresentation()"))
+        #expect(execution.contains("if result.succeeded, let drawableLease"))
+        #expect(execution.contains("drawable.present()"))
+        #expect(execution.contains("guard let tables = slot.nextRenderArgumentTables() else {"))
+        #expect(execution.contains("Metal 4 render argument-table capacity exhausted"))
+        #expect(execution.contains("Metal 4 uniform arena capacity exhausted"))
+        #expect(execution.contains("uniformArenaCapacity = Self.grownCapacity"))
+        #expect(execution.contains("renderEncoderCapacity = Self.grownCapacity"))
+        #expect(execution.contains(
+            "minimumUniformArenaCapacity: uniformArena.minimumCapacity"
+        ))
+        #expect(execution.contains("errorDescription: failureDescriptions.isEmpty"))
+        #expect(!execution.contains(
+            "Metal 4 submission exceeded its render-encoder argument-table capacity"
+        ))
+        #expect(!execution.contains("Metal 4 uniform arena exhausted; increase"))
         let compactionSignature = """
         private func encodeVisibleCellCompaction(
                 into commandBuffer: Metal4CommandBufferContext,
