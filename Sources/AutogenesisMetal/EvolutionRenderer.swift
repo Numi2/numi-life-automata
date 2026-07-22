@@ -1998,7 +1998,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let regulatoryNodeCapacity = 16
     private static let regulatoryEdgeCapacity = 48
     private static let membraneVertexCount = 12
-    private static let membraneRenderSubdivision = 4
+    private static let membraneRenderSubdivision = 3
     private static let cellSpatialHashBucketCount = 16_384
     private static let membraneContactPairCapacity = 524_288
     private static let contactWorkStateCount = 4
@@ -2115,7 +2115,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let junctionRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
-    private let spinorDisplayPipeline: MTLRenderPipelineState
+    private let directScaleDisplayPipelines: [MTLRenderPipelineState]
     private let pipelineBuildTelemetry: Metal4PipelineBuildTelemetry
     private let renderSubmissionResources: [RenderSubmissionResources]
     private var state: MTLTexture
@@ -2409,10 +2409,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         scaleSurfacePipelines = try [
             ("Ecological field renderer", "worldSurfaceFragment"),
             ("Morphology field renderer", "worldSurfaceFragment"),
-            ("Cellular tissue renderer", "cellularSurfaceFragment"),
-            ("Molecular reaction renderer", "molecularSurfaceFragment"),
-            ("Wave-observable renderer", "waveSurfaceFragment"),
-            ("Spinor lattice renderer", "spinorSurfaceFragment")
+            ("Cellular tissue renderer", "cellularSurfaceFragment")
         ].map { specification in
             try pipelineFactory.makeRenderPipeline(
                 label: specification.0,
@@ -2448,12 +2445,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             fragment: "compositeFragment",
             pixelFormat: .bgra8Unorm_srgb
         )
-        spinorDisplayPipeline = try pipelineFactory.makeRenderPipeline(
-            label: "Direct spinor display renderer",
-            vertex: "fullscreenVertex",
-            fragment: "spinorDisplayFragment",
-            pixelFormat: .bgra8Unorm_srgb
-        )
+        directScaleDisplayPipelines = try [
+            ("Direct molecular display renderer", "molecularDisplayFragment"),
+            ("Direct wave display renderer", "waveDisplayFragment"),
+            ("Direct spinor display renderer", "spinorDisplayFragment")
+        ].map { specification in
+            try pipelineFactory.makeRenderPipeline(
+                label: specification.0,
+                vertex: "fullscreenVertex",
+                fragment: specification.1,
+                pixelFormat: .bgra8Unorm_srgb
+            )
+        }
         pipelineBuildTelemetry = pipelineFactory.finalize()
 
         state = try Self.makeWorldTexture(device: device, label: "Living state")
@@ -3394,7 +3397,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             compactJunctionRenderPipeline, finalizeRenderDrawArgumentsPipeline,
             cellRenderPipeline, cellMeshRenderPipeline, junctionRenderPipeline,
             bloomPrefilterPipeline,
-            compositePipeline, spinorDisplayPipeline
+            compositePipeline
         ]
         let textures: [any MTLAllocation] = [
             state, reactionState, genomeA, reactionGenomeA, genomeB, reactionGenomeB,
@@ -3425,6 +3428,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         commandQueue.register(
             pipelines + scaleSurfacePipelines.map { $0 as any MTLAllocation } +
+                directScaleDisplayPipelines.map { $0 as any MTLAllocation } +
                 textures + buffers.map { $0 as any MTLAllocation }
         )
         if let layer = view.layer as? CAMetalLayer {
@@ -4929,11 +4933,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             (observationZoom >= 64 ? 1.02 :
                 (observationZoom >= 18 ? 0.94 :
                     (observationZoom >= 6 ? 1.04 : 0.94))))
-        let bloomIntensity: Float = observationZoom >= 420 ? 0.0 :
-            (observationZoom >= 160 ? 0.06 :
-                (observationZoom >= 64 ? 0.08 :
-                (observationZoom >= 18 ? 0.10 :
-                    (observationZoom >= 6 ? 0.08 : 0.08))))
+        // Dense tissue is already self-luminous and deep scientific scales render
+        // directly. Bloom is useful only for the sparse ecological overview.
+        let bloomIntensity: Float = observationZoom >= 18 ? 0.0 : 0.08
         var uniforms = makeUniforms(settings: settings)
         var postUniforms = PostProcessUniforms(
             sourceSize: SIMD2<Float>(Float(drawableTexture.width), Float(drawableTexture.height)),
@@ -4943,9 +4945,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             frameIndex: UInt32(truncatingIfNeeded: frameSerial)
         )
 
-        // The resolved spinor lattice has no translucent cell layer or bloom. Rendering it
-        // directly avoids a full-resolution HDR store, reload, and composite pass.
-        if renderScale == 5 {
+        // Molecular, wave, and spinor instruments are mutually exclusive with the tissue
+        // overlay. Presenting them directly avoids cell/junction compaction, translucent
+        // overdraw, the full-resolution HDR store/reload, bloom, and a second render pass.
+        if renderScale >= 3 {
             let descriptor = MTL4RenderPassDescriptor()
             let attachment = descriptor.colorAttachments[0]!
             attachment.texture = drawableTexture
@@ -4957,8 +4960,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 commandBuffer.cancelPresentation()
                 return
             }
-            encoder.label = "Render spinor lattice directly to display gamut"
-            encoder.setRenderPipelineState(spinorDisplayPipeline)
+            encoder.label = "Render scientific scale directly to display gamut"
+            encoder.setRenderPipelineState(directScaleDisplayPipelines[renderScale - 3])
             bindScaleSurfaceResources(encoder, renderScale: renderScale)
             encoder.setFragmentBytes(
                 &uniforms,
@@ -4971,7 +4974,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 index: 1
             )
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            encoder.writeTimestamp(ending: "direct spinor display")
+            encoder.writeTimestamp(ending: "direct scientific display")
             encoder.endEncoding()
             presentationEncoded = true
             encodePeriodicAgentObservation(into: commandBuffer, settings: settings)
@@ -4996,7 +4999,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             bloomTextureA as AnyObject
         ])
         postUniforms.sourceSize = SIMD2<Float>(Float(sceneColor.width), Float(sceneColor.height))
-        if observationZoom > 0.35, observationZoom < 180 {
+        let rendersTissueOverlay = observationZoom > 0.35 && renderScale < 3
+        if rendersTissueOverlay {
             guard encodeVisibleCellCompaction(
                 into: commandBuffer,
                 settings: settings
@@ -5016,7 +5020,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: MTLPrimitiveType.triangle, vertexStart: 0, vertexCount: 3)
 
-        if observationZoom > 0.35, observationZoom < 180 {
+        if rendersTissueOverlay {
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
             if tuningProfile == .m4Optimized && Self.experimentalMeshCellRenderingEnabled {
                 encoder.setRenderPipelineState(cellMeshRenderPipeline)
@@ -5132,7 +5136,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         _ encoder: Metal4RenderCommandEncoderAdapter,
         renderScale: Int
     ) {
-        if renderScale >= 3 {
+        if renderScale == 3 {
             encoder.setFragmentTexture(quantumState, index: 0)
             encoder.setFragmentTexture(state, index: 1)
             encoder.setFragmentTexture(ecology, index: 2)
@@ -5140,6 +5144,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             encoder.setFragmentTexture(mechanicalState, index: 4)
             encoder.setFragmentTexture(genomeA, index: 5)
             encoder.setFragmentTexture(genomeC, index: 6)
+        } else if renderScale == 4 {
+            encoder.setFragmentTexture(quantumState, index: 0)
+            encoder.setFragmentTexture(quantumCoupling, index: 7)
+        } else if renderScale == 5 {
+            encoder.setFragmentTexture(quantumState, index: 0)
         } else {
             encoder.setFragmentTexture(state, index: 0)
             encoder.setFragmentTexture(ecology, index: 1)

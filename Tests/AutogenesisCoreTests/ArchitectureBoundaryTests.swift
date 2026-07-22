@@ -648,7 +648,7 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func renderPathUsesSinglePassBloomAndDirectSpinorDisplay() throws {
+    func deepScientificScalesBypassTissueHDRAndBloom() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
@@ -659,15 +659,26 @@ struct ArchitectureBoundaryTests {
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
             encoding: .utf8
         )
-        #expect(renderer.contains("spinorDisplayPipeline"))
-        #expect(renderer.contains("if renderScale == 5"))
+        #expect(renderer.contains("directScaleDisplayPipelines"))
+        #expect(renderer.contains("if renderScale >= 3"))
+        #expect(renderer.contains(
+            "let rendersTissueOverlay = observationZoom > 0.35 && renderScale < 3"
+        ))
+        #expect(renderer.contains("encoder.setFragmentTexture(quantumCoupling, index: 7)"))
         #expect(renderer.contains("Single-pass quarter-resolution bloom"))
         #expect(renderer.contains("attachment.loadAction = .clear"))
         #expect(renderer.contains("drawableAttachment.loadAction = .clear"))
         #expect(renderer.contains("commandBuffer.retainResources(["))
         #expect(!renderer.contains("bloomBlurPipeline"))
         #expect(!renderer.contains("bloomTextureB"))
+        #expect(shader.contains("fragment float4 molecularDisplayFragment"))
+        #expect(shader.contains("fragment float4 waveDisplayFragment"))
         #expect(shader.contains("fragment float4 spinorDisplayFragment"))
+        #expect(!shader.contains("molecularSurfaceFragment"))
+        #expect(!shader.contains("waveSurfaceFragment"))
+        #expect(shader.contains("float2 reactionGradient = float2(dfdx(substrate), dfdy(substrate))"))
+        #expect(shader.contains("float4 preparedCoupling = coupling.sample"))
+        #expect(!shader.contains("glyphSeed"))
         #expect(shader.contains("inline float4 finiteHDRColor"))
         #expect(shader.contains("return finiteHDRColor(color, 1.08);"))
         #expect(shader.contains("return finiteHDRColor(color, contextExposure);"))
@@ -723,7 +734,7 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("normal raster clipping handles offscreen coordinates"))
         #expect(shader.contains("!isfinite(junctionStates[junctionIndex].strength)"))
         #expect(shader.contains("if (!all(isfinite(clipPosition))) { return output; }"))
-        #expect(shader.contains("if (!all(isfinite(coarseColor)) || !isfinite(coarseAlpha))"))
+        #expect(!shader.contains("coarseColor"))
         #expect(shader.contains("if (!all(isfinite(color)) || !isfinite(alpha))"))
         #expect(shader.contains("any(abs(clipA) > float2(2.5))"))
     }
@@ -1027,5 +1038,15 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("float repairFront"))
         #expect(shader.contains("float repairBoundary"))
         #expect(shader.contains("float leakage"))
+        let fragmentStart = try #require(shader.range(of: "fragment float4 cellFragment"))
+        let fragmentEnd = try #require(shader.range(
+            of: "inline float2 scientificViewUV",
+            range: fragmentStart.upperBound..<shader.endIndex
+        ))
+        let cellFragment = String(shader[fragmentStart.lowerBound..<fragmentEnd.lowerBound])
+        #expect(!cellFragment.contains("visualNoise"))
+        #expect(!cellFragment.contains("for (uint node"))
+        #expect(cellFragment.contains("float integumentBand"))
+        #expect(cellFragment.contains("float tractionTrack"))
     }
 }

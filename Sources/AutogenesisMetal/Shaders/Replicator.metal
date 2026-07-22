@@ -46,7 +46,7 @@ constant float referenceTissueCellCount = 24.0;
 constant uint regulatoryNodeCapacity = 16u;
 constant uint regulatoryEdgeCapacity = 48u;
 constant uint membraneVertexCount = 12u;
-constant uint membraneRenderSubdivision = 4u;
+constant uint membraneRenderSubdivision = 3u;
 constant uint membraneRenderSegmentCount = membraneVertexCount * membraneRenderSubdivision;
 constant uint lineageEventCapacity = 4096u;
 constant uint cellSpatialHashBucketCount = 16384u;
@@ -10303,7 +10303,7 @@ kernel void compactVisibleCells(
     if (owner >= maxAgentCount ||
         atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (observationZoom <= 0.35 || observationZoom >= 180.0) { return; }
+    if (observationZoom <= 0.35 || observationZoom >= 64.0) { return; }
     if (uniforms.trackedAgentID != 0xffffffffu &&
         uniforms.trackedAgentID != owner && observationZoom >= 34.0) { return; }
 
@@ -10367,7 +10367,7 @@ kernel void compactVisibleJunctions(
         !all(isfinite(junctionStates[junctionIndex].remodeling))) { return; }
 
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (observationZoom <= 1.25 || observationZoom >= 180.0 ||
+    if (observationZoom <= 1.25 || observationZoom >= 64.0 ||
         (uniforms.trackedAgentID != 0xffffffffu &&
             uniforms.trackedAgentID != owner && observationZoom >= 34.0)) { return; }
     float2 centerA = cellWorldPosition(agents[owner], cells[cellA].position, uniforms);
@@ -10671,15 +10671,12 @@ inline float3 molecularReactionVisualization(
     float4 localState,
     float4 localEcology,
     float4 localGeology,
-    float4 geneA,
-    float4 geneC,
     float quantumOrder,
     float chemicalAffinity,
     float catalystProduction,
     float energyProduction,
     float membraneAssembly,
     float mineralization,
-    float phase,
     float2 reactionDirection,
     float fieldGridSize,
     uint step,
@@ -10700,202 +10697,80 @@ inline float3 molecularReactionVisualization(
     float detritus = saturate(localEcology.y);
     float toxin = saturate(localEcology.z * 1.2);
     float catalyst = saturate(localEcology.w * 10.0);
-    // Concentrations span orders of magnitude. Square-root encoding changes only
-    // marker occupancy; field hue and all flux calculations retain linear values.
-    float resourceAAbundance = saturate(sqrt(resourceA) * 1.85);
-    float resourceBAbundance = saturate(sqrt(resourceB) * 1.85);
-    float catalystAbundance = saturate(sqrt(catalyst) * 1.55);
-    float energyAbundance = saturate(sqrt(storedEnergy) * 1.60);
-    float membraneAbundance = saturate(sqrt(membrane) * 1.65);
-    float detritusAbundance = saturate(sqrt(detritus) * 1.35);
-    float toxinAbundance = saturate(sqrt(toxin) * 1.20);
+    float substrateTotal = saturate((resourceA + resourceB) * 3.4);
+    float substrateBalance = resourceB / max(resourceA + resourceB, 0.00001);
+    float3 substrateHue = mix(
+        resourceAColor, resourceBColor, smoothstep(0.12, 0.88, substrateBalance)
+    );
+
+    float catalystFlux = saturate(fast::log2(1.0 + catalystProduction * 1.0e6) * 0.18);
+    float energyFlux = saturate(fast::log2(1.0 + energyProduction * 4.0e6) * 0.18);
+    float assemblyFlux = saturate(fast::log2(1.0 + membraneAssembly * 1.0e6) * 0.18);
+    float recycleFlux = saturate(fast::log2(1.0 + mineralization * 8.0e6) * 0.18);
     float reactionPotential = saturate(
         resourceA * 0.26 + resourceB * 0.26 + catalyst * 0.22 +
         storedEnergy * 0.16 + membrane * 0.10
     );
-    float2 fieldCoordinate = uv * fieldGridSize;
-    float fieldContour = 1.0 - smoothstep(0.026, 0.105,
-        abs(fract(reactionPotential * 13.0 +
-            visualNoise(fieldCoordinate * 0.31) * 0.18) - 0.5));
-    float catalystHotspot = catalyst * chemicalAffinity *
-        (0.42 + quantumOrder * 0.58);
-    float energyHotspot = storedEnergy *
-        (0.32 + saturate(energyProduction * 280.0) * 0.68);
-
-    float substrateTotal = saturate((resourceA + resourceB) * 3.4);
-    float substrateBalance = resourceB / max(resourceA + resourceB, 0.00001);
-    float3 substrateHue = mix(resourceAColor, resourceBColor,
-        smoothstep(0.12, 0.88, substrateBalance));
-    float barrier = smoothstep(0.48, 0.84, localGeology.w);
-    float3 color = float3(0.0012, 0.0028, 0.0070);
-    color += substrateHue * substrateTotal * (0.038 + fieldContour * 0.030);
-    color += catalystColor * catalystHotspot * fieldContour * 0.10;
-    color += energyColor * energyHotspot * fieldContour * 0.085;
-    color += membraneColor * membrane * fieldContour * 0.095;
-    color += detritusColor * detritus * (1.0 - fieldContour) * 0.055;
-    color = mix(color, toxinColor * (0.08 + color), toxin * 0.22);
-
-    float2 glyphCoordinate = uv * fieldGridSize * 6.0;
-    int2 glyphCell = int2(floor(glyphCoordinate));
-    uint glyphSeed = hash32(
-        uint(glyphCell.x) * 1597334677u ^
-        uint(glyphCell.y) * 3812015801u
+    float contour = 1.0 - smoothstep(
+        0.035, 0.11, abs(fract(reactionPotential * 11.0) - 0.5)
     );
-    float2 jitter = float2(
-        random01(glyphSeed + 1u), random01(glyphSeed + 2u)
-    ) - 0.5;
-    float2 glyphPosition = fract(glyphCoordinate) - 0.5 - jitter * 0.34;
-    float glyphAngle = 2.0 * M_PI_F * random01(glyphSeed + 3u) + phase * 0.72;
-    float2 glyphAxis = float2(cos(glyphAngle), sin(glyphAngle));
-    float2 glyphNormal = float2(-glyphAxis.y, glyphAxis.x);
-    float selector = random01(glyphSeed + 4u);
-    float aa = max(fwidth(length(glyphPosition)) * 1.35, 0.003);
-    float glyph = 0.0;
-    float abundance = 0.0;
-    float3 glyphColor = float3(0.0);
-    if (selector < 0.20) {
-        float2 offset = glyphAxis * 0.064;
-        glyph = max(
-            1.0 - smoothstep(0.052, 0.052 + aa * 2.0, length(glyphPosition - offset)),
-            1.0 - smoothstep(0.052, 0.052 + aa * 2.0, length(glyphPosition + offset))
-        );
-        glyph = max(glyph, 1.0 - smoothstep(
-            0.012, 0.012 + aa * 2.0,
-            segmentDistance(glyphPosition, -offset, offset)
-        ));
-        abundance = resourceAAbundance;
-        glyphColor = resourceAColor;
-    } else if (selector < 0.39) {
-        float2 a = glyphAxis * 0.070;
-        float2 b = -glyphAxis * 0.045 + glyphNormal * 0.064;
-        float2 c = -glyphAxis * 0.045 - glyphNormal * 0.064;
-        glyph = max(
-            1.0 - smoothstep(0.045, 0.045 + aa * 2.0, length(glyphPosition - a)),
-            max(
-                1.0 - smoothstep(0.045, 0.045 + aa * 2.0, length(glyphPosition - b)),
-                1.0 - smoothstep(0.045, 0.045 + aa * 2.0, length(glyphPosition - c))
-            )
-        );
-        glyph = max(glyph, 1.0 - smoothstep(
-            0.010, 0.010 + aa * 2.0,
-            min(segmentDistance(glyphPosition, a, b), segmentDistance(glyphPosition, a, c))
-        ));
-        abundance = resourceBAbundance;
-        glyphColor = resourceBColor;
-    } else if (selector < 0.55) {
-        float radius = length(glyphPosition);
-        glyph = 1.0 - smoothstep(aa, aa * 3.0, abs(radius - 0.095));
-        glyph = max(glyph,
-            1.0 - smoothstep(0.026, 0.026 + aa * 2.0, radius));
-        abundance = catalystAbundance;
-        glyphColor = catalystColor;
-    } else if (selector < 0.70) {
-        float diamond = abs(glyphPosition.x) + abs(glyphPosition.y);
-        glyph = 1.0 - smoothstep(0.070, 0.070 + aa * 2.4, diamond);
-        float pulse = 0.65 + 0.35 * sin(
-            float(step) * 0.090 + random01(glyphSeed + 5u) * 2.0 * M_PI_F
-        );
-        abundance = energyAbundance * pulse;
-        glyphColor = energyColor;
-    } else if (selector < 0.84) {
-        float along = dot(glyphPosition, glyphAxis);
-        float across = abs(dot(glyphPosition, glyphNormal) -
-            sin(along * 35.0 + phase * 2.0 * M_PI_F) * 0.020);
-        glyph = (1.0 - smoothstep(0.012, 0.012 + aa * 2.0, across)) *
-            (1.0 - smoothstep(0.09, 0.13, abs(along)));
-        abundance = membraneAbundance;
-        glyphColor = membraneColor;
-    } else if (selector < 0.94) {
-        float shardA = 1.0 - smoothstep(0.012, 0.012 + aa * 2.0,
-            segmentDistance(glyphPosition, -glyphAxis * 0.10, glyphNormal * 0.07));
-        float shardB = 1.0 - smoothstep(0.012, 0.012 + aa * 2.0,
-            segmentDistance(glyphPosition, glyphAxis * 0.09, -glyphNormal * 0.06));
-        glyph = max(shardA, shardB);
-        abundance = detritusAbundance;
-        glyphColor = detritusColor;
-    } else {
-        float crossA = 1.0 - smoothstep(0.013, 0.013 + aa * 2.0,
-            segmentDistance(glyphPosition, -glyphAxis * 0.10, glyphAxis * 0.10));
-        float crossB = 1.0 - smoothstep(0.013, 0.013 + aa * 2.0,
-            segmentDistance(glyphPosition, -glyphNormal * 0.10, glyphNormal * 0.10));
-        glyph = max(crossA, crossB);
-        abundance = toxinAbundance;
-        glyphColor = toxinColor;
-    }
-    float glyphThreshold = random01(glyphSeed + 6u) * 0.58;
-    float glyphVisibility = smoothstep(glyphThreshold,
-        min(glyphThreshold + 0.14, 1.0), abundance);
-    color += glyphColor * glyph * glyphVisibility * (0.82 + abundance * 0.96);
 
-    float2 safeReactionDirection = length(reactionDirection) > 0.0001
-        ? normalize(reactionDirection)
-        : float2(cos(phase * 2.0 * M_PI_F), sin(phase * 2.0 * M_PI_F));
-    float2 reactionNormal = float2(-safeReactionDirection.y, safeReactionDirection.x);
-    float streamline = 1.0 - smoothstep(0.018, 0.060,
-        abs(fract(dot(fieldCoordinate, reactionNormal) * 0.32) - 0.5));
-    float movingPulse = 1.0 - smoothstep(0.018, 0.075,
-        abs(fract(dot(fieldCoordinate, safeReactionDirection) * 0.13 -
-            float(step) * 0.010) - 0.5));
-    float recyclePulse = 1.0 - smoothstep(0.018, 0.070,
-        abs(fract(dot(fieldCoordinate, safeReactionDirection) * 0.11 +
-            float(step) * 0.007 + 0.37) - 0.5));
-    float reactionTrace = streamline * movingPulse;
-    float recycleTrace = streamline * recyclePulse;
-    // Logarithmic radiometry keeps source terms visible across several decades
-    // while preserving zero and monotonic ordering.
-    float catalystFlux = saturate(log2(1.0 + catalystProduction * 1.0e6) * 0.18);
-    float energyFlux = saturate(log2(1.0 + energyProduction * 4.0e6) * 0.18);
-    float assemblyFlux = saturate(log2(1.0 + membraneAssembly * 1.0e6) * 0.18);
-    float recycleFlux = saturate(log2(1.0 + mineralization * 8.0e6) * 0.18);
-    float reactionRing = 1.0 - smoothstep(0.010, 0.030,
-        abs(length(glyphPosition) - 0.155));
-    color += mix(catalystColor, energyColor, energyFlux) * reactionTrace *
-        max(catalystFlux, energyFlux) * 0.96;
-    color += membraneColor * reactionTrace * assemblyFlux * 0.88;
-    color += detritusColor * recycleTrace * recycleFlux * 0.56;
-    color += mix(catalystColor, energyColor, energyFlux) * reactionRing *
-        glyphVisibility * max(catalystFlux, energyFlux) * 0.42;
-    color *= 1.0 - toxin * (0.12 + streamline * 0.25);
+    float2 direction = length(reactionDirection) > 0.00001
+        ? normalize(reactionDirection) : float2(1.0, 0.0);
+    float2 normal = float2(-direction.y, direction.x);
+    float2 fieldCoordinate = uv * fieldGridSize;
+    float lane = 1.0 - smoothstep(
+        0.030, 0.085, abs(fract(dot(fieldCoordinate, normal) * 0.24) - 0.5)
+    );
+    float forwardPulse = 1.0 - smoothstep(
+        0.035, 0.105,
+        abs(fract(dot(fieldCoordinate, direction) * 0.12 - float(step) * 0.010) - 0.5)
+    );
+    float reversePulse = 1.0 - smoothstep(
+        0.035, 0.105,
+        abs(fract(dot(fieldCoordinate, direction) * 0.10 + float(step) * 0.007) - 0.5)
+    );
+    float reactionTrace = lane * forwardPulse;
+    float recycleTrace = lane * reversePulse;
+    float catalystHotspot = catalyst * chemicalAffinity * (0.42 + quantumOrder * 0.58);
+    float energyHotspot = storedEnergy * (0.32 + energyFlux * 0.68);
 
+    float3 color = float3(0.0012, 0.0028, 0.0070);
     if (displayMode == 1u) {
-        float substrateRadiance = saturate(sqrt(resourceA + resourceB) * 0.68);
-        color = float3(0.0015, 0.0035, 0.0080);
-        color += substrateHue * substrateRadiance * (0.12 + fieldContour * 0.075);
-        color += energyColor * energyHotspot * (0.34 + movingPulse * 0.26);
-        color += catalystColor * catalystHotspot * fieldContour * 0.18;
+        color += substrateHue * saturate(sqrt(resourceA + resourceB) * 0.68) *
+            (0.12 + contour * 0.075);
+        color += energyColor * energyHotspot * (0.34 + reactionTrace * 0.26);
+        color += catalystColor * catalystHotspot * contour * 0.18;
         color += detritusColor * detritus * (0.08 + recycleTrace * 0.18);
-        color += glyphColor * glyph * glyphVisibility * (0.72 + abundance * 0.76);
-        color += mix(catalystColor, energyColor, energyFlux) * reactionTrace *
-            max(catalystFlux, energyFlux) * 0.68;
-        color += membraneColor * reactionTrace * assemblyFlux * 0.72;
-        color += detritusColor * recycleTrace * recycleFlux * 0.44;
-    } else if (displayMode == 2u) {
-        color = float3(0.002, 0.005, 0.010);
-        color += float3(1.0, 0.12, 0.035) * saturate(geneA.x) * 0.34;
-        color += float3(0.04, 0.94, 0.58) * saturate(geneA.y) * 0.31;
-        color += float3(0.08, 0.42, 1.0) * saturate(geneA.z) * 0.28;
-        color += float3(0.94, 0.46, 0.04) * saturate(geneC.w) * 0.34;
-        color *= 0.72 + fieldContour * 0.44;
     } else if (displayMode == 3u) {
-        color = float3(0.002, 0.004, 0.009) +
-            resourceAColor * resourceA * 0.42 +
-            resourceBColor * resourceB * 0.38 +
-            detritusColor * detritus * 0.30 +
-            toxinColor * toxin * 0.38;
+        color += resourceAColor * resourceA * 0.42;
+        color += resourceBColor * resourceB * 0.38;
+        color += detritusColor * detritus * 0.30;
+        color += toxinColor * toxin * 0.38;
     } else if (displayMode == 4u) {
-        color = float3(0.002, 0.005, 0.010) +
-            catalystColor * catalystHotspot * 0.52 +
-            energyColor * energyHotspot * 0.44 +
-            membraneColor * membrane * (0.28 + fieldContour * 0.34);
+        color += catalystColor * catalystHotspot * 0.52;
+        color += energyColor * energyHotspot * 0.44;
+        color += membraneColor * membrane * (0.28 + contour * 0.34);
     } else if (displayMode == 5u) {
-        color = float3(0.0015, 0.003, 0.007);
         color += float3(0.02, 0.84, 1.0) * quantumOrder * chemicalAffinity * 0.24;
         color += catalystColor * catalystFlux * (0.20 + reactionTrace * 0.94);
         color += energyColor * energyFlux * (0.18 + reactionTrace * 0.86);
         color += membraneColor * assemblyFlux * reactionTrace * 0.92;
         color += detritusColor * recycleFlux * recycleTrace * 0.66;
         color += toxinColor * toxin * 0.18;
+    } else {
+        color += substrateHue * substrateTotal * (0.052 + contour * 0.038);
+        color += catalystColor * catalystHotspot * contour * 0.12;
+        color += energyColor * energyHotspot * contour * 0.10;
+        color += membraneColor * membrane * contour * 0.10;
+        color += detritusColor * detritus * (1.0 - contour) * 0.065;
+        color += mix(catalystColor, energyColor, energyFlux) * reactionTrace *
+            max(catalystFlux, energyFlux) * 0.92;
+        color += membraneColor * reactionTrace * assemblyFlux * 0.82;
+        color += detritusColor * recycleTrace * recycleFlux * 0.54;
+        color = mix(color, toxinColor * (0.08 + color), toxin * 0.22);
     }
+    float barrier = smoothstep(0.48, 0.84, localGeology.w);
     return max(color * (1.0 - barrier * 0.82), 0.0);
 }
 
@@ -11431,17 +11306,20 @@ fragment float4 cellFragment(
     constant SimulationUniforms& uniforms [[buffer(0)]]
 ) {
     float2 p = input.local;
-    float angle = atan2(p.y, p.x);
-    float oscillatorAngle = input.dynamics.z * 2.0 * M_PI_F;
-    float2 polarityVector = input.development.xy;
-    float2 morphologyAxis = length(polarityVector) > 0.001
-        ? normalize(polarityVector)
-        : float2(cos(oscillatorAngle), sin(oscillatorAngle));
-    float2 morphologyNormal = float2(-morphologyAxis.y, morphologyAxis.x);
     float radius = input.radialCoordinate;
     float aa = max(fwidth(radius) * 1.15, 0.004);
     float body = 1.0 - smoothstep(1.0 - aa * 1.8, 1.0, radius);
     if (body <= 0.001) { discard_fragment(); }
+
+    float phaseAngle = input.dynamics.z * 2.0 * M_PI_F;
+    float2 polarityVector = input.development.xy;
+    float2 morphologyAxis = length(polarityVector) > 0.001
+        ? normalize(polarityVector)
+        : float2(cos(phaseAngle), sin(phaseAngle));
+    float2 morphologyNormal = float2(-morphologyAxis.y, morphologyAxis.x);
+    float2 boundaryNormal = length(input.tissueGeometry.xy) > 0.0001
+        ? normalize(input.tissueGeometry.xy) : morphologyAxis;
+    float2 surfaceDirection = length(p) > 0.001 ? normalize(p) : boundaryNormal;
 
     float integrity = saturate(input.localMembrane.x);
     float localPressure = saturate(input.localMembrane.y);
@@ -11453,447 +11331,157 @@ fragment float4 cellFragment(
     );
     float membrane = body * smoothstep(1.0 - membraneThickness, 0.985, radius);
     float cytoplasm = body * (1.0 - smoothstep(0.62, 0.94, radius));
-    float nucleusRadius = 0.20 + input.signals.x * 0.08;
-    float2 nucleusPosition = morphologyAxis * (input.development.z - 0.5) * 0.18;
-    float nucleus = (1.0 - smoothstep(nucleusRadius, nucleusRadius + aa * 2.0,
-        length(p - nucleusPosition))) * body;
     float exposure = saturate(input.edgeExposure);
     float integumentCoverage = saturate(input.collectiveBoundary.x) * exposure;
     float integumentTension = saturate(input.collectiveBoundary.y);
-    float collectiveUnity = saturate(max(integumentCoverage, integumentTension));
-    float2 boundaryNormal = length(input.tissueGeometry.xy) > 0.0001
-        ? normalize(input.tissueGeometry.xy) : morphologyAxis;
-    float2 surfaceDirection = length(p) > 0.001 ? normalize(p) : boundaryNormal;
-    float exposedArc = membrane * exposure;
     float localFailure = saturate((1.0 - integrity) * 1.35 + localStrain * 0.28);
     float membraneContinuity = 1.0 - localFailure * exposure *
         smoothstep(0.82, 1.0, radius) * 0.82;
     membrane *= membraneContinuity;
-    exposedArc *= membraneContinuity;
+    float exposedArc = membrane * exposure;
     float integumentBand = body * smoothstep(
         1.0 - membraneThickness * (1.42 + integumentCoverage * 0.72),
         0.992, radius
     ) * integumentCoverage * membraneContinuity;
     float woundArc = membrane * smoothstep(0.08, 0.78, localFailure);
     float repairDemand = saturate((1.0 - integrity) * 1.5 + localStrain * 0.30);
-    float repairFront = membrane * paidRepair * repairDemand *
-        (1.0 - smoothstep(0.88, 1.0, localFailure) * 0.46);
+    float repairFront = membrane * paidRepair * repairDemand;
     float repairBoundary = body * paidRepair * repairDemand *
         (1.0 - smoothstep(0.018, 0.070,
             abs(radius - (1.0 - membraneThickness * 0.72))));
     float pressureFront = membrane * localPressure;
     float leakage = exposedArc * localFailure *
-        (0.55 + 0.45 * sin(angle * 17.0 + input.dynamics.z * 9.0));
-    float autonomySignal = saturate(input.closureSignal);
-    float autonomyPulse = 0.88 + 0.12 * sin(
-        input.dynamics.z * 2.0 * M_PI_F + angle * 3.0
-    );
-    float contactDamage = saturate(input.tissueForce.z * 1800.0);
-    float trophicGain = saturate(max(input.tissueForce.w, 0.0) * 1800.0);
-    float trophicLoss = saturate(max(-input.tissueForce.w, 0.0) * 1800.0);
-    float tractionMagnitude = saturate(length(input.tissueForce.xy) * 11000.0);
-    float barrierCompression = saturate(input.environment.y);
-    float frequencyMatch = saturate(input.environment.w);
-    float environmentalFrequencyCoordinate = saturate(
-        (input.environment.z - 0.0010) / 0.0074
-    );
-    float3 environmentalFrequencyColor = hsvToRGB(float3(
-        mix(0.56, 0.92, environmentalFrequencyCoordinate), 0.86, 0.90
-    ));
-    float frequencyBand = (0.5 + 0.5 * sin(
-        angle * 5.0 - float(uniforms.step) * input.environment.z * 2.0 * M_PI_F
-    )) * membrane;
-    float programExchange = saturate(abs(input.programEcology.x) * 5000.0);
-    float programRejection = saturate(input.programEcology.y);
-    float programContact = saturate(programExchange + programRejection);
-    float positiveProgramContribution = saturate(max(input.programEcology.w, 0.0) * 5000.0);
-    float negativeProgramContribution = saturate(max(-input.programEcology.w, 0.0) * 5000.0);
-    float2 tractionDirection = length(input.tissueForce.xy) > 0.000001
-        ? normalize(input.tissueForce.xy) : boundaryNormal;
-    float tractionTrack = (1.0 - smoothstep(0.020, 0.065, segmentDistance(
-        p, tractionDirection * 0.08, tractionDirection * 0.82
-    ))) * cytoplasm * tractionMagnitude;
-    float coarseObservationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (coarseObservationZoom < 18.0) {
-        float morphologyMembrane = body * smoothstep(
-            0.84 - integrity * 0.045, 0.985, radius
-        );
-        float morphologyCytoplasm = body * (1.0 - smoothstep(0.82, 0.97, radius));
-        float morphologyExposedArc = morphologyMembrane * exposure;
-        float coarseATP = saturate(input.physiology.x);
-        float coarseCalcium = saturate(input.signaling.x);
-        float coarseERK = saturate(input.signaling.y);
-        float coarseVoltage = saturate(input.dynamics.x * 0.30 + 0.5);
-        float organismDetail = smoothstep(3.0, 14.0, coarseObservationZoom);
-        float radialDepth = sqrt(saturate(1.0 - radius * radius));
-        float3 coarseLineage = hsvToRGB(float3(input.lineageHue, 0.82, 0.70));
-        float roleTotal = max(
-            input.phenotype.x + input.phenotype.y + input.phenotype.z + input.phenotype.w,
-            0.001
-        );
-        float3 roleColor = (
-            float3(0.02, 0.92, 0.66) * input.phenotype.x +
-            float3(0.98, 0.18, 0.08) * input.phenotype.y +
-            float3(0.08, 0.50, 1.0) * input.phenotype.z +
-            float3(0.98, 0.12, 0.68) * input.phenotype.w
-        ) / roleTotal;
-        float3 coarseVoltageColor = mix(
-            float3(0.02, 0.34, 1.0), float3(1.0, 0.08, 0.02), coarseVoltage
-        );
-        float3 tissueColor = mix(coarseLineage, roleColor, 0.44 + organismDetail * 0.20);
-        float coarseContactStrength = length(input.interaction.xy) > 0.001
-            ? saturate(input.interaction.z) : 0.0;
-        float2 coarseContactDirection = length(input.interaction.xy) > 0.001
-            ? normalize(input.interaction.xy) : morphologyAxis;
-        float coarseJunction = (1.0 - smoothstep(0.024, 0.074, segmentDistance(
-            p, coarseContactDirection * 0.66, coarseContactDirection * 1.04
-        ))) * coarseContactStrength * body;
-        float junctionNode = (1.0 - smoothstep(0.055, 0.125,
-            length(p - coarseContactDirection * 0.78))) * coarseContactStrength * body;
-        float energyCore = (1.0 - smoothstep(0.08, 0.42, radius)) *
-            morphologyCytoplasm * coarseATP;
-        float collectiveEnvelope = body * smoothstep(
-            0.78 - integumentCoverage * 0.10, 0.992, radius
-        ) * integumentCoverage * membraneContinuity;
-        float outerMembrane = max(morphologyExposedArc, collectiveEnvelope);
-        float internalMembrane = morphologyMembrane * (1.0 - exposure) *
-            (1.0 - collectiveUnity * mix(0.88, 0.38, organismDetail));
-        float coarseNucleus = nucleus *
-            (1.0 - collectiveUnity * mix(0.82, 0.24, organismDetail));
-        float nucleusRing = (1.0 - smoothstep(aa * 1.1, aa * 3.0,
-            abs(length(p - nucleusPosition) - nucleusRadius * 1.18))) *
-            morphologyCytoplasm;
-        float coarseOrganelleNoise = visualNoise(
-            p * (11.0 + input.phenotype.z * 5.0) +
-            float2(input.lineageHue * 19.0, input.phenotype.w * 13.0)
-        );
-        float coarseOrganelles = smoothstep(0.75, 0.90, coarseOrganelleNoise) *
-            morphologyCytoplasm * (1.0 - nucleus) * organismDetail;
-        float coarseFiber = (1.0 - smoothstep(0.030, 0.095,
-            abs(sin(dot(p, morphologyNormal) * (12.0 + input.phenotype.y * 8.0) +
-                angle * 0.72)))) * morphologyCytoplasm * organismDetail;
-        float3 coarseColor = float3(0.006, 0.012, 0.018) * body;
-        coarseColor += tissueColor * morphologyCytoplasm *
-            (0.30 + coarseATP * 0.18 + radialDepth * (0.18 + organismDetail * 0.12));
-        coarseColor += float3(1.0, 0.66, 0.05) * energyCore *
-            (0.05 + organismDetail * 0.10);
-        coarseColor += mix(float3(0.02, 0.16, 0.24), coarseVoltageColor, 0.28) *
-            morphologyMembrane * (0.055 + integrity * 0.075);
-        coarseColor += float3(0.018, 0.075, 0.095) * internalMembrane *
-            (0.48 + coarseContactStrength * 0.52);
-        coarseColor += float3(0.04, 0.92, 0.74) * internalMembrane *
-            coarseContactStrength * (0.16 + organismDetail * 0.28);
-        coarseColor += mix(roleColor, float3(0.94, 0.99, 1.0),
-            0.28 + autonomySignal * 0.22) * outerMembrane *
-            (0.44 + autonomySignal * 0.34);
-        coarseColor += mix(float3(0.98, 0.12, 0.66), coarseLineage, 0.28) * coarseNucleus *
-            (0.24 + organismDetail * 0.62);
-        coarseColor += mix(float3(0.06, 0.78, 1.0), float3(1.0, 0.18, 0.64),
-            coarseERK) * nucleusRing * (0.16 + organismDetail * 0.28);
-        coarseColor += float3(0.04, 0.96, 0.76) * coarseJunction *
-            (0.56 + organismDetail * 0.82);
-        coarseColor += float3(0.86, 1.0, 0.94) * junctionNode *
-            (0.24 + organismDetail * 0.46);
-        coarseColor += mix(float3(0.04, 0.68, 1.0), float3(1.0, 0.64, 0.05),
-            coarseATP) * coarseOrganelles * 0.36;
-        coarseColor += float3(0.12, 0.82, 0.72) * coarseFiber *
-            (0.045 + saturate(input.mechanics.x) * 0.095);
-        coarseColor += float3(0.02, 0.88, 1.0) * coarseCalcium * morphologyMembrane *
-            (0.22 + organismDetail * 0.42);
-        coarseColor += float3(0.98, 0.08, 0.66) * coarseERK * coarseNucleus *
-            (0.26 + organismDetail * 0.54);
-        coarseColor += float3(0.02, 1.0, 0.58) * tractionTrack *
-            (0.42 + organismDetail * 0.52);
-        coarseColor += float3(0.08, 1.0, 0.62) * repairFront *
-            (0.42 + organismDetail * 0.52);
-        coarseColor += float3(0.04, 0.58, 1.0) * repairBoundary *
-            (0.46 + organismDetail * 0.48);
-        coarseColor += float3(1.0, 0.055, 0.018) * woundArc *
-            (0.42 + organismDetail * 0.58);
-        coarseColor += float3(1.0, 0.30, 0.015) * pressureFront *
-            (0.38 + organismDetail * 0.32);
-        coarseColor += float3(1.0, 0.065, 0.018) * leakage *
-            (0.72 + organismDetail * 0.42);
-        coarseColor += float3(1.0, 0.08, 0.015) * morphologyExposedArc * contactDamage * 1.16;
-        coarseColor += float3(1.0, 0.045, 0.01) * morphologyExposedArc * input.construction.x * 0.94;
-        coarseColor += float3(0.08, 0.92, 0.62) * morphologyExposedArc * input.construction.y * 0.72;
-        coarseColor += float3(0.04, 0.78, 1.0) * morphologyExposedArc * input.construction.z * 0.88;
-        coarseColor += float3(0.12, 1.0, 0.42) * morphologyExposedArc * input.construction.w * 0.74;
-        float3 integumentColor = mix(
-            coarseLineage, float3(0.84, 1.0, 0.94),
-            0.24 + integumentTension * 0.34
-        );
-        coarseColor += integumentColor * collectiveEnvelope *
-            (0.76 + integumentTension * 0.54);
-        coarseColor += mix(
-            float3(0.08, 0.96, 0.70), float3(0.96, 0.99, 1.0), autonomySignal
-        ) * morphologyExposedArc * autonomySignal * autonomyPulse *
-            (0.46 + organismDetail * 0.34);
-        coarseColor += environmentalFrequencyColor * frequencyBand *
-            (0.18 + frequencyMatch * 0.56);
-        coarseColor += float3(1.0, 0.28, 0.02) * morphologyMembrane *
-            barrierCompression * 0.82;
-        coarseColor += float3(1.0, 0.76, 0.02) * morphologyCytoplasm * trophicGain * 0.82;
-        coarseColor += float3(0.02, 0.96, 0.82) * morphologyMembrane *
-            programExchange * 0.82;
-        coarseColor += float3(1.0, 0.04, 0.12) * morphologyMembrane *
-            programRejection * 0.94;
-        if (uniforms.displayMode == 4) {
-            float morphogenA = saturate(input.signals.x);
-            float morphogenB = saturate(input.signals.y);
-            float3 morphogenColor = (
-                float3(0.00, 0.92, 1.0) * morphogenA +
-                float3(1.0, 0.06, 0.58) * morphogenB
-            ) / max(morphogenA + morphogenB, 0.001);
-            coarseColor = morphogenColor * morphologyCytoplasm *
-                (0.32 + abs(morphogenA - morphogenB) * 0.68);
-            coarseColor += mix(
-                float3(1.0, 0.70, 0.02), float3(0.08, 1.0, 0.56),
-                saturate(input.development.z)
-            ) * coarseNucleus * 0.96;
-            coarseColor += float3(0.90, 0.98, 1.0) * morphologyMembrane *
-                saturate(input.development.w * 28.0) * 0.82;
-        } else if (uniforms.displayMode == 5) {
-            float mechanicsCalcium = saturate(input.signalCausality.x * 48.0);
-            float calciumERK = saturate(input.signalCausality.y * 56.0);
-            float erkTraction = saturate(input.signalCausality.z * 12000.0);
-            coarseColor = float3(0.008, 0.014, 0.022) * body;
-            coarseColor += float3(0.02, 0.88, 1.0) * mechanicsCalcium *
-                morphologyMembrane * 1.24;
-            coarseColor += float3(0.98, 0.08, 0.66) * calciumERK * coarseNucleus * 1.36;
-            coarseColor += float3(0.08, 1.0, 0.56) * erkTraction *
-                morphologyCytoplasm * 0.82;
-        }
-        float coarseAlpha = body * input.visibility *
-            mix(0.76, 0.96, organismDetail) * (1.0 - saturate(input.signals.w) * 0.35);
-        coarseColor *= input.visibility;
-        if (!all(isfinite(coarseColor)) || !isfinite(coarseAlpha)) {
-            discard_fragment();
-        }
-        return float4(clamp(coarseColor, 0.0, 16.0), saturate(coarseAlpha));
-    }
-    float mitochondriaPattern = visualNoise(p * (13.0 + input.phenotype.z * 7.0) +
-        float2(input.lineageHue * 17.0, input.phenotype.w * 11.0));
-    float mitochondria = smoothstep(0.73, 0.92, mitochondriaPattern) * cytoplasm *
-        (1.0 - nucleus);
-    float cycle = saturate(input.physiology.z);
-    float divisionAngle = input.dynamics.z * 2.0 * M_PI_F +
-        (input.regulation.z - input.regulation.y) * 1.4;
-    float2 divisionAxis = float2(cos(divisionAngle), sin(divisionAngle));
-    float cleavage = (1.0 - smoothstep(0.025, 0.075, abs(dot(p, divisionAxis)))) *
-        body * smoothstep(0.76, 1.0, cycle);
-    float proliferativeEnvelope = (1.0 - smoothstep(0.018, 0.050,
-        abs(length(p - nucleusPosition) - nucleusRadius * 1.24))) *
-        cytoplasm * input.regulation.x;
-    float actomyosinFiber = (1.0 - smoothstep(0.025, 0.085,
-        abs(sin(dot(p, morphologyNormal) * (18.0 + input.phenotype.y * 12.0) +
-            angle * 1.7)))) * cytoplasm * input.regulation.z;
+        (0.72 + 0.28 * abs(dot(surfaceDirection, morphologyNormal)));
 
-    float contactStrength = length(input.interaction.xy) > 0.001 ? input.interaction.z : 0.0;
-    float2 contactDirection = length(input.interaction.xy) > 0.001
-        ? normalize(input.interaction.xy)
-        : float2(1.0, 0.0);
-    float junction = 1.0 - smoothstep(0.018, 0.055, segmentDistance(
-        p, contactDirection * 0.58, contactDirection * 1.04
-    ));
-    junction *= body * contactStrength;
-
-    float3 lineage = hsvToRGB(float3(input.lineageHue, 0.78, 0.62));
-    float3 phenotypeColor = input.phenotype.z * float3(0.02, 0.64, 0.96) +
-        input.phenotype.w * float3(0.98, 0.54, 0.035) +
-        input.phenotype.y * float3(0.76, 0.08, 0.82);
-    phenotypeColor /= max(input.phenotype.z + input.phenotype.w + input.phenotype.y, 0.001);
     float atp = saturate(input.physiology.x);
     float stress = saturate(input.signals.z);
     float apoptosis = saturate(input.signals.w);
     float voltagePolarity = saturate(input.dynamics.x * 0.30 + 0.5);
-    float3 voltageColor = mix(float3(0.02, 0.34, 1.0), float3(1.0, 0.08, 0.02), voltagePolarity);
-    float3 phaseColor = hsvToRGB(float3(fract(input.dynamics.z + 0.52), 0.82, 0.84));
-    float frequencyCoordinate = saturate((input.dynamics.w - 0.0008) / 0.0082);
-    float3 resonanceColor = hsvToRGB(float3(
-        mix(0.56, 0.02, frequencyCoordinate), 0.88, 0.82
-    ));
     float calciumSignal = saturate(input.signaling.x);
     float erkSignal = saturate(input.signaling.y);
-    float signalRefractory = saturate(input.signaling.z);
     float neighborSignal = saturate(input.signaling.w);
-    float mechanicsCalciumCause = saturate(input.signalCausality.x * 48.0);
-    float calciumERKCause = saturate(input.signalCausality.y * 56.0);
-    float erkTractionCause = saturate(input.signalCausality.z * 12000.0);
-    float signalingCost = saturate(input.signalCausality.w * 18000.0);
-    float morphogenA = saturate(input.signals.x);
-    float morphogenB = saturate(input.signals.y);
-    float fateMemory = saturate(input.development.z);
-    float junctionMorphogenTransport = saturate(input.development.w * 28.0);
-    float developmentalAxisTrack = (1.0 - smoothstep(0.018, 0.060, segmentDistance(
-        p, -morphologyAxis * 0.68, morphologyAxis * 0.68
-    ))) * cytoplasm;
-    float3 color = mix(lineage, phenotypeColor, 0.42) * cytoplasm * (0.22 + atp * 0.46);
-    float centralProgram = saturate(input.signals.x - input.signals.y + 0.5);
-    float3 differentiatedLineage = mix(lineage,
-        mix(float3(0.04, 0.56, 0.92), float3(0.92, 0.38, 0.04), 1.0 - centralProgram), 0.34);
-    color = mix(color, differentiatedLineage * cytoplasm * (0.24 + atp * 0.34), 0.42);
-    color = mix(color, phaseColor * cytoplasm * (0.30 + atp * 0.30), 0.24);
-    color += resonanceColor * membrane * saturate(input.resonance.z * 18.0) * 0.72;
-    color += environmentalFrequencyColor * frequencyBand *
-        (0.12 + frequencyMatch * 0.64);
-    float3 membraneColor = mix(differentiatedLineage, voltageColor, 0.58);
-    color += membraneColor * membrane * (0.30 + integrity * 0.34);
+    float autonomySignal = saturate(input.closureSignal);
+    float3 lineage = hsvToRGB(float3(input.lineageHue, 0.78, 0.62));
+    float roleTotal = max(
+        input.phenotype.x + input.phenotype.y + input.phenotype.z + input.phenotype.w,
+        0.001
+    );
+    float3 roleColor = (
+        float3(0.02, 0.92, 0.66) * input.phenotype.x +
+        float3(0.98, 0.18, 0.08) * input.phenotype.y +
+        float3(0.08, 0.50, 1.0) * input.phenotype.z +
+        float3(0.98, 0.12, 0.68) * input.phenotype.w
+    ) / roleTotal;
+    float3 voltageColor = mix(
+        float3(0.02, 0.34, 1.0), float3(1.0, 0.08, 0.02), voltagePolarity
+    );
+
+    float nucleusRadius = 0.20 + input.signals.x * 0.08;
+    float2 nucleusPosition = morphologyAxis * (input.development.z - 0.5) * 0.18;
+    float nucleus = (1.0 - smoothstep(
+        nucleusRadius, nucleusRadius + aa * 2.0, length(p - nucleusPosition)
+    )) * body;
+    float signalPhase = fract(input.dynamics.z + neighborSignal * 0.18);
+    float signalFront = (1.0 - smoothstep(
+        0.025, 0.075, abs(length(p - nucleusPosition) - (0.20 + signalPhase * 0.58))
+    )) * cytoplasm;
+    float tractionMagnitude = saturate(length(input.tissueForce.xy) * 11000.0);
+    float2 tractionDirection = length(input.tissueForce.xy) > 0.000001
+        ? normalize(input.tissueForce.xy) : boundaryNormal;
+    float tractionTrack = (1.0 - smoothstep(
+        0.025, 0.075,
+        segmentDistance(p, tractionDirection * 0.08, tractionDirection * 0.82)
+    )) * cytoplasm * tractionMagnitude;
+
+    float3 color = mix(lineage, roleColor, 0.46) * cytoplasm * (0.24 + atp * 0.48);
+    color += mix(lineage, voltageColor, 0.58) * membrane * (0.30 + integrity * 0.36);
     color += mix(lineage, float3(0.84, 1.0, 0.94), 0.30 + integumentTension * 0.28) *
         integumentBand * (0.68 + integumentTension * 0.74);
-    color += float3(1.0, 0.58, 0.025) * mitochondria * atp * 0.62;
-    color += mix(float3(0.86, 0.06, 0.68), lineage, 0.34) * nucleus * 0.72;
-    color += float3(0.96, 0.90, 0.58) * cleavage * cycle * 0.56;
-    color += float3(1.0, 0.76, 0.04) * proliferativeEnvelope * (0.32 + cycle * 0.54);
-    color += float3(1.0, 0.16, 0.42) * actomyosinFiber * input.mechanics.x * 0.34;
-    color += mix(float3(0.08, 0.90, 1.0), float3(0.18, 1.0, 0.56), input.phenotype.x) *
-        junction * 0.54;
-    color += float3(0.02, 0.96, 0.82) * junction * programExchange * 1.16;
-    color += float3(1.0, 0.04, 0.12) * membrane * programRejection *
-        (0.48 + programContact * 0.52);
-    float mechanosensoryPositive = saturate(max(input.interaction.w, 0.0) * 3200.0);
-    float mechanosensoryNegative = saturate(max(-input.interaction.w, 0.0) * 3200.0);
-    float membranePolarity = smoothstep(0.52, 0.94, abs(dot(surfaceDirection, morphologyAxis))) * membrane;
-    color += float3(0.02, 0.88, 1.0) * membranePolarity * mechanosensoryPositive * 0.82;
-    color += float3(0.34, 0.18, 1.0) * membranePolarity * mechanosensoryNegative * 0.72;
-    color = mix(color, float3(0.94, 0.055, 0.018) * body, stress * 0.34);
-    color *= 1.0 - apoptosis * (0.46 + 0.28 * mitochondriaPattern);
-    color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
-    color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
+    color += mix(float3(0.86, 0.06, 0.68), lineage, 0.34) * nucleus * 0.66;
+    color += float3(0.02, 0.88, 1.0) * signalFront * calciumSignal * 0.92;
+    color += float3(0.98, 0.08, 0.66) * nucleus * erkSignal * 0.46;
+    color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.82;
     color += float3(0.08, 1.0, 0.62) * repairFront * 0.92;
     color += float3(0.04, 0.58, 1.0) * repairBoundary * 0.86;
     color += float3(1.0, 0.055, 0.018) * woundArc * 0.72;
     color += float3(1.0, 0.30, 0.015) * pressureFront * 0.76;
     color += float3(1.0, 0.065, 0.018) * leakage * 1.18;
-    color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.82;
-    color += float3(0.02, 0.94, 0.78) * exposedArc * (0.12 + exposure * 0.22);
-    color += float3(1.0, 0.26, 0.015) * membrane * barrierCompression *
-        (0.42 + input.mechanics.y * 0.48);
-    color += float3(1.0, 0.045, 0.01) * exposedArc * input.construction.x * 0.90;
-    color += float3(0.08, 0.92, 0.62) * exposedArc * input.construction.y * 0.72;
-    color += float3(0.04, 0.78, 1.0) * exposedArc * input.construction.z * 0.86;
-    color += float3(0.12, 1.0, 0.42) * exposedArc * input.construction.w * 0.70;
-    color += float3(1.0, 0.055, 0.012) * exposedArc * contactDamage * (0.72 + trophicLoss);
-    color += float3(1.0, 0.74, 0.02) * cytoplasm * trophicGain * 0.76;
-    float contractionRing = (1.0 - smoothstep(0.020, 0.060,
-        abs(radius - (0.50 + input.mechanics.x * 0.17)))) * cytoplasm;
-    color += phaseColor * contractionRing * input.mechanics.x * (0.26 + input.mechanics.w * 0.40);
-    float strainAxis = 1.0 - smoothstep(0.020, 0.070,
-        abs(dot(p, float2(cos(oscillatorAngle), sin(oscillatorAngle)))));
-    color += float3(0.04, 0.88, 1.0) * strainAxis * cytoplasm * input.mechanics.y * 0.72;
-    float netPower = input.energetics.x - input.energetics.y - input.energetics.z - input.energetics.w;
-    color += mix(float3(0.82, 0.06, 0.03), float3(1.0, 0.72, 0.02), step(0.0, netPower)) *
-        mitochondria * saturate(abs(netPower) * 5200.0) * 0.48;
-    color += float3(1.0, 0.80, 0.05) * mitochondria * positiveProgramContribution * 0.54;
-    color += float3(0.24, 0.14, 1.0) * mitochondria * negativeProgramContribution * 0.52;
-    float repairPatch = smoothstep(0.62, 0.86,
-        visualNoise(p * 19.0 + float2(input.lineageHue * 23.0, input.dynamics.z * 17.0))) *
-        membrane * input.regulation.w * (1.0 - integrity);
-    color += float3(0.12, 0.48, 1.0) * repairPatch * 1.15;
-    float calciumFrontPhase = fract(
-        input.dynamics.z + neighborSignal * 0.18 + signalRefractory * 0.12
-    );
-    float calciumFrontRadius = 0.18 + calciumFrontPhase * 0.62;
-    float calciumFront = (1.0 - smoothstep(0.022, 0.070,
-        abs(length(p - nucleusPosition) - calciumFrontRadius))) * cytoplasm;
-    float erkDomain = smoothstep(0.08, 0.44, erkSignal) *
-        (1.0 - smoothstep(nucleusRadius * 0.88, nucleusRadius * 1.82,
-            length(p - nucleusPosition))) * body;
-    float junctionTransmission = junction * neighborSignal;
-    float tractionPath = (1.0 - smoothstep(0.020, 0.068,
-        abs(dot(p, morphologyNormal)))) * cytoplasm * erkTractionCause;
-    color += float3(0.02, 0.88, 1.0) * calciumFront * calciumSignal * 0.92;
-    color += float3(0.98, 0.08, 0.66) * erkDomain * 0.68;
-    color += float3(0.18, 0.98, 0.62) * junctionTransmission *
-        (0.30 + calciumSignal * 0.54);
-    color += float3(0.08, 1.0, 0.56) * tractionPath * 0.62;
 
-    const float2 regulatoryPositions[4] = {
-        float2(-0.13, 0.11), float2(0.13, 0.11),
-        float2(-0.13, -0.11), float2(0.13, -0.11)
-    };
-    const float3 regulatoryColors[4] = {
-        float3(1.0, 0.80, 0.04), float3(0.04, 0.94, 0.64),
-        float3(1.0, 0.10, 0.42), float3(0.12, 0.48, 1.0)
-    };
-    float3 regulatoryEmission = float3(0.0);
-    for (uint node = 0u; node < 4u; ++node) {
-        float nodeMask = 1.0 - smoothstep(
-            0.022 + input.regulation[node] * 0.018,
-            0.035 + input.regulation[node] * 0.018,
-            length(p - nucleusPosition - regulatoryPositions[node])
-        );
-        regulatoryEmission += regulatoryColors[node] * nodeMask * input.regulation[node];
-    }
-    color += regulatoryEmission * nucleus * 1.25;
-    if (uniforms.displayMode == 4) {
+    float contactDamage = saturate(input.tissueForce.z * 1800.0);
+    float trophicGain = saturate(max(input.tissueForce.w, 0.0) * 1800.0);
+    float trophicLoss = saturate(max(-input.tissueForce.w, 0.0) * 1800.0);
+    float programExchange = saturate(abs(input.programEcology.x) * 5000.0);
+    float programRejection = saturate(input.programEcology.y);
+    color += float3(1.0, 0.055, 0.012) * exposedArc * contactDamage *
+        (0.72 + trophicLoss);
+    color += float3(1.0, 0.74, 0.02) * cytoplasm * trophicGain * 0.76;
+    color += float3(0.02, 0.96, 0.82) * membrane * programExchange * 0.66;
+    color += float3(1.0, 0.04, 0.12) * membrane * programRejection * 0.82;
+    float construction = max(
+        max(input.construction.x, input.construction.y),
+        max(input.construction.z, input.construction.w)
+    );
+    float3 constructionColor =
+        float3(1.0, 0.055, 0.012) * input.construction.x +
+        float3(0.08, 0.92, 0.62) * input.construction.y +
+        float3(0.04, 0.78, 1.0) * input.construction.z +
+        float3(0.12, 1.0, 0.42) * input.construction.w;
+    color += constructionColor * exposedArc * construction * 0.42;
+    color += mix(
+        float3(0.06, 0.88, 0.62), float3(0.92, 0.98, 1.0), autonomySignal
+    ) * exposedArc * autonomySignal * 0.44;
+
+    if (uniforms.displayMode == 4u) {
+        float morphogenA = saturate(input.signals.x);
+        float morphogenB = saturate(input.signals.y);
+        float differentiation = saturate(abs(morphogenA - morphogenB) * 1.8);
         float3 morphogenColor = (
             float3(0.00, 0.92, 1.0) * morphogenA +
             float3(1.0, 0.06, 0.58) * morphogenB
         ) / max(morphogenA + morphogenB, 0.001);
-        float3 fateColor = mix(
-            float3(1.0, 0.70, 0.02), float3(0.08, 1.0, 0.56), fateMemory
-        );
-        float differentiation = saturate(abs(morphogenA - morphogenB) * 1.8);
         color = float3(0.006, 0.012, 0.020) * body +
             morphogenColor * cytoplasm * (0.34 + differentiation * 0.66) +
-            fateColor * nucleus * (0.56 + abs(fateMemory - 0.5) * 0.82) +
-            float3(0.90, 0.98, 1.0) * developmentalAxisTrack *
-                (0.20 + differentiation * 0.68) +
-            mix(float3(0.08, 0.48, 1.0), float3(0.14, 1.0, 0.70),
-                junctionMorphogenTransport) * membrane *
-                (0.22 + junctionMorphogenTransport * 0.86) +
-            regulatoryEmission * nucleus * 0.82;
-    } else if (uniforms.displayMode == 5) {
-        float energySupport = cellularEnergySupport(atp, input.energetics);
-        float unconstrainedCycleDrive = cellCycleDrive(
-            atp, input.physiology.y, input.energetics, input.regulation.x,
-            stress, input.tissueGeometry.z
-        );
-        float cycleDecay = cellCycleQuiescenceDecay(
-            energySupport, input.interaction.z, stress
-        );
-        float contactEffect = saturate((input.interaction.z * unconstrainedCycleDrive +
-            cycleDecay) * 3000.0);
-        float repairEffect = saturate(input.regulation.w * atp * 0.00022 * 10000.0);
-        float proliferativeEffect = saturate(unconstrainedCycleDrive * 2400.0);
-        float3 mechanosensoryColor = float3(0.02, 0.88, 1.0) * mechanosensoryPositive +
-            float3(0.34, 0.18, 1.0) * mechanosensoryNegative;
-        float mechanosensoryPath = (1.0 - smoothstep(0.024, 0.080,
-            abs(dot(p, morphologyNormal)))) * cytoplasm;
-        color = float3(0.012, 0.020, 0.030) * body +
-            float3(0.028, 0.055, 0.075) * cytoplasm * (0.35 + atp * 0.42);
-        color += mechanosensoryColor * membranePolarity * 1.70;
-        color += mechanosensoryColor * mechanosensoryPath * 0.34;
-        color += float3(1.0, 0.76, 0.04) * proliferativeEnvelope *
-            proliferativeEffect * 2.05;
-        color += float3(1.0, 0.60, 0.02) * nucleus * proliferativeEffect * 0.42;
-        color += float3(0.02, 0.94, 0.62) * junction * contactEffect * 2.20;
-        color += float3(0.12, 0.48, 1.0) * membrane * repairEffect * (0.62 + repairPatch * 1.3);
-        color += float3(0.02, 0.88, 1.0) * calciumFront * mechanicsCalciumCause * 2.10;
-        color += float3(0.98, 0.08, 0.66) * erkDomain * calciumERKCause * 1.90;
-        color += float3(0.08, 1.0, 0.56) * tractionPath * 1.80;
-        color += float3(1.0, 0.42, 0.02) * mitochondria * signalingCost * 1.35;
-        color += float3(0.18, 0.98, 0.62) * junctionTransmission * 0.72;
-        color += float3(0.02, 0.96, 0.82) * junction * programExchange * 1.65;
-        color += float3(1.0, 0.04, 0.12) * membrane * programRejection * 1.55;
-        color += float3(0.92, 0.97, 1.0) * nucleus * 0.20;
+            mix(float3(1.0, 0.70, 0.02), float3(0.08, 1.0, 0.56),
+                saturate(input.development.z)) * nucleus * 0.68 +
+            float3(0.90, 0.98, 1.0) * tractionTrack * 0.32;
+    } else if (uniforms.displayMode == 5u) {
+        float mechanicsCalciumCause = saturate(input.signalCausality.x * 48.0);
+        float calciumERKCause = saturate(input.signalCausality.y * 56.0);
+        float erkTractionCause = saturate(input.signalCausality.z * 12000.0);
+        float signalingCost = saturate(input.signalCausality.w * 18000.0);
+        color = float3(0.010, 0.018, 0.028) * body;
+        color += float3(0.02, 0.88, 1.0) * signalFront * mechanicsCalciumCause * 1.75;
+        color += float3(0.98, 0.08, 0.66) * nucleus * calciumERKCause * 1.55;
+        color += float3(0.08, 1.0, 0.56) * tractionTrack * erkTractionCause * 1.50;
+        color += float3(1.0, 0.42, 0.02) * cytoplasm * signalingCost * 0.34;
+        color += float3(0.12, 0.48, 1.0) * membrane * paidRepair * 0.72;
     }
 
-    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    float cellDetail = smoothstep(14.0, 30.0, observationZoom);
-    color = mix(lineage * body * (0.32 + atp * 0.44), color, cellDetail);
-    color += mix(
-        float3(0.06, 0.88, 0.62), float3(0.92, 0.98, 1.0), autonomySignal
-    ) * exposedArc * autonomySignal * autonomyPulse * mix(0.28, 0.48, cellDetail);
-    float alpha = body * input.visibility * mix(0.62, 0.94, cellDetail) * (1.0 - apoptosis * 0.35);
+    color = mix(color, float3(0.94, 0.055, 0.018) * body, stress * 0.30);
+    color *= 1.0 - apoptosis * 0.58;
+    color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
+    color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
+    float alpha = body * input.visibility * 0.92 * (1.0 - apoptosis * 0.35);
     color *= input.visibility;
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
     return float4(clamp(color, 0.0, 16.0), saturate(alpha));
 }
 
-template <ushort renderScaleIndex>
-float4 quantumSurfaceForScale(
+inline float2 scientificViewUV(
+    RasterData input,
+    constant SimulationUniforms& uniforms
+) {
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0
+        ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    return clamp(
+        uniforms.cameraCenter + (input.uv - 0.5) * viewScale /
+            max(uniforms.cameraZoom, 0.000000001),
+        0.0, 1.0
+    );
+}
+
+inline float3 molecularSurfaceColor(
     RasterData input,
     texture2d<float, access::sample> quantum,
     texture2d_array<float, access::sample> state,
@@ -11905,134 +11493,23 @@ float4 quantumSurfaceForScale(
     constant SimulationUniforms& uniforms
 ) {
     constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::linear);
-    constexpr sampler quantumCellSampler(coord::normalized, address::repeat, filter::nearest);
     constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
-    float safeAspect = max(uniforms.viewportAspect, 0.001);
-    float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
-    float2 rawUV = uniforms.cameraCenter + (input.uv - 0.5) * viewScale /
-        max(uniforms.cameraZoom, 0.000000001);
-    float2 uv = clamp(rawUV, 0.0, 1.0);
-    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-
-    float2 quantumTexel = 1.0 / float(quantumGridSize);
-    bool resolvesLatticeCells = renderScaleIndex == 5u;
-    float4 wave = resolvesLatticeCells
-        ? quantum.sample(quantumCellSampler, uv)
-        : quantum.sample(quantumSampler, uv);
-    float4 waveRight = resolvesLatticeCells
-        ? quantum.sample(quantumCellSampler, uv + float2(quantumTexel.x, 0.0))
-        : quantum.sample(quantumSampler, uv + float2(quantumTexel.x, 0.0));
-    float4 waveUp = resolvesLatticeCells
-        ? quantum.sample(quantumCellSampler, uv + float2(0.0, quantumTexel.y))
-        : quantum.sample(quantumSampler, uv + float2(0.0, quantumTexel.y));
+    float2 uv = scientificViewUV(input, uniforms);
+    float4 wave = quantum.sample(quantumSampler, uv);
     float probabilityA = dot(wave.xy, wave.xy);
     float probabilityB = dot(wave.zw, wave.zw);
     float probability = probabilityA + probabilityB;
-    float componentCoherence = abs(dot(wave.xy, wave.zw)) /
+    float coherence = abs(dot(wave.xy, wave.zw)) /
         max(sqrt(probabilityA * probabilityB), 0.0000000001);
-    float2 current = float2(
-        complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
-        complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
-    );
-    float currentMagnitude = length(current);
-    float currentStrength = saturate(currentMagnitude * 950000.0);
-    float latticeReveal = renderScaleIndex == 5u
-        ? smoothstep(420.0, 900.0, observationZoom) : 0.0;
-    if (latticeReveal >= 0.999) {
-        float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
-        return finiteHDRColor(spinorTile, 1.16);
-    }
-
     float density = 1.0 - exp(-probability * 285000.0);
-    float quantumOrder = density * (0.24 + 0.76 * saturate(componentCoherence));
-    float4 waveDiagonal = quantum.sample(quantumSampler, uv + quantumTexel);
-    float2 combinedAmplitude = wave.xy + wave.zw;
-    float phase = fract(atan2(combinedAmplitude.y, combinedAmplitude.x) / (2.0 * M_PI_F) + 1.0);
-    float phaseRight = spinorPhase(waveRight);
-    float phaseUp = spinorPhase(waveUp);
-    float phaseDiagonal = spinorPhase(waveDiagonal);
-    float phaseWinding = abs(
-        wrappedPhaseDelta(phase, phaseRight) +
-        wrappedPhaseDelta(phaseRight, phaseDiagonal) +
-        wrappedPhaseDelta(phaseDiagonal, phaseUp) +
-        wrappedPhaseDelta(phaseUp, phase)
-    );
-    float polarization = (probabilityA - probabilityB) / max(probability, 0.0000000001);
-    float2 currentDirection = current / max(currentMagnitude, 0.0000000001);
-    float phaseContour = 0.62 + 0.38 * cos(phase * 28.0 * M_PI_F);
-    float flowCoordinate = fract(dot(uv * float(quantumGridSize), currentDirection) * 0.22 -
-        float(uniforms.step) * 0.012);
-    float currentPulse = 1.0 - smoothstep(0.035, 0.13, abs(flowCoordinate - 0.5));
-    float3 spinColor = mix(
-        float3(1.0, 0.22, 0.025),
-        float3(0.02, 0.82, 1.0),
-        polarization * 0.5 + 0.5
-    );
-    float3 waveColor = mix(quantumPhaseColor(phase), spinColor, 0.38) *
-        density * (0.54 + phaseContour * 0.46);
-    waveColor += float3(0.82, 0.97, 1.0) * currentPulse * currentStrength * density * 0.68;
-    float node = 1.0 - smoothstep(0.018, 0.15, density);
-    waveColor *= 1.0 - node * 0.84;
-    float logDensity = log2(1.0 + probability * 1200000.0);
-    float densityIsoline = 1.0 - smoothstep(0.025, 0.095,
-        abs(fract(logDensity * 2.4) - 0.5));
-    float vortexCore = smoothstep(0.55, 0.92, phaseWinding) *
-        (1.0 - smoothstep(0.025, 0.28, density));
-    waveColor += float3(0.38, 0.92, 1.0) * densityIsoline * density * 0.065;
-    waveColor += float3(0.72, 0.88, 1.0) * vortexCore * 1.42;
-    // The continuous wave view is radiometric, not a filled contour map. Keep
-    // low-amplitude regions dark so probability, current, and phase remain separable.
-    waveColor *= mix(0.15, 0.45, smoothstep(320.0, 420.0, observationZoom));
-
-    // Wave and spinor views do not pay for molecular-field sampling or glyph synthesis.
-    if (renderScaleIndex >= 4u) {
-        float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
-        float3 quantumOnlyColor = mix(waveColor, spinorTile, latticeReveal);
-        if (observationZoom < 512.0) {
-            float4 feedbackState = state.sample(fieldSampler, uv, 0);
-            float4 feedbackEcology = ecology.sample(fieldSampler, uv, 0);
-            float4 feedbackGenome = genomeA.sample(fieldSampler, uv, 0);
-            float matterPotential = 0.012 * (
-                feedbackState.x + feedbackEcology.x * 0.8 + feedbackState.y * 2.2 +
-                feedbackState.w * 3.0 + feedbackEcology.z * 1.4
-            );
-            float potentialRadiance = saturate(matterPotential * 46.0);
-            float potentialContour = 1.0 - smoothstep(0.035, 0.11,
-                abs(fract(matterPotential * 420.0) - 0.5));
-            float coinAngle = 0.18 + 0.16 * saturate(feedbackState.w * 4.0) +
-                0.06 * saturate(feedbackGenome.y);
-            float coinPerturbation = saturate((coinAngle - 0.18) / 0.22);
-            float coinContour = 1.0 - smoothstep(0.035, 0.12,
-                abs(fract(coinAngle * 23.0) - 0.5));
-            float feedbackWindow = smoothstep(176.0, 210.0, observationZoom) *
-                (1.0 - smoothstep(420.0, 512.0, observationZoom));
-            float3 feedbackColor = mix(
-                float3(0.08, 1.0, 0.62), float3(1.0, 0.42, 0.025), coinPerturbation
-            );
-            quantumOnlyColor *= 1.0 - potentialRadiance * feedbackWindow * 0.12;
-            quantumOnlyColor += feedbackColor * potentialContour * potentialRadiance *
-                feedbackWindow * 0.42;
-            quantumOnlyColor += float3(1.0, 0.42, 0.025) * coinContour *
-                coinPerturbation * feedbackWindow * density * 0.24;
-        }
-        return finiteHDRColor(quantumOnlyColor, 1.16);
-    }
+    float quantumOrder = density * (0.24 + 0.76 * saturate(coherence));
 
     float4 localState = state.sample(fieldSampler, uv, 0);
     float4 localEcology = ecology.sample(fieldSampler, uv, 0);
     float4 localGeology = environment.sample(fieldSampler, uv, 0);
     float4 localMechanical = mechanicalField.sample(fieldSampler, uv, 0);
-    float4 localGeneA = genomeA.sample(fieldSampler, uv, 0);
-    float4 localGeneC = genomeC.sample(fieldSampler, uv, 0);
-    float2 reactionTexel = 1.0 / float2(uniforms.width, uniforms.height);
-    float4 stateRight = state.sample(fieldSampler, uv + float2(reactionTexel.x, 0.0), 0);
-    float4 stateUp = state.sample(fieldSampler, uv + float2(0.0, reactionTexel.y), 0);
-    float4 ecologyRight = ecology.sample(fieldSampler, uv + float2(reactionTexel.x, 0.0), 0);
-    float4 ecologyUp = ecology.sample(fieldSampler, uv + float2(0.0, reactionTexel.y), 0);
-    float2 reactionGradient = float2(
-        (stateRight.x - localState.x) + (ecologyRight.x - localEcology.x),
-        (stateUp.x - localState.x) + (ecologyUp.x - localEcology.x)
-    );
+    float substrate = localState.x + localEcology.x;
+    float2 reactionGradient = float2(dfdx(substrate), dfdy(substrate));
     float obstacle = smoothstep(0.48, 0.84, localGeology.w);
     float permeability = 1.0 - obstacle * 0.88;
     float chemicalAffinity = sqrt(saturate(localState.x) * saturate(localEcology.x)) *
@@ -12057,60 +11534,118 @@ float4 quantumSurfaceForScale(
             (0.00035 + max(localEcology.w, 0.0) * 0.0032) *
             permeability * (1.0 - saturate(localEcology.z) * 0.72)
     );
-    float2 molecularDirection = reactionGradient + currentDirection *
-        (0.0002 + currentStrength * 0.0012);
-    float3 molecularColor = molecularReactionVisualization(
+    float3 color = molecularReactionVisualization(
         uv,
         localState,
         localEcology,
         localGeology,
-        localGeneA,
-        localGeneC,
         quantumOrder,
         chemicalAffinity,
         catalystProduction,
         energyProduction,
         membraneAssembly,
         mineralization,
-        phase,
-        molecularDirection,
+        reactionGradient,
         float(uniforms.width),
         uniforms.step,
         uniforms.displayMode
     );
-    float waveReveal = smoothstep(136.0, 176.0, observationZoom);
-    float3 color = mix(molecularColor, waveColor, waveReveal);
-
-    float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
-    color = mix(color, spinorTile, latticeReveal);
-
-    return finiteHDRColor(color, 1.16);
+    if (uniforms.displayMode == 2u) {
+        // Genome textures are fetched only for the dedicated trait instrument.
+        float4 localGeneA = genomeA.sample(fieldSampler, uv, 0);
+        float4 localGeneC = genomeC.sample(fieldSampler, uv, 0);
+        color = float3(0.002, 0.005, 0.010);
+        color += float3(1.0, 0.12, 0.035) * saturate(localGeneA.x) * 0.34;
+        color += float3(0.04, 0.94, 0.58) * saturate(localGeneA.y) * 0.31;
+        color += float3(0.08, 0.42, 1.0) * saturate(localGeneA.z) * 0.28;
+        color += float3(0.94, 0.46, 0.04) * saturate(localGeneC.w) * 0.34;
+    }
+    return color * 1.16;
 }
 
-#define NUMI_QUANTUM_SURFACE(NAME, SCALE) \
-fragment float4 NAME( \
-    RasterData input [[stage_in]], \
-    texture2d<float, access::sample> quantum [[texture(0)]], \
-    texture2d_array<float, access::sample> state [[texture(1)]], \
-    texture2d_array<float, access::sample> ecology [[texture(2)]], \
-    texture2d_array<float, access::sample> environment [[texture(3)]], \
-    texture2d_array<float, access::sample> mechanicalField [[texture(4)]], \
-    texture2d_array<float, access::sample> genomeA [[texture(5)]], \
-    texture2d_array<float, access::sample> genomeC [[texture(6)]], \
-    constant SimulationUniforms& uniforms [[buffer(0)]] \
-) { \
-    return quantumSurfaceForScale<SCALE>( \
-        input, quantum, state, ecology, environment, mechanicalField, \
-        genomeA, genomeC, uniforms \
-    ); \
+inline float3 waveSurfaceColor(
+    RasterData input,
+    texture2d<float, access::sample> quantum,
+    texture2d<float, access::sample> coupling,
+    constant SimulationUniforms& uniforms
+) {
+    constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::linear);
+    constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 uv = scientificViewUV(input, uniforms);
+    float2 texel = 1.0 / float(quantumGridSize);
+    float4 wave = quantum.sample(quantumSampler, uv);
+    float4 waveRight = quantum.sample(quantumSampler, uv + float2(texel.x, 0.0));
+    float4 waveUp = quantum.sample(quantumSampler, uv + float2(0.0, texel.y));
+    float4 waveDiagonal = quantum.sample(quantumSampler, uv + texel);
+    float probabilityA = dot(wave.xy, wave.xy);
+    float probabilityB = dot(wave.zw, wave.zw);
+    float probability = probabilityA + probabilityB;
+    float density = 1.0 - exp(-probability * 285000.0);
+    float polarization = (probabilityA - probabilityB) /
+        max(probability, 0.0000000001);
+    float2 current = float2(
+        complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
+        complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
+    );
+    float currentStrength = saturate(length(current) * 950000.0);
+    float phase = spinorPhase(wave);
+    float phaseRight = spinorPhase(waveRight);
+    float phaseUp = spinorPhase(waveUp);
+    float phaseDiagonal = spinorPhase(waveDiagonal);
+    float phaseWinding = abs(
+        wrappedPhaseDelta(phase, phaseRight) +
+        wrappedPhaseDelta(phaseRight, phaseDiagonal) +
+        wrappedPhaseDelta(phaseDiagonal, phaseUp) +
+        wrappedPhaseDelta(phaseUp, phase)
+    );
+    float3 spinColor = mix(
+        float3(1.0, 0.22, 0.025), float3(0.02, 0.82, 1.0),
+        polarization * 0.5 + 0.5
+    );
+    float3 color = mix(quantumPhaseColor(phase), spinColor, 0.38) *
+        density * (0.58 + currentStrength * 0.42);
+    float vortexCore = smoothstep(0.55, 0.92, phaseWinding) *
+        (1.0 - smoothstep(0.025, 0.28, density));
+    color += float3(0.82, 0.97, 1.0) * currentStrength * density * 0.26;
+    color += float3(0.72, 0.88, 1.0) * vortexCore * 1.32;
+
+    // This is the exact prepared coupling consumed by the spinor update. One sample
+    // replaces three biological-field reads and duplicate potential/coin equations.
+    float4 preparedCoupling = coupling.sample(fieldSampler, uv);
+    float potentialRadiance = saturate(abs(preparedCoupling.w) * 46.0);
+    float coinPerturbation = saturate((preparedCoupling.y - 0.1790) * 4.8);
+    float couplingEdge = saturate(length(float2(
+        dfdx(preparedCoupling.w), dfdy(preparedCoupling.w)
+    )) * 160.0);
+    float3 couplingColor = mix(
+        float3(0.08, 1.0, 0.62), float3(1.0, 0.42, 0.025), coinPerturbation
+    );
+    color *= 1.0 - potentialRadiance * 0.10;
+    color += couplingColor * potentialRadiance * (0.16 + couplingEdge * 0.34);
+    return max(color * 1.16, 0.0);
 }
 
-NUMI_QUANTUM_SURFACE(molecularSurfaceFragment, 3u)
-NUMI_QUANTUM_SURFACE(waveSurfaceFragment, 4u)
-NUMI_QUANTUM_SURFACE(spinorSurfaceFragment, 5u)
-#undef NUMI_QUANTUM_SURFACE
+inline float3 spinorSurfaceColor(
+    RasterData input,
+    texture2d<float, access::sample> quantum,
+    constant SimulationUniforms& uniforms
+) {
+    constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::nearest);
+    float2 uv = scientificViewUV(input, uniforms);
+    float2 texel = 1.0 / float(quantumGridSize);
+    float4 wave = quantum.sample(quantumSampler, uv);
+    float4 waveRight = quantum.sample(quantumSampler, uv + float2(texel.x, 0.0));
+    float4 waveUp = quantum.sample(quantumSampler, uv + float2(0.0, texel.y));
+    float2 current = float2(
+        complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
+        complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
+    );
+    float currentStrength = saturate(length(current) * 950000.0);
+    return spinorCellVisualization(uv, wave, currentStrength) * 1.16;
+}
 
-fragment float4 spinorDisplayFragment(
+
+fragment float4 molecularDisplayFragment(
     RasterData input [[stage_in]],
     texture2d<float, access::sample> quantum [[texture(0)]],
     texture2d_array<float, access::sample> state [[texture(1)]],
@@ -12122,10 +11657,35 @@ fragment float4 spinorDisplayFragment(
     constant SimulationUniforms& uniforms [[buffer(0)]],
     constant PostProcessUniforms& postUniforms [[buffer(1)]]
 ) {
-    float3 linearScene = quantumSurfaceForScale<5u>(
+    float3 linearScene = molecularSurfaceColor(
         input, quantum, state, ecology, environment, mechanicalField,
         genomeA, genomeC, uniforms
-    ).rgb;
+    );
+    return float4(mapToDisplay(
+        linearScene, float3(0.0), postUniforms, uint2(input.position.xy)
+    ), 1.0);
+}
+
+fragment float4 waveDisplayFragment(
+    RasterData input [[stage_in]],
+    texture2d<float, access::sample> quantum [[texture(0)]],
+    texture2d<float, access::sample> coupling [[texture(7)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    constant PostProcessUniforms& postUniforms [[buffer(1)]]
+) {
+    float3 linearScene = waveSurfaceColor(input, quantum, coupling, uniforms);
+    return float4(mapToDisplay(
+        linearScene, float3(0.0), postUniforms, uint2(input.position.xy)
+    ), 1.0);
+}
+
+fragment float4 spinorDisplayFragment(
+    RasterData input [[stage_in]],
+    texture2d<float, access::sample> quantum [[texture(0)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    constant PostProcessUniforms& postUniforms [[buffer(1)]]
+) {
+    float3 linearScene = spinorSurfaceColor(input, quantum, uniforms);
     return float4(mapToDisplay(
         linearScene, float3(0.0), postUniforms, uint2(input.position.xy)
     ), 1.0);

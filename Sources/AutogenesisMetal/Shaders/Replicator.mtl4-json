@@ -95,7 +95,7 @@
       },
       {
         "label": "D5E47953015F6D9D65623FF7722083C2594FDC49F31EC62B7B64E10545BA0D52",
-        "name": "molecularSurfaceFragment",
+        "name": "molecularDisplayFragment",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -265,7 +265,7 @@
       },
       {
         "label": "935E84BDED9917155ECF6390FC025F947872A45C08C3C53BC01A1D1E3995DC55",
-        "name": "waveSurfaceFragment",
+        "name": "waveDisplayFragment",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -286,11 +286,6 @@
       {
         "label": "052509EEC6F785895F30040D4561575BE61EDEC25CFE0081D9A8F70EFE1BEB04",
         "name": "initializeWorld",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "9AFFB1B77AFD1EE05AA6493D3A5C5A177A8202B6EDBCD4CE671853093E79E418",
-        "name": "spinorSurfaceFragment",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -861,7 +856,7 @@
         "fragment_function_descriptor": "fnd:D5E47953015F6D9D65623FF7722083C2594FDC49F31EC62B7B64E10545BA0D52",
         "color_attachments": [
           {
-            "pixel_format": "RG11B10Float"
+            "pixel_format": "BGRA8Unorm_sRGB"
           }
         ]
       },
@@ -870,16 +865,7 @@
         "fragment_function_descriptor": "fnd:935E84BDED9917155ECF6390FC025F947872A45C08C3C53BC01A1D1E3995DC55",
         "color_attachments": [
           {
-            "pixel_format": "RG11B10Float"
-          }
-        ]
-      },
-      {
-        "vertex_function_descriptor": "fnd:A3994F9F68D66BF1E2BD65F5F70ADFC75788B1E0846F5AF02B4B8AFFC985E8FE",
-        "fragment_function_descriptor": "fnd:9AFFB1B77AFD1EE05AA6493D3A5C5A177A8202B6EDBCD4CE671853093E79E418",
-        "color_attachments": [
-          {
-            "pixel_format": "RG11B10Float"
+            "pixel_format": "BGRA8Unorm_sRGB"
           }
         ]
       },
