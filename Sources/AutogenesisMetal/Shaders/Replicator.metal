@@ -65,6 +65,7 @@ constant uint componentRegeneratedFlag = 1u << 1u;
 constant uint componentHomeostaticFlag = 1u << 2u;
 constant uint componentChallengedFlag = 1u << 3u;
 constant uint componentQualificationTargetFlag = 1u << 4u;
+constant uint reservedCellJunctionEntry = 0u;
 constant uint emptySpatialHashEntry = 0xffffffffu;
 constant int mechanicalForceScale = 1048576;
 constant int cellContactForceScale = 268435456;
@@ -6906,15 +6907,15 @@ inline uint findOrCreateCellJunction(
     float targetStrength
 ) {
     uint start = hash32(pairKey) & cellJunctionMask;
+    // Deletion leaves holes in this bounded open-addressed table. Always scan
+    // the complete probe window for an existing key before reusing a hole;
+    // otherwise a collision behind a cleared slot becomes unreachable and a
+    // duplicate junction can survive component reassignment.
     for (uint probe = 0u; probe < 12u; ++probe) {
         uint slot = (start + probe) & cellJunctionMask;
         uint observedKey = atomic_load_explicit(
             &junctionStates[slot].pairKey, memory_order_relaxed
         );
-        uint lastSeen = atomic_load_explicit(
-            &junctionStates[slot].lastSeenStep, memory_order_relaxed
-        );
-        bool stale = step > lastSeen && step - lastSeen > 180u;
         if (observedKey == pairKey &&
             junctionStates[slot].persistentFingerprint == fingerprint) {
             atomic_store_explicit(
@@ -6926,12 +6927,23 @@ inline uint findOrCreateCellJunction(
             );
             return slot;
         }
+    }
+    for (uint probe = 0u; probe < 12u; ++probe) {
+        uint slot = (start + probe) & cellJunctionMask;
+        uint observedKey = atomic_load_explicit(
+            &junctionStates[slot].pairKey, memory_order_relaxed
+        );
+        if (observedKey == reservedCellJunctionEntry) { continue; }
+        uint lastSeen = atomic_load_explicit(
+            &junctionStates[slot].lastSeenStep, memory_order_relaxed
+        );
+        bool stale = step > lastSeen && step - lastSeen > 180u;
         if (observedKey == emptySpatialHashEntry || stale ||
             (observedKey == pairKey &&
                 junctionStates[slot].persistentFingerprint != fingerprint)) {
             uint expected = observedKey;
             if (atomic_compare_exchange_weak_explicit(
-                &junctionStates[slot].pairKey, &expected, pairKey,
+                &junctionStates[slot].pairKey, &expected, reservedCellJunctionEntry,
                 memory_order_relaxed, memory_order_relaxed
             )) {
                 junctionStates[slot].persistentFingerprint = fingerprint;
@@ -6948,6 +6960,9 @@ inline uint findOrCreateCellJunction(
                 );
                 atomic_store_explicit(
                     &junctionStates[slot].lastSeenStep, step, memory_order_relaxed
+                );
+                atomic_store_explicit(
+                    &junctionStates[slot].pairKey, pairKey, memory_order_relaxed
                 );
                 return slot;
             }
@@ -6971,7 +6986,6 @@ inline uint findCellJunction(
             junctionStates[slot].persistentFingerprint == fingerprint) {
             return slot;
         }
-        if (observedKey == emptySpatialHashEntry) { return cellJunctionCapacity; }
     }
     return cellJunctionCapacity;
 }
