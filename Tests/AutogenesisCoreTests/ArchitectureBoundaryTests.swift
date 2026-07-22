@@ -690,6 +690,7 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("float erk = saturate(input.signaling.y)"))
         #expect(renderer.contains("includeJunctions: false"))
         #expect(renderer.contains("molecularCellRenderPipeline"))
+        #expect(!renderer.contains("molecularCellMeshRenderPipeline"))
         #expect(contentView.contains("Intracellular molecules in physical cells"))
         #expect(contentView.contains("VISIBLE INTRACELLULAR POOLS"))
         #expect(!contentView.contains("MEASURED REACTION PATH"))

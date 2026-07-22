@@ -2113,7 +2113,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let cellRenderPipeline: MTLRenderPipelineState
     private let cellMeshRenderPipeline: MTLRenderPipelineState
     private let molecularCellRenderPipeline: MTLRenderPipelineState
-    private let molecularCellMeshRenderPipeline: MTLRenderPipelineState
     private let junctionRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
@@ -2437,13 +2436,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         molecularCellRenderPipeline = try pipelineFactory.makeRenderPipeline(
             label: "Cell molecular-state renderer",
             vertex: "cellVertex",
-            fragment: "molecularCellFragment",
-            pixelFormat: .bgra8Unorm_srgb,
-            blending: true
-        )
-        molecularCellMeshRenderPipeline = try pipelineFactory.makeMeshRenderPipeline(
-            label: "M4 cell molecular-state renderer",
-            mesh: "cellContourMesh",
             fragment: "molecularCellFragment",
             pixelFormat: .bgra8Unorm_srgb,
             blending: true
@@ -3412,7 +3404,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             resetRenderDrawArgumentsPipeline, compactCellRenderPipeline,
             compactJunctionRenderPipeline, finalizeRenderDrawArgumentsPipeline,
             cellRenderPipeline, cellMeshRenderPipeline,
-            molecularCellRenderPipeline, molecularCellMeshRenderPipeline,
+            molecularCellRenderPipeline,
             junctionRenderPipeline,
             bloomPrefilterPipeline,
             compositePipeline
@@ -5003,51 +4995,27 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             )
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             if renderScale == 3 {
-                if tuningProfile == .m4Optimized && Self.experimentalMeshCellRenderingEnabled {
-                    encoder.setRenderPipelineState(molecularCellMeshRenderPipeline)
-                    encoder.setMeshBuffer(agentState, offset: 0, index: 0)
-                    encoder.setMeshBuffer(agentOccupancy, offset: 0, index: 1)
-                    encoder.setMeshBuffer(cellState, offset: 0, index: 2)
-                    encoder.setMeshBuffer(cellOccupancy, offset: 0, index: 3)
-                    encoder.setMeshBuffer(membraneVertices, offset: 0, index: 4)
-                    encoder.setMeshBytes(
-                        &uniforms,
-                        length: MemoryLayout<SimulationUniforms>.stride,
-                        index: 5
-                    )
-                    encoder.setMeshBuffer(visibleCellIndices, offset: 0, index: 6)
-                    encoder.setMeshBuffer(cellIdentities, offset: 0, index: 7)
-                    encoder.setMeshBuffer(heritablePrograms, offset: 0, index: 8)
-                    encoder.setMeshBuffer(programInteractions, offset: 0, index: 9)
-                    encoder.setMeshBuffer(programSlots, offset: 0, index: 10)
-                    encoder.drawMeshThreadgroups(
-                        indirectBuffer: cellMeshDrawArguments,
-                        indirectBufferOffset: 0,
-                        threadsPerMeshThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
-                    )
-                } else {
-                    encoder.setRenderPipelineState(molecularCellRenderPipeline)
-                    encoder.setVertexBuffer(agentState, offset: 0, index: 0)
-                    encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
-                    encoder.setVertexBuffer(cellState, offset: 0, index: 2)
-                    encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
-                    encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
-                    encoder.setVertexBytes(
-                        &uniforms,
-                        length: MemoryLayout<SimulationUniforms>.stride,
-                        index: 5
-                    )
-                    encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
-                    encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
-                    encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
-                    encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
-                    encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
-                    encoder.drawPrimitives(
-                        type: .triangle,
-                        indirectBuffer: cellDrawArguments,
-                        indirectBufferOffset: 0
-                    )
-                }
+                encoder.setRenderPipelineState(molecularCellRenderPipeline)
+                encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+                encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+                encoder.setVertexBuffer(cellState, offset: 0, index: 2)
+                encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
+                encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+                encoder.setVertexBytes(
+                    &uniforms,
+                    length: MemoryLayout<SimulationUniforms>.stride,
+                    index: 5
+                )
+                encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
+                encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
+                encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
+                encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
+                encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
+                encoder.drawPrimitives(
+                    type: .triangle,
+                    indirectBuffer: cellDrawArguments,
+                    indirectBufferOffset: 0
+                )
             }
             encoder.writeTimestamp(ending: "direct scientific display")
             encoder.endEncoding()

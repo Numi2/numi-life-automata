@@ -952,26 +952,6 @@
             "source_rgb_blend_factor": "SourceAlpha"
           }
         ]
-      },
-      {
-        "mesh_function_descriptor": "fnd:DA92E391BAA599AB3DDF12DB319CEF2733BC642323FFF3663A098495F13A155E",
-        "fragment_function_descriptor": "fnd:66C1DEB087E775FA171DB32B09AB5608B988CA33DD34E866DEDAD6ED75EA0CFB",
-        "mesh_threadgroup_size_is_multiple_of_thread_execution_width": true,
-        "max_total_threads_per_mesh_threadgroup": 64,
-        "required_threads_per_mesh_threadgroup": [
-          64,
-          1,
-          1
-        ],
-        "color_attachments": [
-          {
-            "pixel_format": "BGRA8Unorm_sRGB",
-            "blending_state": "Enabled",
-            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
-            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
-            "source_rgb_blend_factor": "SourceAlpha"
-          }
-        ]
       }
     ]
   }
