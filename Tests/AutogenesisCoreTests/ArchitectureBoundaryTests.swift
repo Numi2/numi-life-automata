@@ -822,8 +822,12 @@ struct ArchitectureBoundaryTests {
         #expect(renderer.contains("var presentationEncoded = false"))
         #expect(renderer.contains("if !presentationEncoded"))
         #expect(renderer.contains("commandBuffer.cancelPresentation()"))
+        #expect(renderer.contains(
+            "commandQueue.invalidatePresentationEpochs(before: submissionEpoch)"
+        ))
         #expect(execution.contains("if result.succeeded, let drawableLease"))
         #expect(execution.contains("drawable.present()"))
+        #expect(execution.contains("guard epoch >= minimumPresentationEpoch else { return }"))
         #expect(execution.contains("guard let tables = slot.nextRenderArgumentTables() else {"))
         #expect(execution.contains("Metal 4 render argument-table capacity exhausted"))
         #expect(execution.contains("Metal 4 uniform arena capacity exhausted"))

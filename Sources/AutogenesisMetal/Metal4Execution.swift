@@ -439,6 +439,7 @@ final class Metal4ExecutionContext: @unchecked Sendable {
     private var renderEncoderCapacity = Metal4ExecutionContext.initialRenderEncoderCapacity
     private var transientResidentBytes: UInt64 = 0
     private var claimedDrawableIDs: Set<ObjectIdentifier> = []
+    private var minimumPresentationEpoch: UInt64 = 0
 
     init(device: MTLDevice) throws {
         self.device = device
@@ -526,6 +527,12 @@ final class Metal4ExecutionContext: @unchecked Sendable {
     func releaseDrawable(identifier: ObjectIdentifier) {
         lock.lock()
         claimedDrawableIDs.remove(identifier)
+        lock.unlock()
+    }
+
+    func invalidatePresentationEpochs(before epoch: UInt64) {
+        lock.lock()
+        minimumPresentationEpoch = max(minimumPresentationEpoch, epoch)
         lock.unlock()
     }
 
@@ -630,7 +637,7 @@ final class Metal4ExecutionContext: @unchecked Sendable {
             // failed command buffer never reaches WindowServer, so the layer retains
             // the last known-good drawable instead of exposing partial or corrupt tiles.
             if result.succeeded, let drawableLease {
-                drawableLease.drawable.present()
+                self?.present(drawableLease, forEpoch: slot.submissionEpoch)
             }
             if let drawableIdentifier {
                 self?.releaseDrawable(identifier: drawableIdentifier)
@@ -710,6 +717,13 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         guard required > current else { return current }
         let (doubled, overflow) = current.multipliedReportingOverflow(by: 2)
         return max(overflow ? required : doubled, required)
+    }
+
+    private func present(_ lease: Metal4DrawableLease, forEpoch epoch: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard epoch >= minimumPresentationEpoch else { return }
+        lease.drawable.present()
     }
 
     private func release(slot: Metal4SubmissionSlot, resetAllocator: Bool) {

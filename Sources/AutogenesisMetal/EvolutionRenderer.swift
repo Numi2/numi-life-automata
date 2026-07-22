@@ -3211,6 +3211,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         guard !submissionFaulted else { return }
         submissionFaulted = true
         submissionEpoch &+= 1
+        commandQueue.invalidatePresentationEpochs(before: submissionEpoch)
         recoveryCount &+= 1
         lastMetalError = message
         // A timeout is not proof that Metal has retired the submitted work. Keep the
