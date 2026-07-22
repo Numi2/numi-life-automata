@@ -377,6 +377,28 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func adaptiveCellMeshPublishesGeometryOnceAndSanitizesRasterOutput() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let meshStart = try #require(shader.range(of: "void cellContourMesh"))
+        let fragmentStart = try #require(shader.range(
+            of: "fragment float4 cellFragment",
+            range: meshStart.upperBound..<shader.endIndex
+        ))
+        let mesh = String(shader[meshStart.lowerBound..<fragmentStart.lowerBound])
+        #expect(mesh.contains("if (lane == 0u)"))
+        #expect(mesh.contains("output.set_primitive_count(segmentCount);"))
+        #expect(!mesh.contains("\n    output.set_primitive_count(segmentCount);"))
+        #expect(shader.contains("all(abs(screenUV - 0.5) <= float2(1.0))"))
+        #expect(shader.contains("if (!all(isfinite(coarseColor)) || !isfinite(coarseAlpha))"))
+        #expect(shader.contains("if (!all(isfinite(color)) || !isfinite(alpha))"))
+        #expect(shader.contains("any(abs(clipA) > float2(2.5))"))
+    }
+
+    @Test
     func metal4SubmissionSlotsOwnReusableArgumentTables() throws {
         let execution = try String(
             contentsOf: repositoryRoot

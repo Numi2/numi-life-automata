@@ -8206,7 +8206,11 @@ vertex JunctionRasterData junctionVertex(
     float2 clipA = float2(screenA.x * 2.0 - 1.0, 1.0 - screenA.y * 2.0);
     float2 clipB = float2(screenB.x * 2.0 - 1.0, 1.0 - screenB.y * 2.0);
     float2 clipDelta = clipB - clipA;
-    if (!all(isfinite(clipDelta)) || length(clipDelta) < 0.00001) { return output; }
+    if (!all(isfinite(clipA)) || !all(isfinite(clipB)) ||
+        !all(isfinite(clipDelta)) || length(clipDelta) < 0.00001 ||
+        any(abs(clipA) > float2(2.5)) || any(abs(clipB) > float2(2.5))) {
+        return output;
+    }
 
     const float2 quad[6] = {
         float2(0.0, -1.0), float2(1.0, -1.0), float2(0.0, 1.0),
@@ -8338,7 +8342,9 @@ fragment float4 junctionFragment(
     float alpha = ribbon * input.visibility * saturate(
         0.16 + strength * 0.18 + load * 0.28 + activity * 0.34 + mixedPrograms * 0.18
     );
-    return float4(max(color, 0.0) * input.visibility, alpha);
+    color *= input.visibility;
+    if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
+    return float4(clamp(color, 0.0, 16.0), saturate(alpha));
 }
 
 struct CellRasterData {
@@ -8453,6 +8459,9 @@ inline CellRasterData makeCellRasterData(
     float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
     float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
         max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    finiteGeometry = finiteGeometry && all(isfinite(heading)) &&
+        all(isfinite(worldPosition)) && all(isfinite(screenUV)) &&
+        all(abs(screenUV - 0.5) <= float2(1.0));
     bool occupied = agentOccupancy[owner] != 0u && cellOccupancy[cellIndex] != 0u &&
         finiteGeometry && visibility > 0.001;
 
@@ -8588,7 +8597,6 @@ void cellContourMesh(
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
     uint segmentCount = observationZoom >= 6.0
         ? membraneRenderSegmentCount : membraneRenderSegmentCount / 2u;
-    output.set_primitive_count(segmentCount);
     if (lane <= segmentCount) {
         uint sample = lane == 0u ? 0u :
             (lane - 1u) * (membraneRenderSegmentCount / segmentCount);
@@ -8605,6 +8613,9 @@ void cellContourMesh(
         output.set_index(lane * 3u + 1u, lane + 1u);
         output.set_index(lane * 3u + 2u, lane + 1u == segmentCount
             ? 1u : lane + 2u);
+    }
+    if (lane == 0u) {
+        output.set_primitive_count(segmentCount);
     }
 }
 
@@ -8829,7 +8840,11 @@ fragment float4 cellFragment(
         }
         float coarseAlpha = body * input.visibility *
             mix(0.76, 0.96, organismDetail) * (1.0 - saturate(input.signals.w) * 0.35);
-        return float4(max(coarseColor, 0.0) * input.visibility, coarseAlpha);
+        coarseColor *= input.visibility;
+        if (!all(isfinite(coarseColor)) || !isfinite(coarseAlpha)) {
+            discard_fragment();
+        }
+        return float4(clamp(coarseColor, 0.0, 16.0), saturate(coarseAlpha));
     }
     float mitochondriaPattern = visualNoise(p * (13.0 + input.phenotype.z * 7.0) +
         float2(input.lineageHue * 17.0, input.phenotype.w * 11.0));
@@ -9044,7 +9059,9 @@ fragment float4 cellFragment(
         float3(0.06, 0.88, 0.62), float3(0.92, 0.98, 1.0), autonomySignal
     ) * exposedArc * autonomySignal * autonomyPulse * mix(0.28, 0.48, cellDetail);
     float alpha = body * input.visibility * mix(0.62, 0.94, cellDetail) * (1.0 - apoptosis * 0.35);
-    return float4(max(color, 0.0) * input.visibility, alpha);
+    color *= input.visibility;
+    if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
+    return float4(clamp(color, 0.0, 16.0), saturate(alpha));
 }
 
 template <ushort renderScaleIndex>
