@@ -2112,6 +2112,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let scaleSurfacePipelines: [MTLRenderPipelineState]
     private let cellRenderPipeline: MTLRenderPipelineState
     private let cellMeshRenderPipeline: MTLRenderPipelineState
+    private let molecularCellRenderPipeline: MTLRenderPipelineState
+    private let molecularCellMeshRenderPipeline: MTLRenderPipelineState
     private let junctionRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
@@ -2430,6 +2432,20 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             mesh: "cellContourMesh",
             fragment: "cellFragment",
             pixelFormat: .rg11b10Float,
+            blending: true
+        )
+        molecularCellRenderPipeline = try pipelineFactory.makeRenderPipeline(
+            label: "Cell molecular-state renderer",
+            vertex: "cellVertex",
+            fragment: "molecularCellFragment",
+            pixelFormat: .bgra8Unorm_srgb,
+            blending: true
+        )
+        molecularCellMeshRenderPipeline = try pipelineFactory.makeMeshRenderPipeline(
+            label: "M4 cell molecular-state renderer",
+            mesh: "cellContourMesh",
+            fragment: "molecularCellFragment",
+            pixelFormat: .bgra8Unorm_srgb,
             blending: true
         )
         junctionRenderPipeline = try pipelineFactory.makeRenderPipeline(
@@ -3395,7 +3411,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             accumulateSimulationInvariantsPipeline, finalizeSimulationInvariantsPipeline,
             resetRenderDrawArgumentsPipeline, compactCellRenderPipeline,
             compactJunctionRenderPipeline, finalizeRenderDrawArgumentsPipeline,
-            cellRenderPipeline, cellMeshRenderPipeline, junctionRenderPipeline,
+            cellRenderPipeline, cellMeshRenderPipeline,
+            molecularCellRenderPipeline, molecularCellMeshRenderPipeline,
+            junctionRenderPipeline,
             bloomPrefilterPipeline,
             compositePipeline
         ]
@@ -4835,7 +4853,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
     private func encodeVisibleCellCompaction(
         into commandBuffer: Metal4CommandBufferContext,
-        settings: RendererSettings
+        settings: RendererSettings,
+        includeJunctions: Bool
     ) -> Bool {
         let renderResources = renderSubmissionResources[commandBuffer.submissionSlotIndex]
         let visibleCellIndices = renderResources.visibleCellIndices
@@ -4874,24 +4893,26 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellMeshDrawArguments, offset: 0, index: 8)
         dispatchCells(encoder, pipeline: compactCellRenderPipeline)
 
-        encoder.setComputePipelineState(compactJunctionRenderPipeline)
-        encoder.setBuffer(cellJunctions, offset: 0, index: 0)
-        encoder.setBuffer(cellOccupancy, offset: 0, index: 1)
-        encoder.setBuffer(cellIdentities, offset: 0, index: 2)
-        encoder.setBuffer(agentState, offset: 0, index: 3)
-        encoder.setBuffer(agentOccupancy, offset: 0, index: 4)
-        encoder.setBuffer(cellState, offset: 0, index: 5)
-        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 6)
-        encoder.setBuffer(visibleJunctionIndices, offset: 0, index: 7)
-        encoder.setBuffer(junctionDrawArguments, offset: 0, index: 8)
-        let junctionThreadWidth = threadsPerThreadgroup1D(
-            pipeline: compactJunctionRenderPipeline,
-            count: Self.cellJunctionCapacity
-        )
-        encoder.dispatchThreads(
-            MTLSize(width: Self.cellJunctionCapacity, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: junctionThreadWidth, height: 1, depth: 1)
-        )
+        if includeJunctions {
+            encoder.setComputePipelineState(compactJunctionRenderPipeline)
+            encoder.setBuffer(cellJunctions, offset: 0, index: 0)
+            encoder.setBuffer(cellOccupancy, offset: 0, index: 1)
+            encoder.setBuffer(cellIdentities, offset: 0, index: 2)
+            encoder.setBuffer(agentState, offset: 0, index: 3)
+            encoder.setBuffer(agentOccupancy, offset: 0, index: 4)
+            encoder.setBuffer(cellState, offset: 0, index: 5)
+            encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 6)
+            encoder.setBuffer(visibleJunctionIndices, offset: 0, index: 7)
+            encoder.setBuffer(junctionDrawArguments, offset: 0, index: 8)
+            let junctionThreadWidth = threadsPerThreadgroup1D(
+                pipeline: compactJunctionRenderPipeline,
+                count: Self.cellJunctionCapacity
+            )
+            encoder.dispatchThreads(
+                MTLSize(width: Self.cellJunctionCapacity, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: junctionThreadWidth, height: 1, depth: 1)
+            )
+        }
         encoder.memoryBarrier(resources: [
             cellDrawArguments, cellMeshDrawArguments, junctionDrawArguments
         ])
@@ -4945,10 +4966,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             frameIndex: UInt32(truncatingIfNeeded: frameSerial)
         )
 
-        // Molecular, wave, and spinor instruments are mutually exclusive with the tissue
-        // overlay. Presenting them directly avoids cell/junction compaction, translucent
-        // overdraw, the full-resolution HDR store/reload, bloom, and a second render pass.
+        // Deep instruments present directly. Molecular scale compacts only visible cells
+        // for its causal intracellular overlay; wave and spinor need no biological draw.
+        // All three skip junctions, HDR store/reload, bloom, and a second render pass.
         if renderScale >= 3 {
+            if renderScale == 3 {
+                guard encodeVisibleCellCompaction(
+                    into: commandBuffer,
+                    settings: settings,
+                    includeJunctions: false
+                ) else { return }
+            }
             let descriptor = MTL4RenderPassDescriptor()
             let attachment = descriptor.colorAttachments[0]!
             attachment.texture = drawableTexture
@@ -4974,6 +5002,53 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 index: 1
             )
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if renderScale == 3 {
+                if tuningProfile == .m4Optimized && Self.experimentalMeshCellRenderingEnabled {
+                    encoder.setRenderPipelineState(molecularCellMeshRenderPipeline)
+                    encoder.setMeshBuffer(agentState, offset: 0, index: 0)
+                    encoder.setMeshBuffer(agentOccupancy, offset: 0, index: 1)
+                    encoder.setMeshBuffer(cellState, offset: 0, index: 2)
+                    encoder.setMeshBuffer(cellOccupancy, offset: 0, index: 3)
+                    encoder.setMeshBuffer(membraneVertices, offset: 0, index: 4)
+                    encoder.setMeshBytes(
+                        &uniforms,
+                        length: MemoryLayout<SimulationUniforms>.stride,
+                        index: 5
+                    )
+                    encoder.setMeshBuffer(visibleCellIndices, offset: 0, index: 6)
+                    encoder.setMeshBuffer(cellIdentities, offset: 0, index: 7)
+                    encoder.setMeshBuffer(heritablePrograms, offset: 0, index: 8)
+                    encoder.setMeshBuffer(programInteractions, offset: 0, index: 9)
+                    encoder.setMeshBuffer(programSlots, offset: 0, index: 10)
+                    encoder.drawMeshThreadgroups(
+                        indirectBuffer: cellMeshDrawArguments,
+                        indirectBufferOffset: 0,
+                        threadsPerMeshThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+                    )
+                } else {
+                    encoder.setRenderPipelineState(molecularCellRenderPipeline)
+                    encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+                    encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+                    encoder.setVertexBuffer(cellState, offset: 0, index: 2)
+                    encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
+                    encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+                    encoder.setVertexBytes(
+                        &uniforms,
+                        length: MemoryLayout<SimulationUniforms>.stride,
+                        index: 5
+                    )
+                    encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
+                    encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
+                    encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
+                    encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
+                    encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
+                    encoder.drawPrimitives(
+                        type: .triangle,
+                        indirectBuffer: cellDrawArguments,
+                        indirectBufferOffset: 0
+                    )
+                }
+            }
             encoder.writeTimestamp(ending: "direct scientific display")
             encoder.endEncoding()
             presentationEncoded = true
@@ -5003,7 +5078,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         if rendersTissueOverlay {
             guard encodeVisibleCellCompaction(
                 into: commandBuffer,
-                settings: settings
+                settings: settings,
+                includeJunctions: true
             ) else { return }
         }
 
@@ -5136,20 +5212,12 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         _ encoder: Metal4RenderCommandEncoderAdapter,
         renderScale: Int
     ) {
-        if renderScale == 3 {
-            encoder.setFragmentTexture(quantumState, index: 0)
-            encoder.setFragmentTexture(state, index: 1)
-            encoder.setFragmentTexture(ecology, index: 2)
-            encoder.setFragmentTexture(environmentState, index: 3)
-            encoder.setFragmentTexture(mechanicalState, index: 4)
-            encoder.setFragmentTexture(genomeA, index: 5)
-            encoder.setFragmentTexture(genomeC, index: 6)
-        } else if renderScale == 4 {
+        if renderScale == 4 {
             encoder.setFragmentTexture(quantumState, index: 0)
             encoder.setFragmentTexture(quantumCoupling, index: 7)
         } else if renderScale == 5 {
             encoder.setFragmentTexture(quantumState, index: 0)
-        } else {
+        } else if renderScale < 3 {
             encoder.setFragmentTexture(state, index: 0)
             encoder.setFragmentTexture(ecology, index: 1)
             encoder.setFragmentTexture(environmentState, index: 2)

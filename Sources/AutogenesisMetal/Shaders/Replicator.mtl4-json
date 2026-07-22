@@ -39,6 +39,11 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
+        "label": "66C1DEB087E775FA171DB32B09AB5608B988CA33DD34E866DEDAD6ED75EA0CFB",
+        "name": "molecularCellFragment",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
         "label": "3B11746C9F81721D747E4EFADB6B8CB71D26F148A52D549BB5F833ECA1DA5F17",
         "name": "worldSurfaceFragment",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
@@ -883,6 +888,19 @@
         ]
       },
       {
+        "vertex_function_descriptor": "fnd:0181B9D3B3C72BA3C9C19E27A8C665A97C725E5FBFA372B67D6F2A93307E81CF",
+        "fragment_function_descriptor": "fnd:66C1DEB087E775FA171DB32B09AB5608B988CA33DD34E866DEDAD6ED75EA0CFB",
+        "color_attachments": [
+          {
+            "pixel_format": "BGRA8Unorm_sRGB",
+            "blending_state": "Enabled",
+            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
+            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
+            "source_rgb_blend_factor": "SourceAlpha"
+          }
+        ]
+      },
+      {
         "vertex_function_descriptor": "fnd:5E8F2DDCA3A3D09E3455A90C93C49F86B161C65E2A6A2F189BFF38D4D64679F5",
         "fragment_function_descriptor": "fnd:1895CCA5FA8AEF56335571096E9FF614624BD2A2CCAB44A492D839F7150B80D1",
         "color_attachments": [
@@ -928,6 +946,26 @@
         "color_attachments": [
           {
             "pixel_format": "RG11B10Float",
+            "blending_state": "Enabled",
+            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
+            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
+            "source_rgb_blend_factor": "SourceAlpha"
+          }
+        ]
+      },
+      {
+        "mesh_function_descriptor": "fnd:DA92E391BAA599AB3DDF12DB319CEF2733BC642323FFF3663A098495F13A155E",
+        "fragment_function_descriptor": "fnd:66C1DEB087E775FA171DB32B09AB5608B988CA33DD34E866DEDAD6ED75EA0CFB",
+        "mesh_threadgroup_size_is_multiple_of_thread_execution_width": true,
+        "max_total_threads_per_mesh_threadgroup": 64,
+        "required_threads_per_mesh_threadgroup": [
+          64,
+          1,
+          1
+        ],
+        "color_attachments": [
+          {
+            "pixel_format": "BGRA8Unorm_sRGB",
             "blending_state": "Enabled",
             "destination_alpha_blend_factor": "OneMinusSourceAlpha",
             "destination_rgb_blend_factor": "OneMinusSourceAlpha",

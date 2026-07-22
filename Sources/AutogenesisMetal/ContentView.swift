@@ -319,7 +319,7 @@ struct ContentView: View {
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
 
                 if activeObservationStop == 2 {
-                    molecularReactionPathway
+                    intracellularMoleculePanel
                 } else {
                     scaleProcessPathway
                 }
@@ -427,13 +427,13 @@ struct ContentView: View {
                 observerMetric("Catalyst synthesis ΔC", value: scientific(store.snapshot.meanCatalystProduction), tint: .purple, values: store.history.map(\.meanCatalystProduction))
                 observerMetric("Energy synthesis ΔE", value: scientific(store.snapshot.meanPrebioticEnergyProduction), tint: .yellow, values: store.history.map(\.meanPrebioticEnergyProduction))
             } else if store.observationZoom >= 64 {
-                observerMetric("Substrate A / B", value: molecularResourcePairLabel, tint: .cyan, values: store.history.map { $0.metrics.resourceDensity * 2 })
-                observerMetric("Catalyst C / stored E", value: "\(decimal(store.snapshot.meanMolecularCatalyst)) / \(decimal(store.snapshot.metrics.energyDensity))", tint: .pink, values: store.history.map(\.meanMolecularCatalyst))
-                observerMetric("Membrane M / toxin", value: "\(decimal(store.snapshot.meanMolecularMembrane)) / \(decimal(store.snapshot.meanMolecularToxin))", tint: .mint, values: store.history.map(\.meanMolecularMembrane))
-                observerMetric("Q order / A·B affinity", value: "\(decimal(store.snapshot.meanQuantumOrder)) / \(decimal(store.snapshot.meanChemicalAffinity))", tint: .purple, values: store.history.map(\.meanQuantumOrder))
-                observerMetric("ΔC / ΔE per step", value: "\(scientific(store.snapshot.meanCatalystProduction)) / \(scientific(store.snapshot.meanPrebioticEnergyProduction))", tint: .yellow, values: store.history.map(\.meanPrebioticEnergyProduction))
-                observerMetric("ΔM / recycle per step", value: "\(scientific(store.snapshot.meanMembraneAssembly)) / \(scientific(store.snapshot.meanDetritalMineralization))", tint: .orange, values: store.history.map(\.meanMembraneAssembly))
-                observerMetric("Detritus pool", value: decimal(store.snapshot.metrics.detritusDensity), tint: .orange, values: store.history.map(\.metrics.detritusDensity))
+                observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(store.observableAgentCount)", tint: .white, values: store.history.map { Double($0.cellCount) })
+                observerMetric("ATP / integrity", value: "\(decimal(store.snapshot.meanCellATP)) / \(percent(store.snapshot.meanCellIntegrity))", tint: .yellow, values: store.history.map(\.meanCellATP))
+                observerMetric("Ca* / ERK*", value: signalCompactLabel, tint: .pink, values: store.history.map(\.meanCalciumActivity))
+                observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
+                observerMetric("Membrane voltage", value: signedDecimal(store.snapshot.meanMembraneVoltage), tint: .mint, values: store.history.map(\.meanMembraneVoltage))
+                observerMetric("Repair program / paid effect", value: "\(decimal(store.snapshot.meanRepairProgram)) / \(scientific(store.snapshot.meanRepairEffect))", tint: .green, values: store.history.map(\.meanRepairProgram))
+                observerMetric("Exposed membrane", value: decimal(store.snapshot.meanExposedMembraneLength), tint: .blue, values: store.history.map(\.meanExposedMembraneLength))
             } else if store.observationZoom >= 18, store.displayMode == .causality {
                 let tissueCount = store.observableAgentCount
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
@@ -895,51 +895,44 @@ struct ContentView: View {
         }
     }
 
-    private var molecularReactionPathway: some View {
+    private var intracellularMoleculePanel: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionLabel("MEASURED REACTION PATH")
-            HStack(spacing: 4) {
+            sectionLabel("VISIBLE INTRACELLULAR POOLS")
+            HStack(spacing: 8) {
                 molecularPathNode(
-                    label: "A + B",
-                    value: molecularResourceCompactLabel,
-                    symbol: "circle.grid.2x2.fill",
-                    tint: .cyan
-                )
-                molecularPathArrow(rate: store.snapshot.meanCatalystProduction, tint: .pink)
-                molecularPathNode(
-                    label: "CATALYST",
-                    value: decimal(store.snapshot.meanMolecularCatalyst),
-                    symbol: "aqi.medium",
-                    tint: .pink
-                )
-                molecularPathArrow(rate: store.snapshot.meanPrebioticEnergyProduction, tint: .yellow)
-                molecularPathNode(
-                    label: "STORED E",
-                    value: decimal(store.snapshot.metrics.energyDensity),
+                    label: "ATP",
+                    value: decimal(store.snapshot.meanCellATP),
                     symbol: "bolt.fill",
                     tint: .yellow
                 )
-                molecularPathArrow(rate: store.snapshot.meanMembraneAssembly, tint: .mint)
                 molecularPathNode(
-                    label: "MEMBRANE",
-                    value: decimal(store.snapshot.meanMolecularMembrane),
+                    label: "CA*",
+                    value: decimal(store.snapshot.meanCalciumActivity),
+                    symbol: "circle.dotted",
+                    tint: .cyan
+                )
+                molecularPathNode(
+                    label: "ERK*",
+                    value: decimal(store.snapshot.meanERKActivity),
                     symbol: "circle.hexagongrid.fill",
-                    tint: .mint
+                    tint: .pink
+                )
+                molecularPathNode(
+                    label: "MORPH A",
+                    value: decimal(store.snapshot.meanMorphogenActivator),
+                    symbol: "circle",
+                    tint: .blue
+                )
+                molecularPathNode(
+                    label: "MORPH B",
+                    value: decimal(store.snapshot.meanMorphogenInhibitor),
+                    symbol: "diamond.fill",
+                    tint: .pink
                 )
             }
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), alignment: .leading),
-                    GridItem(.flexible(), alignment: .leading)
-                ],
-                alignment: .leading,
-                spacing: 5
-            ) {
-                molecularGate("Q ORDER", value: store.snapshot.meanQuantumOrder, tint: .purple)
-                molecularGate("A·B AFFINITY", value: store.snapshot.meanChemicalAffinity, tint: .blue)
-                molecularGate("TOXIN", value: store.snapshot.meanMolecularToxin, tint: .red)
-                molecularGate("RECYCLE", value: store.snapshot.meanDetritalMineralization, tint: .orange, scientific: true)
-            }
+            Text("Glyph occupancy follows the corresponding simulated pool inside each visible cell.")
+                .font(.system(size: 8, weight: .regular))
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -1009,37 +1002,6 @@ struct ContentView: View {
                 .minimumScaleFactor(0.7)
         }
         .frame(width: 44)
-    }
-
-    private func molecularPathArrow(rate: Double, tint: Color) -> some View {
-        VStack(spacing: 2) {
-            Image(systemName: "arrow.right")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(tint)
-            Text(compactScientific(rate))
-                .font(.system(size: 6, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(width: 20)
-    }
-
-    private func molecularGate(
-        _ label: String,
-        value: Double,
-        tint: Color,
-        scientific: Bool = false
-    ) -> some View {
-        HStack(spacing: 4) {
-            Circle().fill(tint).frame(width: 5, height: 5)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(label)
-                    .font(.system(size: 6, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Text(scientific ? self.scientific(value) : decimal(value))
-                    .font(.system(size: 7, weight: .semibold, design: .monospaced))
-            }
-        }
     }
 
     private var compactContextHUD: some View {
@@ -1249,9 +1211,7 @@ struct ContentView: View {
         if zoom >= 512 { return "Two-component coined quantum walk" }
         if zoom >= 160 { return "Probability density, phase, and probability current" }
         if zoom >= 64 {
-            return store.displayMode == .causality
-                ? "Mechanistic reaction-source terms"
-                : "Catalyst-mediated reaction flux and membrane assembly"
+            return "Intracellular molecules in physical cells"
         }
         if zoom >= 18 {
             return store.displayMode == .development
@@ -1295,7 +1255,7 @@ struct ContentView: View {
             return "ρ = |ψ₀|² + |ψ₁|². Component overlap contributes to the catalyst source term. Mint-to-amber feedback contours evaluate the same local resource, biomass, membrane, toxin, and inherited-trait terms that modify phase potential and coin angle in the quantum update; they are diagnostics, not additional forces."
         }
         if zoom >= 64 {
-            return "The 193² reaction lattice stores substrate A, biomass, energy E, membrane precursor M, substrate B, detritus, toxin, and catalyst C. The canvas maps concentrations to species glyphs and maps the exact local source terms to moving flux pulses; glyphs are field markers, not atom-resolved particles. Spinor order and mechanical activity produce C, C gates E production, E and C gate M assembly, and catalyst accelerates detrital recycling."
+            return "The molecular instrument draws only physical cells and organisms. Amber, cyan, magenta, blue, and pink glyphs are driven by each cell's ATP, Ca*, ERK*, morphogen A, and morphogen B state; abundance controls glyph occupancy. Membrane lipids, integrity, ATP-paid repair, wounds, and the shared integument remain attached to the same cell geometry. The extracellular reaction field and junction ribbons are intentionally absent at this scale."
         }
         if zoom >= 18 {
             if store.displayMode == .development {
@@ -1319,7 +1279,7 @@ struct ContentView: View {
         return switch activeObservationStop {
         case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
-        case 2: "Local chemical affinity is sqrt(A·B) times permeability and toxin inhibition. Quantum order and mechanical activity add catalyst; catalyst then gates stored-energy production. Quantum order, catalyst, and E set the membrane target, while catalyst-dependent mineralization returns detritus to both substrates. Cells consume these fields for ATP and return mechanical work and detritus, closing the cross-scale loop."
+        case 2: "Each glyph reads the state of the cell that contains it: ATP from physiology, Ca* and ERK* from the excitable signaling state, and morphogens A and B from development. Membrane condition, paid repair, local failure, and supracellular integument are rendered on the physical boundary. Glyph density is a monotonic abundance cue, not a separate particle simulation."
         case 3: "A bounded sparse graph maps sixteen local mechanochemical and ecological inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Cell-cycle and biomass dynamics use measured substrate harvest relative to maintenance, work, and dissipation together with ATP reserve, exposed membrane, crowding, stress, and inherited regulation. Persistent junction ribbons read physical load and strain directly; amber packets show signed ATP sharing, cyan and magenta lanes show conductance-gated Ca*/ERK* propagation, and blue-green wound boundaries show ATP-funded repair. These render diagnostics never feed the cell update."
         case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Lineage-colored junction rails identify contact between different generation-tagged programs. Fission transmits programs already present in cells without mutation; ATP-funded cell division can mutate one program or crossbreed two compatible junction-linked programs."
         default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
@@ -1417,7 +1377,7 @@ struct ContentView: View {
                 ? "Observer-resolved tissue morphology" : "Component morphology"
         }
         if zoom < 64 { return "Cellular tissue" }
-        if zoom < 160 { return "Molecular reaction chemistry" }
+        if zoom < 160 { return "Intracellular molecules" }
         if zoom < 512 { return "Wave observables" }
         return "Spinor field"
     }
@@ -1433,7 +1393,7 @@ struct ContentView: View {
                 displayMode: .ecology
             ),
             ObservationStop(
-                label: "Molecule", symbol: "scope", magnification: 96,
+                label: "Molecules", symbol: "scope", magnification: 96,
                 displayMode: .energy
             ),
             ObservationStop(
@@ -1481,20 +1441,7 @@ struct ContentView: View {
             return [("Probability", .cyan), ("Phase", .pink), ("Current", .white), ("Matter feedback", .mint)]
         }
         if store.observationZoom >= 64 {
-            return switch store.displayMode {
-            case .ecology:
-                [("Resource A", .cyan), ("Resource B", .purple), ("Catalyst", .pink), ("Stored E", .yellow), ("Membrane", .mint), ("Toxin", .red)]
-            case .energy:
-                [("Resource A", .cyan), ("Resource B", .purple), ("Catalyst", .pink), ("Stored E", .yellow), ("Membrane", .mint), ("Detritus", .orange)]
-            case .genome:
-                [("Metabolism", .red), ("Membrane", .green), ("Dispersal", .blue), ("Predation", .pink)]
-            case .niches:
-                [("Resource A", .cyan), ("Resource B", .purple), ("Detritus", .orange), ("Toxin", .red)]
-            case .development:
-                [("Catalyst", .pink), ("Stored E", .yellow), ("Membrane", .mint), ("Assembly", .green)]
-            case .causality:
-                [("Q×affinity→C", .cyan), ("C,Q→E", .pink), ("E,C→M", .mint), ("Detritus→A+B", .orange)]
-            }
+            return [("ATP", .yellow), ("Ca*", .cyan), ("ERK*", .pink), ("Morphogen A", .blue), ("Morphogen B", .pink), ("Membrane", .mint)]
         }
         if store.observationZoom >= 18 {
             if store.displayMode == .development {
@@ -1545,7 +1492,7 @@ struct ContentView: View {
         }
         return store.observationZoom >= 512 ? "Spinor components" :
             store.observationZoom >= 160 ? "Quantum observables" :
-            store.observationZoom >= 64 ? "Reaction pools and flux" :
+            store.observationZoom >= 64 ? "Intracellular molecule pools" :
             store.observationZoom >= 18 ? "Causal tissue channels" : store.displayMode.label
     }
 
@@ -1567,19 +1514,6 @@ struct ContentView: View {
 
     private func compactScientific(_ value: Double) -> String {
         String(format: "%.0e", max(value, 0))
-    }
-
-    private var molecularResourcePairLabel: String {
-        "\(decimal(store.snapshot.metrics.resourceDensity * 2)) / " +
-            decimal(store.snapshot.meanMolecularResourceB)
-    }
-
-    private var molecularResourceCompactLabel: String {
-        String(
-            format: "%.2f/%.2f",
-            max(store.snapshot.metrics.resourceDensity * 2, 0),
-            max(store.snapshot.meanMolecularResourceB, 0)
-        )
     }
 
     private func causalRate(_ value: Double) -> String {

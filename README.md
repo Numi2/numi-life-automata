@@ -56,7 +56,7 @@ This follows the general artificial-life program of studying life-like processes
 
 ## Observed scales
 
-The interface uses one camera over one persistent simulation. Each scale control selects both magnification and its scientifically matched renderer: reaction energetics at molecular scale, junction-coupled development at cell scale, inherited tissue morphology at organism scale, and environmental state at ecology scale. There is no separate view-mode dropdown. The scientific inspector is an optional floating overlay, so opening it never resizes or duplicates the world canvas. Scale changes do not resample agent identity.
+The interface uses one camera over one persistent simulation. Each scale control selects both magnification and its scientifically matched renderer: intracellular state at molecular scale, junction-coupled development at cell scale, inherited tissue morphology at organism scale, and environmental state at ecology scale. There is no separate view-mode dropdown. The scientific inspector is an optional floating overlay, so opening it never resizes or duplicates the world canvas. Scale changes do not resample agent identity.
 
 ### Simulation time and acceleration
 
@@ -83,8 +83,8 @@ Interactive `1x`, `3x`, `6x`, and `24x` speeds execute that many unchanged biolo
       <br /><strong>Wave observables, 160x.</strong> Probability density, phase contours, current, and matter-dependent potential.
     </td>
     <td width="50%">
-      <img src="Docs/Media/numi-automata-reaction.png" alt="Molecular reaction chemistry at 96x" />
-      <br /><strong>Molecular reaction chemistry, 96x.</strong> Continuous concentration fields, catalyst hotspots, directed conversion flux, energy storage, membrane assembly, toxin inhibition, and detrital recycling.
+      <img src="Docs/Media/numi-automata-reaction.png" alt="Intracellular molecules at 96x" />
+      <br /><strong>Intracellular molecules, 96x.</strong> Physical cells and organism bodies expose ATP, Ca*, ERK*, morphogens, membrane lipids, repair, wounds, and integument.
     </td>
   </tr>
   <tr>
@@ -109,7 +109,7 @@ Interactive `1x`, `3x`, `6x`, and `24x` speeds execute that many unchanged biolo
 |---|---:|---|---|
 | Spinor field | `900x` | Real and imaginary parts of `psi_0`, `psi_1`; component phasors | Yes |
 | Wave observables | `160x` | `rho`, relative phase, probability-current proxy, local potential | Yes |
-| Molecular reaction chemistry | `96x` | `R_A`, `R_B`, detritus, toxin, catalyst, `E`, `M`, chemical affinity, quantum order, and measured source fluxes | Yes |
+| Intracellular molecules | `96x` | Per-cell ATP, Ca*, ERK*, morphogen A/B, membrane integrity, paid repair, wounds, and integument | Yes |
 | Cellular tissue | `36x` | Cell position, local membrane wounds, ATP-funded repair, junction load/strain, directional ATP exchange, Ca*/ERK* propagation, generation-tagged lineage mixing, voltage, refractory state, phase, frequency, regulation, fate, contractility, morphogens, stress, and apoptosis | Yes |
 | Organism morphology | `10x` | Position, velocity, developed tissue geometry, regulatory state, energy, biomass, sensors, defense, predation morphology | Yes |
 | Ecological field | `1x` | Population, resources, hazards, obstacles, occupancy, trophic events | Yes |
@@ -312,11 +312,11 @@ Stored energy receives
 
 These are designed numerical couplings. They are not derived from quantum chemistry.
 
-### Molecular reaction instrument
+### Intracellular molecular instrument
 
-From `64x` through `160x`, the renderer remains centered on the `193 x 193` reaction lattice instead of prematurely replacing chemistry with the quantum-wave view. The continuous field encodes `R_A:R_B`, catalyst, stored energy, membrane precursor, detritus, and toxin directly. Sparse decorative molecular glyphs were removed: they obscured field structure and spent fragment time on shapes unrelated to simulation resolution.
+From `64x` through `160x`, the renderer follows the physical cells rather than displaying the extracellular reaction lattice. Each visible cell retains its simulated membrane contour and supracellular integument, so a multicellular component remains visibly one organism while its intracellular state is exposed.
 
-Moving lanes use the same per-step terms as `reactWorld`: total catalyst production from quantum order and mechanical activity, catalyst-gated stored-energy production, positive membrane assembly toward the prebiotic target, and catalyst-dependent detrital mineralization. Their luminance is a monotonic logarithmic transform of the nonnegative source rate, and direction comes from screen-space derivatives of the already sampled substrate field rather than four extra neighbor reads. A GPU reduction separately records the spatial mean of all four source terms plus `R_B`, catalyst, toxin, membrane, quantum order, and chemical affinity. At `160x`, a separate direct wave shader takes over without tissue overlay, HDR intermediates, bloom, or a display-composite pass.
+Five stable molecular glyph families are driven monotonically by the cell's actual ATP, Ca*, ERK*, morphogen-A, and morphogen-B pools. Membrane heads follow local integrity, ATP-funded repair marks damaged membrane, wounds interrupt continuity, and inherited integument remains outside the cells. The background intentionally contains no generic reaction-field animation. GPU compaction submits only visible cells, skips the `32,768`-junction scan, and draws into the same direct drawable pass without HDR intermediates, bloom, or display composition.
 
 ## Reaction field and founder allocation
 
@@ -1067,14 +1067,15 @@ flowchart LR
 | Quantum coupling preparation | `193²` | `prepareQuantumCoupling` |
 | Spinor update | `1024²`, sampling prepared coupling | `evolveQuantumField` |
 | Measurement | `193²` / `1024²` | `measureWorld`, `measureQuantumField` |
-| Field rendering | One full-screen triangle, six scale-selected pipelines | ecology, morphology, cellular, molecule, wave, or spinor surface |
+| Field rendering | One full-screen triangle, three scale-selected HDR pipelines | ecology, morphology, or cellular surface |
 | Visible-cell compaction | Compacted living cells with conservative viewport rejection | `compactVisibleCells` |
 | Visible-junction compaction | Fixed `32,768`-slot scan with physical-pair and viewport validation | `compactVisibleJunctions` |
 | Tissue-contour rendering | One indirect mesh threadgroup per visible cell on M4; indexed vertex fallback on generic Metal 4 | `cellContourMesh` or `cellVertex`, then `cellFragment` |
+| Intracellular molecular rendering | Direct dark background plus visible physical cells; no junction scan | `molecularDisplayFragment`, then `molecularCellFragment` |
 | Causal-junction rendering | One indirect six-vertex ribbon per visible persistent junction | `junctionVertex`, then `junctionFragment` |
 | Bloom downsample and filtering | One thirteen-tap dispatch at quarter drawable dimensions | `bloomPrefilter` |
 | Display composition | One full-screen triangle | `compositeFragment` |
-| Resolved spinor display | One direct-to-drawable full-screen triangle | `spinorDisplayFragment` |
+| Direct scientific display | One direct-to-drawable full-screen triangle, plus molecular cells only at `64-160x` | `molecularDisplayFragment`, `waveDisplayFragment`, or `spinorDisplayFragment` |
 
 Threadgroup dimensions are selected from each compute pipeline's `threadExecutionWidth` and `maxTotalThreadsPerThreadgroup`. Two-dimensional kernels use one execution width across `x` and up to eight rows; one-dimensional kernels use execution-width-aligned groups up to `256` threads.
 
@@ -1100,7 +1101,7 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Dominant-program cache.** Homogeneous cells use the inherited trait and recognition vectors already cached in their component's `AgentState`. Only a mixed-program cell whose program index differs from the component's dominant index reads the independent `96 B` program record.
 - **Linear HDR tissue scene.** Ecology, organism, and cell fragments write unclamped values into a drawable-sized `RG11B10Float` target only while translucent membranes require layering. Deeper scientific scales write directly to the drawable.
 - **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; intermediate scales expose phase winding, density isolines, reaction channels, trait-dependent morphology, resource flux, and geological gradients.
-- **Static deep-scale fragments.** Molecule, wave, and spinor views use independent MSL 4.0 entry points. Molecular rendering uses one quantum sample, four always-needed world samples, derivative-based substrate direction, and conditional genome reads only in the trait instrument. Wave rendering uses four quantum samples and one prepared-coupling sample.
+- **Static deep-scale fragments.** Molecule, wave, and spinor views use independent MSL 4.0 entry points. Molecular scale has a constant-cost dark background plus compacted physical cells; it samples no world or quantum textures. Wave rendering uses four quantum samples and one prepared-coupling sample.
 - **Metal 4 counter heaps.** Sampled submissions timestamp chemistry, component mechanics, cell physiology, contact, topology, division, field mechanics, quantum evolution, rendering, and postprocessing without feeding timing data into causal kernels.
 - **Measured process chains.** Every observation scale exposes four compact observer nodes linking its measured input, state transition, and downstream output. These SwiftUI summaries read asynchronous reductions and never write simulation state.
 - **Exact deep-lattice sampling.** At `420x` and above, the spinor instrument uses nearest-cell `RGBA32Float` samples instead of blending adjacent lattice states. Wave-scale views retain linear filtering.
@@ -1110,14 +1111,14 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Causal junction radiometry.** A fixed-capacity GPU pass rejects stale, invalid, offscreen, and nonpersistent junction records, then submits one indirect six-vertex ribbon per visible bond. Ribbon endpoints enter both cells through their actual membrane support arcs. Width and blue-to-orange load encode stored junction load and signed strain memory; amber packets encode the signed difference between the cells' measured net ATP-sharing fluxes; cyan and magenta lanes encode signed Ca*/ERK* differences gated by persistent conductance and neighbor-signal availability; lineage-colored edge rails appear only when the generation-tagged programs differ. These are monotonic render diagnostics of causal buffers and never become simulation inputs.
 - **Contour antialiasing.** Bounded quadratic interpolation expands each simulated twelve-edge membrane into the selected render segments. `fwidth`-derived transitions smooth that measured contour without changing collision geometry.
 - **Overview-only bloom.** One thirteen-tap quarter-resolution tent filter remains below `18x`, where sparse ecological radiance benefits from it. Dense tissue, molecular, wave, and spinor frames skip the dispatch.
-- **Direct scientific presentation.** Molecular, wave, and spinor fragments apply the hue-preserving display map while writing directly to the drawable. They skip visible-cell and junction compaction, translucent tissue overdraw, the full-resolution HDR store/reload, bloom, and a second full-screen render pass.
+- **Direct scientific presentation.** Molecular, wave, and spinor fragments write directly to the drawable. Molecular scale adds only its visible-cell molecular overlay; wave and spinor add no biological geometry. All three skip junction rendering, the full-resolution HDR store/reload, bloom, and a second full-screen render pass.
 - **Hue-preserving display map.** Peak-channel exponential compression applies one scalar to all RGB channels, followed by a small scale-specific saturation correction and `1/1023` temporal dither.
-- **Single physical body path.** Ecology, organism, and cellular views all draw the same persistent cell membranes; there is no analytic organism envelope or duplicate organism canvas.
+- **Single physical body path.** Ecology, organism, cellular, and molecular views all draw the same persistent cell membranes; there is no analytic organism envelope or duplicate organism canvas.
 - **GPU-compacted cell submission.** `compactVisibleCells` consumes the ascending compact living-cell list and rejects cells outside a conservative membrane-expanded viewport. Every allocator slot has independent GPU-private indices and draw arguments. They are zeroed in full before compaction and reconstructed afterward with a hard `9,216`-instance clamp; the vertex path bounds both instance and vertex IDs before reading a compacted index. The render pass submits only that count without a CPU readback.
 - **GPU-compacted junction submission.** `compactVisibleJunctions` validates pair fingerprints, occupancy, owner continuity, stale age, finite material state, tracking, and viewport bounds across the bounded `32,768`-slot table. Each allocator slot has an independent index list and indirect arguments, likewise rebuilt and clamped every frame, and the vertex path rejects an invalid instance before reading the index list. One indirect instanced draw overlays only the surviving physical junctions, with no CPU pair traversal or readback.
 - **Explicit cell boundaries.** The indirect draw expands each compacted cell index into a thirty-six-triangle fan interpolated from twelve simulated membrane vertices.
 - **Compact causal cell shading.** One branch-coherent fragment retains lineage, role, ATP, voltage, membrane integrity, paid repair, pressure, strain, integument, Ca*, ERK*, traction, trophic exchange, construction, closure, stress, and apoptosis. Procedural organelle noise, decorative fibers, and regulatory-node loops were removed.
-- **Scale and viewport cull before submission.** The same membrane draw remains available from ecological overview through cellular inspection and is omitted outside its `0.35x` to `64x` physical visibility interval. Within that interval, conservative screen-space bounds prevent off-screen membrane fans from entering vertex binning or fragment shading.
+- **Scale and viewport cull before submission.** The same membrane draw remains available from ecological overview through molecular inspection and is omitted outside its `0.35x` to `160x` physical visibility interval. Junction ribbons stop at `64x`. Conservative screen-space bounds prevent off-screen membrane fans from entering vertex binning or fragment shading.
 - **Execution-width-aligned dispatch.** Two-dimensional threadgroups use one pipeline execution width across x and up to eight rows, bounded by `maxTotalThreadsPerThreadgroup`. One-dimensional agent and cell dispatches use execution-width multiples up to `256` threads. The choice is queried per pipeline instead of assuming a fixed GPU width.
 - **Asynchronous readback.** Three observation slots and three metric slots prevent CPU access to in-flight buffers. Component and cell observations carry permanent identity, program provenance, morphology, dynamics, autonomy-loop terms, and current slot position; the same command blits the physical-event ring and monotonic write counter. GPU active-handle compaction bounds owner-level dispatch by the living component count rather than the `9,216`-handle capacity.
 - **Framebuffer-only drawable.** `MTKView.framebufferOnly = true` keeps the presentation resource render-target optimized.

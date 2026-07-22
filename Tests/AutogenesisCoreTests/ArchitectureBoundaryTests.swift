@@ -648,7 +648,7 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func deepScientificScalesBypassTissueHDRAndBloom() throws {
+    func deepScalesBypassHDRAndMolecularUsesCellOnlyOverlay() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
@@ -657,6 +657,11 @@ struct ArchitectureBoundaryTests {
         let shader = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let contentView = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/ContentView.swift"),
             encoding: .utf8
         )
         #expect(renderer.contains("directScaleDisplayPipelines"))
@@ -672,13 +677,23 @@ struct ArchitectureBoundaryTests {
         #expect(!renderer.contains("bloomBlurPipeline"))
         #expect(!renderer.contains("bloomTextureB"))
         #expect(shader.contains("fragment float4 molecularDisplayFragment"))
+        #expect(shader.contains("fragment float4 molecularCellFragment"))
         #expect(shader.contains("fragment float4 waveDisplayFragment"))
         #expect(shader.contains("fragment float4 spinorDisplayFragment"))
         #expect(!shader.contains("molecularSurfaceFragment"))
         #expect(!shader.contains("waveSurfaceFragment"))
-        #expect(shader.contains("float2 reactionGradient = float2(dfdx(substrate), dfdy(substrate))"))
         #expect(shader.contains("float4 preparedCoupling = coupling.sample"))
         #expect(!shader.contains("glyphSeed"))
+        #expect(!shader.contains("molecularReactionVisualization"))
+        #expect(shader.contains("float atp = saturate(input.physiology.x)"))
+        #expect(shader.contains("float calcium = saturate(input.signaling.x)"))
+        #expect(shader.contains("float erk = saturate(input.signaling.y)"))
+        #expect(renderer.contains("includeJunctions: false"))
+        #expect(renderer.contains("molecularCellRenderPipeline"))
+        #expect(contentView.contains("Intracellular molecules in physical cells"))
+        #expect(contentView.contains("VISIBLE INTRACELLULAR POOLS"))
+        #expect(!contentView.contains("MEASURED REACTION PATH"))
+        #expect(!contentView.contains("Reaction pools and flux"))
         #expect(shader.contains("inline float4 finiteHDRColor"))
         #expect(shader.contains("return finiteHDRColor(color, 1.08);"))
         #expect(shader.contains("return finiteHDRColor(color, contextExposure);"))
@@ -855,7 +870,8 @@ struct ArchitectureBoundaryTests {
         let compactionSignature = """
         private func encodeVisibleCellCompaction(
                 into commandBuffer: Metal4CommandBufferContext,
-                settings: RendererSettings
+                settings: RendererSettings,
+                includeJunctions: Bool
             ) -> Bool
         """
         let bloomSignature = """
