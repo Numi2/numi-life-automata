@@ -847,6 +847,54 @@ inline float mutateScalar(float value, uint seed, float amount, float lower, flo
     return clamp(value + signedRandom(seed) * amount, lower, upper);
 }
 
+inline uint activeRegulatoryNodeAtOrdinal(
+    device const RegulatoryNode* nodes,
+    uint base,
+    uint ordinal
+) {
+    uint activeOrdinal = 0u;
+    for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
+        if ((nodes[base + index].flags & 1u) == 0u) { continue; }
+        if (activeOrdinal == ordinal) { return index; }
+        activeOrdinal += 1u;
+    }
+    return regulatoryNodeCapacity;
+}
+
+inline uint activeRegulatoryEdgeAtOrdinal(
+    device const RegulatoryEdge* edges,
+    uint base,
+    uint ordinal
+) {
+    uint activeOrdinal = 0u;
+    for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
+        if ((edges[base + index].flags & 1u) == 0u) { continue; }
+        if (activeOrdinal == ordinal) { return index; }
+        activeOrdinal += 1u;
+    }
+    return regulatoryEdgeCapacity;
+}
+
+inline uint firstInactiveRegulatoryNode(
+    device const RegulatoryNode* nodes,
+    uint base
+) {
+    for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
+        if ((nodes[base + index].flags & 1u) == 0u) { return index; }
+    }
+    return regulatoryNodeCapacity;
+}
+
+inline uint firstInactiveRegulatoryEdge(
+    device const RegulatoryEdge* edges,
+    uint base
+) {
+    for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
+        if ((edges[base + index].flags & 1u) == 0u) { return index; }
+    }
+    return regulatoryEdgeCapacity;
+}
+
 inline void mutateDevelopmentalGenome(
     device const DevelopmentalGenome* genomes,
     device DevelopmentalGenome* mutableGenomes,
@@ -954,13 +1002,13 @@ inline void mutateDevelopmentalGenome(
     if (structuralMutation) {
         uint operation = hash32(seed + 727u) % 5u;
         if (operation == 0u) {
-            uint sourceSlot = hash32(seed + 733u) % regulatoryNodeCapacity;
-            uint targetSlot = regulatoryNodeCapacity;
-            for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
-                if ((mutableNodes[childNodeBase + index].flags & 1u) == 0u) { targetSlot = index; break; }
-            }
+            uint activeNodeOrdinal = hash32(seed + 733u) % max(child.topology.x, 1u);
+            uint sourceSlot = activeRegulatoryNodeAtOrdinal(
+                mutableNodes, childNodeBase, activeNodeOrdinal
+            );
+            uint targetSlot = firstInactiveRegulatoryNode(mutableNodes, childNodeBase);
             if (targetSlot < regulatoryNodeCapacity &&
-                (mutableNodes[childNodeBase + sourceSlot].flags & 1u) != 0u) {
+                sourceSlot < regulatoryNodeCapacity) {
                 RegulatoryNode duplicate = mutableNodes[childNodeBase + sourceSlot];
                 duplicate.bias = mutateScalar(duplicate.bias, seed + 739u, 0.22, -3.0, 3.0);
                 duplicate.sensorIndex = random01(seed + 743u) < 0.54
@@ -971,22 +1019,96 @@ inline void mutateDevelopmentalGenome(
                     &identityCounters[1], 1u, memory_order_relaxed
                 );
                 mutableNodes[childNodeBase + targetSlot] = duplicate;
+
+                // Preserve a small connected subgraph around a duplicated node.
+                // The inherited paths make the copy immediately functional while
+                // its new innovation IDs allow subsequent independent divergence.
+                uint duplicateIncomingSlot = regulatoryEdgeCapacity;
+                uint duplicateOutgoingSlot = regulatoryEdgeCapacity;
+                uint incomingRank = 0xffffffffu;
+                uint outgoingRank = 0xffffffffu;
+                for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
+                    RegulatoryEdge candidate = mutableEdges[childEdgeBase + index];
+                    if ((candidate.flags & 1u) == 0u) { continue; }
+                    if (candidate.target == sourceSlot) {
+                        uint rank = hash32(candidate.innovationID ^ seed ^ 0x68bc21ebu);
+                        if (rank < incomingRank) {
+                            incomingRank = rank;
+                            duplicateIncomingSlot = index;
+                        }
+                    }
+                    if (candidate.source == sourceSlot) {
+                        uint rank = hash32(candidate.innovationID ^ seed ^ 0x02e5be93u);
+                        if (rank < outgoingRank) {
+                            outgoingRank = rank;
+                            duplicateOutgoingSlot = index;
+                        }
+                    }
+                }
+                if (duplicateIncomingSlot < regulatoryEdgeCapacity) {
+                    uint freeEdgeSlot = firstInactiveRegulatoryEdge(
+                        mutableEdges, childEdgeBase
+                    );
+                    if (freeEdgeSlot < regulatoryEdgeCapacity) {
+                        RegulatoryEdge copiedEdge =
+                            mutableEdges[childEdgeBase + duplicateIncomingSlot];
+                        bool selfLoop = copiedEdge.source == sourceSlot;
+                        copiedEdge.source = selfLoop ? targetSlot : copiedEdge.source;
+                        copiedEdge.target = targetSlot;
+                        copiedEdge.weight = mutateScalar(
+                            copiedEdge.weight, seed + 752u, 0.12, -3.2, 3.2
+                        );
+                        copiedEdge.innovationID = atomic_fetch_add_explicit(
+                            &identityCounters[1], 1u, memory_order_relaxed
+                        );
+                        mutableEdges[childEdgeBase + freeEdgeSlot] = copiedEdge;
+                        numericalDistance += 0.018;
+                    }
+                }
+                if (duplicateOutgoingSlot < regulatoryEdgeCapacity &&
+                    duplicateOutgoingSlot != duplicateIncomingSlot) {
+                    uint freeEdgeSlot = firstInactiveRegulatoryEdge(
+                        mutableEdges, childEdgeBase
+                    );
+                    if (freeEdgeSlot < regulatoryEdgeCapacity) {
+                        RegulatoryEdge copiedEdge =
+                            mutableEdges[childEdgeBase + duplicateOutgoingSlot];
+                        copiedEdge.source = targetSlot;
+                        copiedEdge.weight = mutateScalar(
+                            copiedEdge.weight, seed + 754u, 0.12, -3.2, 3.2
+                        );
+                        copiedEdge.innovationID = atomic_fetch_add_explicit(
+                            &identityCounters[1], 1u, memory_order_relaxed
+                        );
+                        mutableEdges[childEdgeBase + freeEdgeSlot] = copiedEdge;
+                        numericalDistance += 0.018;
+                    }
+                }
                 structuralChanges += 1u;
             }
         } else if (operation == 1u && child.topology.x > 4u) {
-            uint slot = hash32(seed + 757u) % regulatoryNodeCapacity;
-            if ((mutableNodes[childNodeBase + slot].flags & 1u) != 0u) {
+            uint activeNodeOrdinal = hash32(seed + 757u) % child.topology.x;
+            uint slot = activeRegulatoryNodeAtOrdinal(
+                mutableNodes, childNodeBase, activeNodeOrdinal
+            );
+            if (slot < regulatoryNodeCapacity) {
                 mutableNodes[childNodeBase + slot].flags = 0u;
                 structuralChanges += 1u;
             }
-        } else {
-            uint slot = hash32(seed + 761u) % regulatoryEdgeCapacity;
-            RegulatoryEdge edge = mutableEdges[childEdgeBase + slot];
-            if (operation == 2u || (edge.flags & 1u) == 0u) {
-                edge.source = hash32(seed + 769u) % regulatoryNodeCapacity;
-                edge.target = hash32(seed + 773u) % regulatoryNodeCapacity;
-                if ((mutableNodes[childNodeBase + edge.source].flags & 1u) != 0u &&
-                    (mutableNodes[childNodeBase + edge.target].flags & 1u) != 0u) {
+        } else if (operation == 2u) {
+            uint slot = firstInactiveRegulatoryEdge(mutableEdges, childEdgeBase);
+            if (slot < regulatoryEdgeCapacity && child.topology.x > 0u) {
+                uint sourceOrdinal = hash32(seed + 769u) % child.topology.x;
+                uint targetOrdinal = hash32(seed + 773u) % child.topology.x;
+                RegulatoryEdge edge = emptyRegulatoryEdge();
+                edge.source = activeRegulatoryNodeAtOrdinal(
+                    mutableNodes, childNodeBase, sourceOrdinal
+                );
+                edge.target = activeRegulatoryNodeAtOrdinal(
+                    mutableNodes, childNodeBase, targetOrdinal
+                );
+                if (edge.source < regulatoryNodeCapacity &&
+                    edge.target < regulatoryNodeCapacity) {
                     edge.weight = signedRandom(seed + 779u) * 1.4;
                     edge.plasticity = signedRandom(seed + 787u) * 0.04;
                     edge.innovationID = atomic_fetch_add_explicit(
@@ -995,20 +1117,50 @@ inline void mutateDevelopmentalGenome(
                     edge.flags = 1u;
                     structuralChanges += 1u;
                 }
-            } else if (operation == 3u) {
+                mutableEdges[childEdgeBase + slot] = edge;
+            }
+        } else if (operation == 3u && child.topology.y > 0u) {
+            uint activeEdgeOrdinal = hash32(seed + 761u) % child.topology.y;
+            uint slot = activeRegulatoryEdgeAtOrdinal(
+                mutableEdges, childEdgeBase, activeEdgeOrdinal
+            );
+            if (slot < regulatoryEdgeCapacity) {
+                RegulatoryEdge edge = mutableEdges[childEdgeBase + slot];
                 edge.flags = 0u;
+                mutableEdges[childEdgeBase + slot] = edge;
                 structuralChanges += 1u;
-            } else if (operation == 4u) {
-                edge.source = hash32(seed + 797u) % regulatoryNodeCapacity;
-                edge.target = hash32(seed + 809u) % regulatoryNodeCapacity;
+            }
+        } else if (operation == 4u && child.topology.y > 0u &&
+            child.topology.x > 0u) {
+            uint activeEdgeOrdinal = hash32(seed + 761u) % child.topology.y;
+            uint slot = activeRegulatoryEdgeAtOrdinal(
+                mutableEdges, childEdgeBase, activeEdgeOrdinal
+            );
+            if (slot < regulatoryEdgeCapacity) {
+                RegulatoryEdge edge = mutableEdges[childEdgeBase + slot];
+                uint sourceOrdinal = hash32(seed + 797u) % child.topology.x;
+                uint targetOrdinal = hash32(seed + 809u) % child.topology.x;
+                uint reconnectedSource = activeRegulatoryNodeAtOrdinal(
+                    mutableNodes, childNodeBase, sourceOrdinal
+                );
+                uint reconnectedTarget = activeRegulatoryNodeAtOrdinal(
+                    mutableNodes, childNodeBase, targetOrdinal
+                );
+                if (reconnectedSource == edge.source &&
+                    reconnectedTarget == edge.target && child.topology.x > 1u) {
+                    targetOrdinal = (targetOrdinal + 1u) % child.topology.x;
+                    reconnectedTarget = activeRegulatoryNodeAtOrdinal(
+                        mutableNodes, childNodeBase, targetOrdinal
+                    );
+                }
+                edge.source = reconnectedSource;
+                edge.target = reconnectedTarget;
                 edge.innovationID = atomic_fetch_add_explicit(
                     &identityCounters[1], 1u, memory_order_relaxed
                 );
-                edge.flags = ((mutableNodes[childNodeBase + edge.source].flags & 1u) != 0u &&
-                    (mutableNodes[childNodeBase + edge.target].flags & 1u) != 0u) ? 1u : 0u;
-                structuralChanges += edge.flags & 1u;
+                structuralChanges += 1u;
+                mutableEdges[childEdgeBase + slot] = edge;
             }
-            mutableEdges[childEdgeBase + slot] = edge;
         }
     }
 

@@ -265,6 +265,31 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func structuralMutationCreatesConnectedFunctionalVariation() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(of: "inline void mutateDevelopmentalGenome"))
+        let end = try #require(shader.range(
+            of: "struct RegulatoryOutputs",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let mutation = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(shader.contains("inline uint activeRegulatoryNodeAtOrdinal"))
+        #expect(shader.contains("inline uint activeRegulatoryEdgeAtOrdinal"))
+        #expect(shader.contains("inline uint firstInactiveRegulatoryNode"))
+        #expect(shader.contains("inline uint firstInactiveRegulatoryEdge"))
+        #expect(mutation.contains("uint duplicateIncomingSlot"))
+        #expect(mutation.contains("uint duplicateOutgoingSlot"))
+        #expect(mutation.contains("copiedEdge.target = targetSlot"))
+        #expect(mutation.contains("copiedEdge.source = targetSlot"))
+        #expect(mutation.contains("uint activeNodeOrdinal"))
+        #expect(mutation.contains("uint activeEdgeOrdinal"))
+    }
+
+    @Test
     func extracellularDevelopmentIsPersistentLocalAndEnergeticallyPaid() throws {
         let shader = try String(
             contentsOf: repositoryRoot
