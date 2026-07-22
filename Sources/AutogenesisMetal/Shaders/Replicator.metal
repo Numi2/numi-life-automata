@@ -1710,12 +1710,67 @@ inline float4 geologyAt(float2 uv, uint geologicalEpoch) {
         }
     }
 
+    // Continuous strata connect the existing local deposits into ridges,
+    // channels, pockets, and broad transition zones without biome labels.
+    float warp = sin(2.0 * M_PI_F * (
+        uv.x * 1.17 - uv.y * 0.83 + epoch * 0.0061
+    )) * 0.18;
+    float ridgeCarrier = sin(2.0 * M_PI_F * (
+        uv.x * 2.15 + uv.y * 1.31 + warp + epoch * 0.0037
+    ));
+    float channelCarrier = sin(2.0 * M_PI_F * (
+        uv.x * 1.42 - uv.y * 2.24 + warp * 0.61 - epoch * 0.0049
+    ));
+    float pocketCarrier = 0.5 + 0.5 * sin(2.0 * M_PI_F * (
+        uv.x * 0.73 + uv.y * 0.91 + epoch * 0.0023
+    ));
+    float ridge = smoothstep(0.78, 0.98, abs(ridgeCarrier));
+    float channel = 1.0 - smoothstep(0.055, 0.30, abs(channelCarrier));
+    float softPocket = smoothstep(0.30, 0.82, pocketCarrier) * (1.0 - ridge);
+    nutrientDeposit = max(
+        nutrientDeposit,
+        channel * (0.24 + softPocket * 0.58) * (1.0 - ridge * 0.42)
+    );
+    mineralDeposit = max(
+        mineralDeposit,
+        ridge * (0.34 + (1.0 - softPocket) * 0.46)
+    );
+    toxicVent = max(
+        toxicVent,
+        ridge * channel * (0.16 + (1.0 - softPocket) * 0.30)
+    );
+    rock = max(rock, ridge * ridge * (0.44 + (1.0 - channel) * 0.34));
+
     float centralDeposit = exp(-dot(uv - 0.5, uv - 0.5) / 0.0018);
     nutrientDeposit = max(nutrientDeposit, centralDeposit * 0.88);
     mineralDeposit = max(mineralDeposit, centralDeposit * 0.62);
     toxicVent *= 1.0 - centralDeposit;
     rock *= (1.0 - centralDeposit) * (1.0 - saturate(max(nutrientDeposit, mineralDeposit) * 0.82));
     return saturate(float4(nutrientDeposit, mineralDeposit, toxicVent, rock));
+}
+
+inline float2 environmentalDisturbanceCenter(uint eventEpoch) {
+    float eventIndex = float(eventEpoch + 1u);
+    return fract(float2(
+        sin(eventIndex * 12.9898 + 0.37),
+        sin(eventIndex * 78.233 + 1.91)
+    ) * 43758.5453);
+}
+
+inline float environmentalDisturbance(float2 uv, uint step) {
+    if (step < 24000u) { return 0.0; }
+    uint eventTime = step - 24000u;
+    uint eventPhase = eventTime % 48000u;
+    if (eventPhase >= 1200u) { return 0.0; }
+    uint eventEpoch = eventTime / 48000u;
+    float distance = length(toroidalDelta(
+        uv, environmentalDisturbanceCenter(eventEpoch)
+    ));
+    float spatialEnvelope = 1.0 - smoothstep(0.025, 0.080, distance);
+    float temporalEnvelope = sin(
+        M_PI_F * float(eventPhase) / 1200.0
+    );
+    return spatialEnvelope * temporalEnvelope * temporalEnvelope;
 }
 
 inline float environmentalPhase(float2 uv, float4 geology) {
@@ -1756,7 +1811,12 @@ inline float2 substrateForcing(float2 uv, float4 geology, uint step) {
     ));
     float2 burst = pow(float2(pulseA, pulseB), float2(1.45)) *
         mix(float2(0.20), float2(1.0), float2(envelopeA, envelopeB));
-    return 0.045 + 0.955 * burst;
+    float2 season = 0.70 + 0.30 * float2(
+        sin(2.0 * M_PI_F * (time / 24000.0 + phase)),
+        sin(2.0 * M_PI_F * (time / 24000.0 + phase + 0.43))
+    );
+    float disturbance = environmentalDisturbance(uv, step);
+    return (0.045 + 0.955 * burst) * season * mix(1.0, 0.64, disturbance);
 }
 
 inline float environmentalMechanicalAmplitude(float4 geology) {
@@ -1779,7 +1839,16 @@ inline float2 environmentalMechanicalDrive(
     float envelope = 0.58 + 0.42 * sin(
         2.0 * M_PI_F * (float(step) * frequency * 0.13 + phase * 0.73)
     );
-    return direction * carrier * envelope * environmentalMechanicalAmplitude(geology);
+    float disturbance = environmentalDisturbance(uv, step);
+    uint eventEpoch = step >= 24000u ? (step - 24000u) / 48000u : 0u;
+    float2 eventDelta = toroidalDelta(
+        uv, environmentalDisturbanceCenter(eventEpoch)
+    );
+    float2 eventDirection = length(eventDelta) > 0.000001
+        ? normalize(float2(-eventDelta.y, eventDelta.x) + eventDelta * 0.36)
+        : direction;
+    return direction * carrier * envelope * environmentalMechanicalAmplitude(geology) +
+        eventDirection * disturbance * 0.00012;
 }
 
 kernel void initializeWorld(
@@ -1912,6 +1981,7 @@ kernel void evolveMechanicalField(
     texture2d_array<float, access::read> mechanicalIn [[texture(0)]],
     texture2d_array<float, access::write> mechanicalOut [[texture(1)]],
     texture2d_array<float, access::read> environment [[texture(2)]],
+    texture2d_array<float, access::read> developmentalField [[texture(3)]],
     device atomic_int* forcing [[buffer(0)]],
     constant SimulationUniforms& uniforms [[buffer(1)]],
     uint3 gid [[thread_position_in_grid]]
@@ -1934,12 +2004,22 @@ kernel void evolveMechanicalField(
     ) / float(mechanicalForceScale);
     float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
     float4 geology = environment.read(gid.xy, gid.z);
+    float4 extracellular = developmentalField.read(gid.xy, gid.z);
     float obstacle = smoothstep(0.45, 0.88, geology.w);
-    float stiffness = mix(0.085, 0.118, obstacle);
-    float damping = mix(0.965, 0.84, obstacle);
+    float mineralSupport = smoothstep(0.18, 0.82, geology.y);
+    float matrixSupport = smoothstep(0.025, 0.42, extracellular.z);
+    float stiffness = clamp(
+        0.082 + obstacle * 0.036 + mineralSupport * 0.020 + matrixSupport * 0.026,
+        0.075, 0.158
+    );
+    float damping = clamp(
+        0.968 - obstacle * 0.120 - mineralSupport * 0.035 - matrixSupport * 0.055,
+        0.76, 0.97
+    );
     float2 geologicalDrive = environmentalMechanicalDrive(uv, geology, uniforms.step);
     float2 velocity = (
-        center.zw + displacementLaplacian * stiffness + activeForce * 0.24 +
+        center.zw + displacementLaplacian * stiffness +
+        activeForce * mix(0.24, 0.31, matrixSupport) +
         geologicalDrive
     ) * damping;
     float edgeDistance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
@@ -2026,23 +2106,33 @@ kernel void reactWorld(
     float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
     float2 substratePulse = substrateForcing(uv, geology, uniforms.step);
     float obstacle = smoothstep(0.48, 0.84, geology.w);
-    float permeability = 1.0 - obstacle * 0.88;
+    float mineralPacking = smoothstep(0.20, 0.86, geology.y);
+    float matrixPacking = smoothstep(0.035, 0.58, extracellular.z);
+    float basePermeability = 1.0 - obstacle * 0.88;
+    float permeability = basePermeability *
+        mix(1.0, 0.82, mineralPacking) * mix(1.0, 0.56, matrixPacking);
+    float retention = 1.0 + geology.x * 0.16 + geology.y * 0.24 +
+        matrixPacking * 0.55;
     float resourceA = max(0.0, center.x + uniforms.dt * 0.18 * permeability * resourceLaplacian);
     float resourceB = max(0.0, chemistry.x + uniforms.dt * 0.15 * permeability * chemistryLaplacian.x);
     float detritus = max(0.0, chemistry.y + uniforms.dt * 0.10 * chemistryLaplacian.y);
     float toxin = max(0.0, chemistry.z + uniforms.dt * 0.16 * chemistryLaplacian.z);
     float catalyst = max(0.0, chemistry.w + uniforms.dt * 0.08 * chemistryLaplacian.w);
-    float resourceCapacityA = 0.08 + geology.x * 1.02;
-    float resourceCapacityB = 0.06 + geology.y * 0.98;
+    float resourceCapacityA = (0.08 + geology.x * 1.02) * retention;
+    float resourceCapacityB = (0.06 + geology.y * 0.98) * retention;
+    float sourceAccess = permeability * mix(1.0, 1.32, saturate(retention - 1.0));
     resourceA += uniforms.dt * uniforms.resourceFlux * substratePulse.x *
-        (0.00003 + geology.x * 0.0068) * permeability *
+        (0.00003 + geology.x * 0.0068) * sourceAccess *
         max(resourceCapacityA - resourceA, 0.0);
     resourceB += uniforms.dt * uniforms.resourceFlux * substratePulse.y *
-        (0.000025 + geology.y * 0.0062) * permeability *
+        (0.000025 + geology.y * 0.0062) * sourceAccess *
         max(resourceCapacityB - resourceB, 0.0);
-    toxin += uniforms.dt * geology.z * 0.0045;
-    toxin *= 1.0 - uniforms.dt * (0.052 + (1.0 - geology.z) * 0.040);
-    catalyst *= 1.0 - uniforms.dt * 0.032;
+    toxin += uniforms.dt * (
+        geology.z * 0.0045 + environmentalDisturbance(uv, uniforms.step) * 0.00065
+    );
+    toxin *= 1.0 - uniforms.dt *
+        (0.052 + (1.0 - geology.z) * 0.040) * mix(1.0, 0.45, matrixPacking);
+    catalyst *= 1.0 - uniforms.dt * 0.032 / retention;
 
     uint energyTileBase = ((layer * uniforms.height + gid.y) * uniforms.width + gid.x) *
         worldExchangeChannelCount;

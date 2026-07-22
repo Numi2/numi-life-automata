@@ -4183,6 +4183,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setTexture(mechanicalState, index: 0)
         encoder.setTexture(reactionMechanicalState, index: 1)
         encoder.setTexture(environmentState, index: 2)
+        encoder.setTexture(developmentalField, index: 3)
         encoder.setBuffer(mechanicalForcing, offset: 0, index: 0)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 1)
         dispatchWorlds(encoder, pipeline: evolveMechanicalPipeline)
