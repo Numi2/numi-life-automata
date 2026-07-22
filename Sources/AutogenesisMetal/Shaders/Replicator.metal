@@ -5622,12 +5622,13 @@ kernel void evolveOrganismCells(
         0.0, 1.0
     );
     float mechanicalCalciumGate = saturate(
-        abs(resonantResponse) * 0.72 + fieldStrain * 0.30 +
-        saturate(cell.membrane.w * 8.0) * 0.18
+        abs(resonantResponse) * 0.58 + fieldStrain * 0.26 +
+        saturate(junctionStrainMemory * 3.2) * 0.34 +
+        saturate(cell.membrane.w * 8.0) * 0.14
     ) * signalingAvailability * saturate(uniforms.intervention.x) *
         development.mechanochemistryA.x;
     float calcium = clamp(
-        calciumWithoutMechanical + mechanicalCalciumGate * (1.0 - previousCalcium) * 0.026,
+        calciumWithoutMechanical + mechanicalCalciumGate * (1.0 - previousCalcium) * 0.032,
         0.0, 1.0
     );
     float mechanicsToCalciumEffect = max(calcium - calciumWithoutMechanical, 0.0);
@@ -5642,12 +5643,12 @@ kernel void evolveOrganismCells(
     float calciumERKDrive = smoothstep(0.08, 0.46, calcium) * (1.0 - previousRefractory) *
         development.mechanochemistryA.z;
     float erk = clamp(
-        erkWithoutCalcium + calciumERKDrive * (1.0 - previousERK) * 0.020,
+        erkWithoutCalcium + calciumERKDrive * (1.0 - previousERK) * 0.026,
         0.0, 1.0
     );
     float calciumToERKEffect = max(erk - erkWithoutCalcium, 0.0);
     float refractory = clamp(
-        previousRefractory + erk * 0.0075 - previousRefractory * 0.0038 *
+        previousRefractory + erk * 0.0068 - previousRefractory * 0.0046 *
             development.mechanochemistryA.w,
         0.0, 1.0
     );
@@ -5674,7 +5675,7 @@ kernel void evolveOrganismCells(
     float contractionPulse = pow(saturate(0.5 + 0.5 * sin(oscillatorPhase * 2.0 * M_PI_F)), 3.0);
     float contractility = mix(cell.mechanics.x,
         contractionPulse * cell.phenotype.y * saturate(cell.physiology.x) *
-        (0.72 + max(voltage, 0.0) * 0.20), 0.11);
+        (0.72 + max(voltage, 0.0) * 0.20) * (0.68 + erk * 0.62), 0.11);
 
     float membraneExposure = saturate(cell.tissueGeometry.z);
     float uptakePotential = 0.00125 * (
@@ -6140,7 +6141,7 @@ kernel void evolveOrganismCells(
     float tractionGain = development.mechanochemistryB.y;
     float tractionActivation = exposure * motilityProgram *
         mix(0.22, 1.0, metabolicReadiness) *
-        (0.20 + erk * 0.80);
+        (0.16 + erk * 1.05);
     float2 activeTraction = tractionDirection * tractionActivation * tractionGain *
         (0.000045 + cell.phenotype.y * 0.000105) *
         (0.46 + adhesiveProgram * 0.54) *
@@ -6157,6 +6158,7 @@ kernel void evolveOrganismCells(
         (1.0 - adhesiveProgram) * smoothstep(0.16, 0.38, atp);
     activeTraction += boundaryNormal * propaguleDrive *
         (0.00018 + detachmentRelease * 0.00012) * structuralDrag;
+    activeTraction *= expenseScale;
     mechanicalForce += activeTraction + barrierForceLocal;
     mechanicalForce += float2(
         dot(localMechanical.xy, heading),
@@ -6206,8 +6208,11 @@ kernel void evolveOrganismCells(
     float2 localContractionDirection = exposure > 0.05
         ? -boundaryNormal
         : (nearestDistance < 10.0 ? nearestContact : developmentalPolarity);
-    float2 worldContraction = (heading * localContractionDirection.x + lateral * localContractionDirection.y) *
-        contractility * membraneIntegrity * 0.0065;
+    float2 worldActiveTraction = rotateTissueToWorld(activeTraction, agent);
+    float2 worldContraction =
+        (heading * localContractionDirection.x + lateral * localContractionDirection.y) *
+            contractility * membraneIntegrity * 0.0082 * expenseScale +
+        worldActiveTraction * 2.4;
     uint forcingIndex = (coordinate.y * uniforms.width + coordinate.x) * 2u;
     int forceX = int(clamp(worldContraction.x * float(mechanicalForceScale), -8192.0, 8192.0));
     int forceY = int(clamp(worldContraction.y * float(mechanicalForceScale), -8192.0, 8192.0));
@@ -7230,7 +7235,7 @@ kernel void resolveMembraneContacts(
                                     float materialStrain = localCenterDistance -
                                         updatedRemodeling.x;
                                     updatedRemodeling.y = mix(
-                                        updatedRemodeling.y, materialStrain, 0.075
+                                        updatedRemodeling.y, materialStrain, 0.045
                                     );
                                     updatedRemodeling.z = mix(
                                         updatedRemodeling.z,

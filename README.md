@@ -542,7 +542,7 @@ The phase update combines an inherited intrinsic frequency, ATP modulation, volt
 \sin\left(2\pi(\phi_j-\phi_i)-\delta_{ij}\right)+I_i^{phase}\right].
 ```
 
-`K_i`, `w_ij`, and the phase lag `delta_ij` depend on sender contractility, receiver adhesion, morphogen asymmetry, and uptake phenotype. The coupling is nonreciprocal when sender and receiver phenotypes differ, following the general sender/receiver asymmetry measured in embryonic oscillator ensembles [15]. Founder phases and frequencies are dispersed, so phase coherence must develop dynamically and can be reduced by division, mutation, metabolic load, or mechanical perturbation. This is a reduced excitable-oscillator model motivated by tissue-scale voltage/mechanics coupling [13], not a calibrated ion-channel model.
+`K_i`, `w_ij`, and the phase lag `delta_ij` depend on sender contractility, receiver adhesion, morphogen asymmetry, and uptake phenotype. The coupling is nonreciprocal when sender and receiver phenotypes differ, following the general sender/receiver asymmetry measured in embryonic oscillator ensembles [15]. Founder phases and frequencies are dispersed, so phase coherence must develop dynamically and can be reduced by division, mutation, metabolic load, or mechanical perturbation. Persistent junction strain contributes to the mechanics-to-Ca* gate, Ca*-driven ERK* modulates paid traction, and that traction is deposited into the next mechanical-field step. This is a reduced excitable-oscillator model motivated by tissue-scale voltage/mechanics coupling [13], not a calibrated ion-channel model.
 
 ### Contact-propagated mechanochemical signaling
 
