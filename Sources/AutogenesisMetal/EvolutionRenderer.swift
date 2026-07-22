@@ -4001,6 +4001,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellEnergyExchange, offset: 0, index: 20)
         encoder.setBuffer(energyAudit, offset: 0, index: 21)
         encoder.setBuffer(cellJunctions, offset: 0, index: 22)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 23)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
         encoder.setTexture(environmentState, index: 2)
@@ -4010,7 +4011,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         dispatchCells(encoder, pipeline: evolveCellPipeline)
         encoder.memoryBarrier(resources: [
             reactionCellState, cellOccupancy, cellIdentities, programSlots,
-            identityCounters, mechanicalForcing, cellEnergyExchange, energyAudit
+            identityCounters, mechanicalForcing, cellEnergyExchange, energyAudit,
+            contactWorkState
         ])
         swap(&cellState, &reactionCellState)
 
@@ -4169,13 +4171,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(activeComponentIndices, offset: 0, index: 21)
         encoder.setBuffer(activeComponentCount, offset: 0, index: 22)
         encoder.setBuffer(cellJunctions, offset: 0, index: 23)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 24)
         dispatchActiveComponents(encoder, pipeline: divideAndReduceCellPipeline)
         encoder.memoryBarrier(resources: [
             agentState, cellState, cellOccupancy, cellIdentities, cellAggregates,
             ownerCellHeads, ownerCellNext, regulatoryStates, membraneVertices,
             identityCounters, programInteractions, programSlots, developmentalGenomes,
             regulatoryNodes, regulatoryEdges, resonanceGenomes, heritablePrograms,
-            lineageEvents, cellJunctions
+            lineageEvents, cellJunctions, contactWorkState
         ])
         encoder.writeTimestamp(ending: "division + reduction")
 

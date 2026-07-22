@@ -4950,8 +4950,13 @@ kernel void assignCellComponentOwners(
             cellIndex = following;
             continue;
         }
-        if (sourceProgramCount >= maxProgramsPerPropagule) { return; }
-        componentProgramSources[mappingBase + sourceProgramCount++] = sourceProgram;
+        // The mapping cache is bounded, but an already-valid source program
+        // does not need cloning to remain attached to its cell. Keep scanning
+        // when more than sixteen programs coexist; unmapped cells retain their
+        // generation-valid program identity during coordinate reassignment.
+        if (sourceProgramCount < maxProgramsPerPropagule) {
+            componentProgramSources[mappingBase + sourceProgramCount++] = sourceProgram;
+        }
         cellIndex = following;
     }
 
@@ -5337,6 +5342,7 @@ kernel void evolveOrganismCells(
     device atomic_uint* cellEnergyExchange [[buffer(20)]],
     device atomic_int* energyAudit [[buffer(21)]],
     device CellJunctionState* cellJunctions [[buffer(22)]],
+    device atomic_uint* contactWorkState [[buffer(23)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     texture2d_array<float, access::read> state [[texture(0)]],
@@ -5364,6 +5370,7 @@ kernel void evolveOrganismCells(
                 cellIdentity.programIndex, cellIdentity.programGeneration
             );
             atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
+            atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
             cellIdentity.owner = maxAgentCount;
             cellIdentity.programIndex = maxHeritableProgramCount;
             cellIdentity.componentRoot = emptySpatialHashEntry;
@@ -5383,6 +5390,7 @@ kernel void evolveOrganismCells(
             ownerCellHeads, ownerCellNext, owner, gid, emptySpatialHashEntry
         );
         atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
+        atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
         cellIdentity.owner = maxAgentCount;
         cellIdentity.programIndex = maxHeritableProgramCount;
         cellIdentity.componentRoot = emptySpatialHashEntry;
@@ -6335,6 +6343,7 @@ kernel void evolveOrganismCells(
             programSlots, identityCounters, programIndex, cellIdentity.programGeneration
         );
         atomic_store_explicit(&cellOccupancy[gid], 0u, memory_order_relaxed);
+        atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
         cellIdentity.owner = maxAgentCount;
         cellIdentity.programIndex = maxHeritableProgramCount;
         cellIdentity.componentRoot = emptySpatialHashEntry;
@@ -6787,7 +6796,9 @@ kernel void resetMembraneContactWork(
     if (gid != 0u) { return; }
     uint livingCount = atomic_load_explicit(activeCellCount, memory_order_relaxed);
     uint previousCount = atomic_load_explicit(&contactWorkState[3], memory_order_relaxed);
-    bool reconcile = livingCount != previousCount ||
+    bool reconcile = atomic_load_explicit(
+        &contactWorkState[2], memory_order_relaxed
+    ) != 0u || livingCount != previousCount ||
         uniforms.step % componentTopologyReconciliationStride == 0u;
     atomic_store_explicit(&contactWorkState[0], 0u, memory_order_relaxed);
     atomic_store_explicit(&contactWorkState[1], 0u, memory_order_relaxed);
@@ -7994,6 +8005,7 @@ kernel void divideAndReduceOrganismCells(
     device const uint* activeComponents [[buffer(21)]],
     device const atomic_uint* activeComponentCount [[buffer(22)]],
     device CellJunctionState* cellJunctions [[buffer(23)]],
+    device atomic_uint* contactWorkState [[buffer(24)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
     if (compactIndex >= atomic_load_explicit(activeComponentCount, memory_order_relaxed)) { return; }
@@ -8436,6 +8448,7 @@ kernel void divideAndReduceOrganismCells(
                 agent.componentFlags |= componentRegeneratedFlag;
             }
             agents[owner] = agent;
+            atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
             HeritableProgram childProgram = heritablePrograms[childIdentity.programIndex];
             DevelopmentalGenome childDevelopment =
                 developmentalGenomes[childIdentity.programIndex];
