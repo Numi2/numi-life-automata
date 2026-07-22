@@ -476,6 +476,15 @@ struct HeadlessExperimentResult {
     let componentSnapshots: [ExperimentComponentSnapshot]
 }
 
+struct HeadlessResultRetention: OptionSet, Sendable {
+    let rawValue: UInt8
+
+    static let samples = Self(rawValue: 1 << 0)
+    static let events = Self(rawValue: 1 << 1)
+    static let componentSnapshots = Self(rawValue: 1 << 2)
+    static let all: Self = [.samples, .events, .componentSnapshots]
+}
+
 private struct ExperimentEnvelope<Payload: Encodable>: Encodable {
     let record: String
     let payload: Payload
@@ -544,7 +553,8 @@ enum HeadlessExperimentCLI {
         let journal = try ExperimentJournal(path: configuration.outputPath)
         let result = try renderer.runHeadlessExperiment(
             configuration: configuration,
-            journal: journal
+            journal: journal,
+            resultRetention: []
         )
         let summary = result.summary
         print(

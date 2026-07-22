@@ -494,6 +494,40 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func repeatedHeadlessRunsReuseReadbacksAndRetainOnlyRequiredResults() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let headless = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/HeadlessExperiment.swift"),
+            encoding: .utf8
+        )
+        let causal = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/CausalExperiment.swift"),
+            encoding: .utf8
+        )
+        let regeneration = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/RegenerationExperiment.swift"),
+            encoding: .utf8
+        )
+
+        #expect(renderer.contains("private var headlessReadbackBuffers: HeadlessReadbackBuffers?"))
+        #expect(renderer.contains("if let headlessReadbackBuffers { return headlessReadbackBuffers }"))
+        #expect(renderer.contains("headlessReadbackBuffers = readback"))
+        #expect(renderer.contains("resultRetention.contains(.samples)"))
+        #expect(renderer.contains("resultRetention.contains(.events)"))
+        #expect(renderer.contains("resultRetention.contains(.componentSnapshots)"))
+        #expect(headless.contains("resultRetention: []"))
+        #expect(causal.contains("resultRetention: []"))
+        #expect(regeneration.contains("resultRetention: .samples"))
+    }
+
+    @Test
     func speedSelectorAvoidsTheLeakingMacOSSegmentedPickerAdapter() throws {
         let content = try String(
             contentsOf: repositoryRoot

@@ -1238,6 +1238,8 @@ The executable can also be invoked directly after a build:
 .build/release/NumiAutomata experiment --steps 1000000 --seed 7
 ```
 
+Headless records stream directly to JSONL. The standalone runner retains only its final and intervention samples, replicated protocols retain only the trajectories they consume, and one registered Metal readback set is reused across sequential runs so memory does not grow with replicate count.
+
 Repeat `--founder X,Y` to introduce distinct founders at normalized coordinates for a controlled contact experiment. Founder placement does not force an outcome: membrane contact, reciprocal recognition, nonaggression, bilateral fusion investment, junction maturation, metabolic competence, cell division, and crossover remain causal requirements.
 
 The reproducible crossbreeding assay supplies sixteen preselected but otherwise ordinary founder pairs and requires the same invariant checks as a normal run:

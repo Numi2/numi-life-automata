@@ -329,6 +329,7 @@ enum PairedRegenerationExperimentCLI {
                     configuration, seed: seed, mode: .shamRegenerativeTarget
                 ),
                 journal: discardedJournal,
+                resultRetention: .samples,
                 reportProgress: false
             )
             let treatmentResult = try renderer.runHeadlessExperiment(
@@ -336,6 +337,7 @@ enum PairedRegenerationExperimentCLI {
                     configuration, seed: seed, mode: .targetedRegenerativeWound
                 ),
                 journal: discardedJournal,
+                resultRetention: .samples,
                 reportProgress: false
             )
             guard let controlBaselineSample = controlResult.interventionSample,

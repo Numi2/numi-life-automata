@@ -283,6 +283,7 @@ enum LifecycleExperimentCLI {
                     configuration, seed: seed, mode: .shamRegenerativeTarget
                 ),
                 journal: discardedJournal,
+                resultRetention: .samples,
                 reportProgress: false
             )
             let treatment = try renderer.runHeadlessExperiment(
@@ -290,6 +291,7 @@ enum LifecycleExperimentCLI {
                     configuration, seed: seed, mode: .targetedRegenerativeWound
                 ),
                 journal: discardedJournal,
+                resultRetention: .all,
                 reportProgress: false
             )
             guard let controlBaselineSample = control.interventionSample,

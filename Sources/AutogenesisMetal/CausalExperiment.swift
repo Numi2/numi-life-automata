@@ -332,6 +332,7 @@ enum PairedCausalExperimentCLI {
                     postInterventionGain: 1
                 ),
                 journal: discardedJournal,
+                resultRetention: [],
                 reportProgress: false
             )
             let treatmentResult = try renderer.runHeadlessExperiment(
@@ -341,6 +342,7 @@ enum PairedCausalExperimentCLI {
                     postInterventionGain: 0
                 ),
                 journal: discardedJournal,
+                resultRetention: [],
                 reportProgress: false
             )
             guard let controlFinal = controlResult.summary.finalSample,

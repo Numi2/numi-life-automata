@@ -75,6 +75,7 @@ extension EvolutionRenderer {
     func runHeadlessExperiment(
         configuration: HeadlessExperimentConfiguration,
         journal: ExperimentJournal,
+        resultRetention: HeadlessResultRetention,
         reportProgress: Bool = true
     ) throws -> HeadlessExperimentResult {
         var runSettings = settings
@@ -292,11 +293,14 @@ extension EvolutionRenderer {
                     latestObserverResult: &latestObserverResult,
                     componentMorphologyArchive: &componentMorphologyArchive,
                     componentMorphologyOrder: &componentMorphologyOrder,
+                    resultRetention: resultRetention,
                     recordedEvents: &recordedEvents,
                     recordedComponentSnapshots: &recordedComponentSnapshots
                 )
                 if let latestSample {
-                    recordedSamples.append(latestSample)
+                    if resultRetention.contains(.samples) {
+                        recordedSamples.append(latestSample)
+                    }
                     maximumObservedComponentDescentDepth = max(
                         maximumObservedComponentDescentDepth,
                         latestSample.maximumComponentDescentDepth
@@ -372,6 +376,7 @@ extension EvolutionRenderer {
                         latestObserverResult: &latestObserverResult,
                         componentMorphologyArchive: &componentMorphologyArchive,
                         componentMorphologyOrder: &componentMorphologyOrder,
+                        resultRetention: resultRetention,
                         recordedEvents: &recordedEvents,
                         recordedComponentSnapshots: &recordedComponentSnapshots
                     )
@@ -498,6 +503,8 @@ extension EvolutionRenderer {
     }
 
     private func makeHeadlessReadbackBuffers() throws -> HeadlessReadbackBuffers {
+        if let headlessReadbackBuffers { return headlessReadbackBuffers }
+
         func sharedCopy(of source: MTLBuffer, label: String) throws -> MTLBuffer {
             guard let buffer = device.makeBuffer(
                 length: source.length,
@@ -545,6 +552,7 @@ extension EvolutionRenderer {
             readback.identityCounters, readback.lineageEvents, readback.energyAudit,
             readback.invariantState, readback.qualificationTargetMeasurement
         ])
+        headlessReadbackBuffers = readback
         return readback
     }
 
@@ -715,6 +723,7 @@ extension EvolutionRenderer {
         latestObserverResult: inout IndividualityObserverResult?,
         componentMorphologyArchive: inout [UInt32: MorphologyDescriptor],
         componentMorphologyOrder: inout [UInt32],
+        resultRetention: HeadlessResultRetention,
         recordedEvents: inout [ExperimentEvent],
         recordedComponentSnapshots: inout [ExperimentComponentSnapshot]
     ) throws -> ExperimentSample {
@@ -808,7 +817,9 @@ extension EvolutionRenderer {
                         record.morphology.z, record.morphology.w
                     ]
                 )
-                recordedEvents.append(event)
+                if resultRetention.contains(.events) {
+                    recordedEvents.append(event)
+                }
                 try journal.append("event", event)
             }
             lastEventSequence = writeSequence
@@ -972,24 +983,26 @@ extension EvolutionRenderer {
             )), 0.25)
         }
 
-        for owner in living {
-            let agent = agents[owner]
-            let aggregate = aggregates[owner]
-            recordedComponentSnapshots.append(ExperimentComponentSnapshot(
-                step: totalSteps,
-                birthID: agent.birthID,
-                parentBirthID: agent.parentBirthID == .max ? nil : agent.parentBirthID,
-                generation: agent.generation,
-                cellCount: max(Int(aggregate.physiology.x.rounded()), 0),
-                atp: Double(max(aggregate.physiology.y, 0)),
-                integrity: Double(max(aggregate.physiology.z, 0)),
-                stress: Double(max(aggregate.physiology.w, 0)),
-                shapeIndex: Double(max(aggregate.shape.z, 0)),
-                regeneratedDevelopment: agent.componentFlags & 2 != 0,
-                challenged: agent.componentFlags & 8 != 0,
-                homeostatic: agent.componentFlags & 4 != 0,
-                morphology: morphologyDescriptor(owner: owner).values
-            ))
+        if resultRetention.contains(.componentSnapshots) {
+            for owner in living {
+                let agent = agents[owner]
+                let aggregate = aggregates[owner]
+                recordedComponentSnapshots.append(ExperimentComponentSnapshot(
+                    step: totalSteps,
+                    birthID: agent.birthID,
+                    parentBirthID: agent.parentBirthID == .max ? nil : agent.parentBirthID,
+                    generation: agent.generation,
+                    cellCount: max(Int(aggregate.physiology.x.rounded()), 0),
+                    atp: Double(max(aggregate.physiology.y, 0)),
+                    integrity: Double(max(aggregate.physiology.z, 0)),
+                    stress: Double(max(aggregate.physiology.w, 0)),
+                    shapeIndex: Double(max(aggregate.shape.z, 0)),
+                    regeneratedDevelopment: agent.componentFlags & 2 != 0,
+                    challenged: agent.componentFlags & 8 != 0,
+                    homeostatic: agent.componentFlags & 4 != 0,
+                    morphology: morphologyDescriptor(owner: owner).values
+                ))
+            }
         }
 
         var observerCandidates: [IndividualityCandidate] = []
@@ -2153,6 +2166,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let lineageEventObservationBuffers: [MTLBuffer]
     private let identityCounterObservationBuffers: [MTLBuffer]
     private let metricReadbackSlots: [MetricReadbackSlot]
+    private var headlessReadbackBuffers: HeadlessReadbackBuffers?
     private var recoveryCheckpointBanks: [RecoveryCheckpointBank] = []
     private let stateLock = NSLock()
     private let agentObservationRingState = AgentObservationRingState(slotCount: agentObservationRingSize)
