@@ -465,7 +465,7 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func transientRenderMemoryIsHeapBackedBoundedAndCompletionRetired() throws {
+    func transientRenderMemoryUsesPerSubmissionResidencyAndQueueBarriers() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
@@ -481,7 +481,11 @@ struct ArchitectureBoundaryTests {
         #expect(renderer.contains("renderTargetCache.count >= 2"))
         #expect(renderer.contains("commandQueue.unfinishedSubmissionCount > 1"))
         #expect(renderer.contains("device.makeHeap(descriptor: heapDescriptor)"))
-        #expect(renderer.contains("replaceDynamicAllocations(renderTargetCache.map(\\.heap))"))
+        #expect(renderer.contains("residencySet.addAllocation(heap)"))
+        #expect(renderer.contains("commandBuffer.useResidencySet(renderTargets.residencySet)"))
+        #expect(!execution.contains("dynamicResidencySet"))
+        #expect(execution.contains("commandBuffer.useResidencySet(residencySet)"))
+        #expect(execution.contains("? [.dispatch, .blit, .vertex, .mesh, .fragment]"))
         #expect(execution.contains("retainedResources.removeAll(keepingCapacity: false)"))
         #expect(execution.contains("drawable = nil"))
     }

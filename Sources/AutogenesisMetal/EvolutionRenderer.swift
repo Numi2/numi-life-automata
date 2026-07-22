@@ -1184,17 +1184,20 @@ private struct PostProcessUniforms {
 private final class RenderTargetSet {
     let size: MTLSize
     let heap: any MTLHeap
+    let residencySet: MTLResidencySet
     let sceneColor: MTLTexture
     let bloomTexture: MTLTexture
 
     init(
         size: MTLSize,
         heap: any MTLHeap,
+        residencySet: MTLResidencySet,
         sceneColor: MTLTexture,
         bloomTexture: MTLTexture
     ) {
         self.size = size
         self.heap = heap
+        self.residencySet = residencySet
         self.sceneColor = sceneColor
         self.bloomTexture = bloomTexture
     }
@@ -4391,6 +4394,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         let sceneColor = renderTargets.sceneColor
         let bloomTextureA = renderTargets.bloomTexture
+        commandBuffer.useResidencySet(renderTargets.residencySet)
         commandBuffer.retainResources([
             drawableTexture as AnyObject,
             renderTargets.heap as AnyObject,
@@ -4630,17 +4634,29 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               let nextBloomA = heap.makeTexture(descriptor: bloomDescriptor) else {
             return nil
         }
+        let residencyDescriptor = MTLResidencySetDescriptor()
+        residencyDescriptor.label = "Render target residency \(width)x\(height)"
+        residencyDescriptor.initialCapacity = 1
+        guard let residencySet = try? device.makeResidencySet(descriptor: residencyDescriptor) else {
+            return nil
+        }
+        residencySet.addAllocation(heap)
+        residencySet.commit()
+        residencySet.requestResidency()
         heap.label = "Bounded transient render targets \(width)x\(height)"
         nextScene.label = "Linear HDR simulation scene"
         nextBloomA.label = "Single-pass quarter-resolution bloom"
         let targets = RenderTargetSet(
             size: size,
             heap: heap,
+            residencySet: residencySet,
             sceneColor: nextScene,
             bloomTexture: nextBloomA
         )
         renderTargetCache.append(targets)
-        commandQueue.replaceDynamicAllocations(renderTargetCache.map(\.heap))
+        commandQueue.reportTransientResidentBytes(
+            renderTargetCache.reduce(UInt64(0)) { $0 + UInt64($1.heap.size) }
+        )
         return targets
     }
 

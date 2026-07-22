@@ -387,7 +387,6 @@ final class Metal4ExecutionContext: @unchecked Sendable {
     let device: MTLDevice
     private(set) var commandQueue: MTL4CommandQueue
     private(set) var stableResidencySet: MTLResidencySet
-    private(set) var dynamicResidencySet: MTLResidencySet
     private(set) var slots: [Metal4SubmissionSlot]
     private var presentationResidencySets: [MTLResidencySet] = []
     private var registeredStableAllocations: [any MTLAllocation] = []
@@ -396,6 +395,7 @@ final class Metal4ExecutionContext: @unchecked Sendable {
     private var nextSlotIndex = 0
     private var maximumObservedInFlight = 0
     private var maximumUniformArenaBytes = 0
+    private var transientResidentBytes: UInt64 = 0
     private var claimedDrawableIDs: Set<ObjectIdentifier> = []
 
     init(device: MTLDevice) throws {
@@ -410,11 +410,6 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         residencyDescriptor.initialCapacity = 192
         stableResidencySet = try device.makeResidencySet(descriptor: residencyDescriptor)
 
-        let dynamicDescriptor = MTLResidencySetDescriptor()
-        dynamicDescriptor.label = "Numi dynamic render residency"
-        dynamicDescriptor.initialCapacity = 8
-        dynamicResidencySet = try device.makeResidencySet(descriptor: dynamicDescriptor)
-
         slots = try (0..<Self.maximumInFlightSubmissions).map {
             try Metal4SubmissionSlot(index: $0, device: device)
         }
@@ -424,13 +419,12 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         stableResidencySet.commit()
         stableResidencySet.requestResidency()
         commandQueue.addResidencySet(stableResidencySet)
-        dynamicResidencySet.commit()
-        dynamicResidencySet.requestResidency()
-        commandQueue.addResidencySet(dynamicResidencySet)
     }
 
     var residentBytes: UInt64 {
-        stableResidencySet.allocatedSize + dynamicResidencySet.allocatedSize
+        lock.lock()
+        defer { lock.unlock() }
+        return stableResidencySet.allocatedSize + transientResidentBytes
     }
 
     var unfinishedSubmissionCount: Int {
@@ -458,12 +452,10 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         stableResidencySet.commit()
     }
 
-    func replaceDynamicAllocations(_ allocations: [any MTLAllocation]) {
-        dynamicResidencySet.removeAllAllocations()
-        if !allocations.isEmpty {
-            dynamicResidencySet.addAllocations(allocations)
-        }
-        dynamicResidencySet.commit()
+    func reportTransientResidentBytes(_ bytes: UInt64) {
+        lock.lock()
+        transientResidentBytes = bytes
+        lock.unlock()
     }
 
     func registerPresentationResidency(_ residencySet: MTLResidencySet) {
@@ -626,7 +618,6 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         nextStableResidencySet.commit()
         nextStableResidencySet.requestResidency()
         nextQueue.addResidencySet(nextStableResidencySet)
-        nextQueue.addResidencySet(dynamicResidencySet)
         for residencySet in presentationResidencySets {
             nextQueue.addResidencySet(residencySet)
         }
@@ -746,13 +737,13 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
             return nil
         }
-        if !priorEncoderStages.isEmpty {
-            encoder.barrier(
-                afterQueueStages: priorEncoderStages,
-                beforeStages: [.vertex, .mesh, .fragment],
-                visibilityOptions: .device
-            )
-        }
+        encoder.barrier(
+            afterQueueStages: priorEncoderStages.isEmpty
+                ? [.dispatch, .blit, .vertex, .mesh, .fragment]
+                : priorEncoderStages,
+            beforeStages: [.vertex, .mesh, .fragment],
+            visibilityOptions: .device
+        )
         priorEncoderStages = [.vertex, .mesh, .fragment]
         let tables = slot.nextRenderArgumentTables()
         return Metal4RenderCommandEncoderAdapter(
@@ -781,6 +772,11 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
 
     func retainResources(_ resources: [AnyObject]) {
         retainedResources.append(contentsOf: resources)
+    }
+
+    func useResidencySet(_ residencySet: MTLResidencySet) {
+        commandBuffer.useResidencySet(residencySet)
+        retainedResources.append(residencySet)
     }
 
     func enablePhaseTiming() {
@@ -889,7 +885,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
         encoder.barrier(
             afterQueueStages: priorEncoderStages.isEmpty
-                ? [.dispatch, .blit, .vertex, .fragment]
+                ? [.dispatch, .blit, .vertex, .mesh, .fragment]
                 : priorEncoderStages,
             beforeStages: [.dispatch, .blit],
             visibilityOptions: .device
