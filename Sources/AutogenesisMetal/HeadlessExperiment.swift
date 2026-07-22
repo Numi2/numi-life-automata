@@ -58,6 +58,27 @@ struct EnvironmentalScaffoldSchedule: Codable, Sendable, Equatable {
     }
 }
 
+enum DamageChallengeMode: String, Codable, Sendable, Equatable {
+    case ambient
+    case disabled
+    case shamRegenerativeTarget
+    case targetedRegenerativeWound
+}
+
+struct DamageChallengeSchedule: Codable, Sendable, Equatable {
+    var mode: DamageChallengeMode = .ambient
+    /// Last undamaged baseline step. Target selection occurs at this step and
+    /// treatment damage is applied on the following step.
+    var interventionStep: UInt64?
+}
+
+struct InitialFounder: Codable, Sendable, Equatable {
+    let x: Float
+    let y: Float
+
+    var position: SIMD2<Float> { SIMD2(x, y) }
+}
+
 struct HeadlessExperimentConfiguration: Codable, Sendable {
     var seed: UInt32 = 1
     var steps: UInt64 = 1_000_000
@@ -69,10 +90,13 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
     var allowConcurrent = false
     var mechanosensing = MechanosensingSchedule()
     var environmentalScaffold = EnvironmentalScaffoldSchedule()
+    var damageChallenge = DamageChallengeSchedule()
+    var initialFounders: [InitialFounder] = []
     var outputPath = ""
 
     var interventionStep: UInt64? {
-        mechanosensing.interventionStep ?? environmentalScaffold.interventionStep
+        mechanosensing.interventionStep ?? environmentalScaffold.interventionStep ??
+            damageChallenge.interventionStep
     }
 
     static let usage = """
@@ -91,6 +115,7 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
       --post-mechanosensing-gain X  Gain after --intervention-step
       --post-resource-flux X  Resource replenishment after --intervention-step
       --post-barrier-gain X   Mechanical barrier gain after --intervention-step
+      --founder X,Y          Introduce a founder at normalized coordinates; repeatable
       --output PATH         JSONL output path
       --no-strict           Record invariant failures without stopping
       --allow-concurrent    Bypass the exclusive GPU experiment lock
@@ -203,6 +228,21 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
                     )
                 }
                 configuration.environmentalScaffold.postInterventionBarrierGain = value
+            case "--founder":
+                let coordinate = try value(after: argument)
+                let fields = coordinate.split(
+                    separator: ",",
+                    omittingEmptySubsequences: false
+                )
+                guard fields.count == 2,
+                      let x = Float(fields[0]), x.isFinite,
+                      let y = Float(fields[1]), y.isFinite,
+                      (0...1).contains(x), (0...1).contains(y) else {
+                    throw HeadlessExperimentError.invalidArgument(
+                        "--founder must be X,Y with both coordinates in 0...1."
+                    )
+                }
+                configuration.initialFounders.append(InitialFounder(x: x, y: y))
             case "--output":
                 configuration.outputPath = try value(after: argument)
             case "--no-strict":
@@ -250,7 +290,7 @@ struct ExperimentHeader: Codable {
     let configuration: HeadlessExperimentConfiguration
 }
 
-struct ExperimentEvent: Codable {
+struct ExperimentEvent: Codable, Sendable, Equatable {
     let sequence: UInt32
     let type: String
     let step: UInt32
@@ -265,6 +305,22 @@ struct ExperimentEvent: Codable {
     let resonanceFrequency: Float
     let energy: Float
     let morphology: [Float]
+}
+
+struct ExperimentComponentSnapshot: Codable, Sendable, Equatable {
+    let step: UInt64
+    let birthID: UInt32
+    let parentBirthID: UInt32?
+    let generation: UInt32
+    let cellCount: Int
+    let atp: Double
+    let integrity: Double
+    let stress: Double
+    let shapeIndex: Double
+    let regeneratedDevelopment: Bool
+    let challenged: Bool
+    let homeostatic: Bool
+    let morphology: [Double]
 }
 
 struct ExperimentInvariantReport: Codable, Sendable {
@@ -294,6 +350,20 @@ struct ExperimentSample: Codable {
     let maximumProgramReplicationGeneration: UInt32
     let largestTissueCellCount: Int
     let livingDescendants: Int
+    let regenerativeDescendants: Int
+    let challengedDescendants: Int
+    let homeostaticDescendants: Int
+    let qualificationTargetPresent: Bool
+    let qualificationTargetBirthID: UInt32?
+    let qualificationTargetCellCount: Int
+    let qualificationTargetATP: Double
+    let qualificationTargetIntegrity: Double
+    let qualificationTargetStress: Double
+    let qualificationTargetShapeIndex: Double
+    let qualificationTargetMatrix: Double
+    let qualificationTargetWoundCue: Double
+    let qualificationTargetChallenged: Bool
+    let qualificationTargetHomeostatic: Bool
     let descendantCellCount: Int
     let largestDescendantTissueCellCount: Int
     let meanDescendantCellATP: Double
@@ -310,6 +380,7 @@ struct ExperimentSample: Codable {
     let fusions: UInt64
     let cellDivisions: UInt64
     let programMutations: UInt64
+    let crossbreedings: UInt64
     let crossComponentContactSamples: UInt32
     let membraneBreachSamples: UInt32
     let resistedAttackSamples: UInt32
@@ -318,6 +389,12 @@ struct ExperimentSample: Codable {
     let deflectedAttackImpulse: Double
     let fusionContactSamples: UInt32
     let successfulFusionContactSamples: UInt32
+    let fusionEligibleContactSamples: UInt32
+    let maximumFusionDrive: Double
+    let distinctProgramSuccessfulFusionSamples: UInt32
+    let crossbreedingCandidateDivisions: UInt32
+    let crossbreedingStochasticAttempts: UInt32
+    let maximumCrossbreedingScore: Double
     let resolvedIndividuals: Int
     let resolvedCellIndividuals: Int
     let resolvedCollectiveIndividuals: Int
@@ -383,8 +460,10 @@ struct ExperimentSummary: Codable {
     let fusions: UInt64
     let cellDivisions: UInt64
     let programMutations: UInt64
+    let crossbreedings: UInt64
     let invariantReport: ExperimentInvariantReport
     let individualityEvidence: IndividualityEvidence
+    let regenerativeReproductionEvidence: EvidenceClaim
     let finalSample: ExperimentSample?
     let outputPath: String
 }
@@ -392,6 +471,9 @@ struct ExperimentSummary: Codable {
 struct HeadlessExperimentResult {
     let summary: ExperimentSummary
     let interventionSample: ExperimentSample?
+    let samples: [ExperimentSample]
+    let events: [ExperimentEvent]
+    let componentSnapshots: [ExperimentComponentSnapshot]
 }
 
 private struct ExperimentEnvelope<Payload: Encodable>: Encodable {

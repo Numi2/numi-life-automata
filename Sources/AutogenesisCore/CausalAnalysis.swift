@@ -59,6 +59,100 @@ public struct PairedEffectEstimate: Sendable, Equatable, Codable {
     }
 }
 
+public struct BinomialProportionEstimate: Sendable, Equatable, Codable {
+    public let successes: Int
+    public let trials: Int
+    public let estimate: Double
+    public let lower: Double
+    public let upper: Double
+    public let confidenceLevel: Double
+    public let method: String
+
+    public init(
+        successes: Int,
+        trials: Int,
+        estimate: Double,
+        lower: Double,
+        upper: Double,
+        confidenceLevel: Double,
+        method: String
+    ) {
+        self.successes = successes
+        self.trials = trials
+        self.estimate = estimate
+        self.lower = lower
+        self.upper = upper
+        self.confidenceLevel = confidenceLevel
+        self.method = method
+    }
+}
+
+public enum BinomialQualification {
+    public static func wilson95(successes: Int, trials: Int) -> BinomialProportionEstimate {
+        guard trials > 0 else {
+            return BinomialProportionEstimate(
+                successes: 0,
+                trials: 0,
+                estimate: 0,
+                lower: 0,
+                upper: 1,
+                confidenceLevel: 0.95,
+                method: "Wilson score"
+            )
+        }
+        let boundedSuccesses = min(max(successes, 0), trials)
+        let z = 1.959963984540054
+        let n = Double(trials)
+        let proportion = Double(boundedSuccesses) / n
+        let denominator = 1 + z * z / n
+        let center = (proportion + z * z / (2 * n)) / denominator
+        let halfWidth = z * sqrt(
+            proportion * (1 - proportion) / n + z * z / (4 * n * n)
+        ) / denominator
+        return BinomialProportionEstimate(
+            successes: boundedSuccesses,
+            trials: trials,
+            estimate: proportion,
+            lower: max(center - halfWidth, 0),
+            upper: min(center + halfWidth, 1),
+            confidenceLevel: 0.95,
+            method: "Wilson score"
+        )
+    }
+
+    public static func evidence(
+        recovery: BinomialProportionEstimate,
+        minimumTrials: Int,
+        threshold: Double,
+        outcomeLabel: String = "robust-recovery",
+        validTrialDescription: String =
+            "regenerative descendants received the paired wound challenge"
+    ) -> EvidenceClaim {
+        let enoughTrials = recovery.trials >= minimumTrials
+        let supported = enoughTrials && recovery.lower > threshold
+        let rejected = enoughTrials && recovery.upper <= threshold
+        return EvidenceClaim(
+            state: supported ? .supported : (rejected ? .notSupported : .inconclusive),
+            estimate: ConfidenceInterval(
+                estimate: recovery.estimate,
+                lower: recovery.lower,
+                upper: recovery.upper,
+                confidenceLevel: recovery.confidenceLevel,
+                effectiveSampleCount: Double(recovery.trials)
+            ),
+            nullUpperBound: threshold,
+            reason: !enoughTrials
+                ? "Fewer than \(minimumTrials) valid \(validTrialDescription)."
+                : supported
+                    ? "The 95% Wilson lower bound exceeds the predeclared \(threshold) \(outcomeLabel) threshold."
+                    : rejected
+                        ? "The 95% Wilson upper bound does not exceed the predeclared \(threshold) \(outcomeLabel) threshold."
+                        : "The \(outcomeLabel) interval still overlaps the predeclared \(threshold) threshold.",
+            timeBasis: .accumulatedHistory
+        )
+    }
+}
+
 public enum CausalAnalysis {
     public static func laggedDifferenceAssociation(
         cause: [Double],

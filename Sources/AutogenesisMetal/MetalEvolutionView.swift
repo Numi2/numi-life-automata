@@ -215,6 +215,7 @@ struct MetalEvolutionView: NSViewRepresentable {
                 Task { @MainActor in store.applyRuntimeTelemetry(telemetry) }
             }
             context.coordinator.renderer = renderer
+            context.coordinator.updateRendererSettingsIfNeeded()
             context.coordinator.startBackgroundTick(for: view)
             view.delegate = renderer
             view.panHandler = { [weak coordinator = context.coordinator] delta, aspect in
@@ -241,13 +242,14 @@ struct MetalEvolutionView: NSViewRepresentable {
 
     func updateNSView(_ view: InteractiveMetalView, context: Context) {
         context.coordinator.store = store
-        context.coordinator.renderer?.update(settings: store.rendererSettings)
+        context.coordinator.updateRendererSettingsIfNeeded()
     }
 
     @MainActor
     final class Coordinator {
         var store: EvolutionStore
         var renderer: EvolutionRenderer?
+        private var lastRendererSettings: RendererSettings?
         private var backgroundTimer: Timer?
         private var activationObserver: NSObjectProtocol?
 
@@ -260,6 +262,14 @@ struct MetalEvolutionView: NSViewRepresentable {
             if let activationObserver {
                 NotificationCenter.default.removeObserver(activationObserver)
             }
+        }
+
+        func updateRendererSettingsIfNeeded() {
+            guard let renderer else { return }
+            let settings = store.rendererSettings
+            guard settings != lastRendererSettings else { return }
+            lastRendererSettings = settings
+            renderer.update(settings: settings)
         }
 
         func startBackgroundTick(for view: InteractiveMetalView) {

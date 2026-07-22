@@ -468,7 +468,9 @@ final class Metal4ExecutionContext: @unchecked Sendable {
         let identifier = ObjectIdentifier(drawable as AnyObject)
         lock.lock()
         defer { lock.unlock() }
-        guard claimedDrawableIDs.isEmpty else { return false }
+        guard claimedDrawableIDs.count < Self.maximumInFlightSubmissions else {
+            return false
+        }
         return claimedDrawableIDs.insert(identifier).inserted
     }
 

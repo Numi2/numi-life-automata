@@ -451,6 +451,47 @@ public enum EvolutionaryEvidence {
     }
 }
 
+/// Distinguishes a physical split from biological reproduction. A descendant
+/// must restart cell division and subsequently maintain a viable multicellular
+/// state before regeneration is supported.
+public enum RegenerativeReproductionAssessment {
+    public static func evaluate(
+        separatedDescendantCount: Int,
+        regenerativeDescendantCount: Int,
+        challengedDescendantCount: Int,
+        homeostaticDescendantCount: Int,
+        conservationValid: Bool
+    ) -> EvidenceClaim {
+        guard conservationValid else {
+            return EvidenceClaim(
+                state: .notSupported,
+                estimate: nil,
+                nullUpperBound: nil,
+                reason: "Conservation or ownership invariant failure invalidates regenerative-reproduction inference.",
+                timeBasis: .accumulatedHistory
+            )
+        }
+        let supported = separatedDescendantCount > 0 &&
+            regenerativeDescendantCount > 0 && challengedDescendantCount > 0 &&
+            homeostaticDescendantCount > 0
+        return EvidenceClaim(
+            state: supported ? .supported : .inconclusive,
+            estimate: nil,
+            nullUpperBound: nil,
+            reason: supported
+                ? "At least one independently separated descendant restarted cell division and subsequently sustained multicellular energetic and boundary homeostasis."
+                : separatedDescendantCount == 0
+                    ? "No independently separated living descendant has been observed."
+                    : regenerativeDescendantCount == 0
+                        ? "Physical separation occurred, but no descendant has restarted cell division."
+                        : challengedDescendantCount == 0
+                            ? "A descendant restarted development, but none has yet received the scheduled damage challenge."
+                        : "A descendant restarted development, but sustained post-regeneration homeostasis has not yet been observed.",
+            timeBasis: .accumulatedHistory
+        )
+    }
+}
+
 public enum MetalDeviceTuningProfile: String, Codable, Sendable, Equatable {
     case genericMetal4
     case m4Optimized

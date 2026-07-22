@@ -119,19 +119,80 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func activeLocalDetachmentPreventsImmediateRefusion() throws {
+    func cellPhysicsHasNoComponentCentricBodyConstraint() throws {
         let shader = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
             encoding: .utf8
         )
-        #expect(shader.contains(
+        let start = try #require(shader.range(of: "kernel void evolveOrganismCells"))
+        let end = try #require(shader.range(
+            of: "kernel void clearCellSpatialHash",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let cellPhysics = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(cellPhysics.contains("float2 mechanicalForce = float2(0.0)"))
+        #expect(cellPhysics.contains("float extracellularAccess = pow(membraneExposure"))
+        #expect(!cellPhysics.contains("mechanicalForce = -cell.position"))
+        #expect(!cellPhysics.contains("radialDistance >"))
+        #expect(!cellPhysics.contains("length(cell.position) / 0.62"))
+    }
+
+    @Test
+    func everyLocallyCompetentCellCanDivideWithoutComponentArbitration() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(of: "kernel void divideAndReduceOrganismCells"))
+        let end = try #require(shader.range(
+            of: "float activeCount = 0.0",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let division = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(division.contains("if (divisionCompetent && cycle >= 1.0)"))
+        #expect(division.contains("uint divisionParent = index"))
+        #expect(!division.contains("mostAdvancedCycle"))
+    }
+
+    @Test
+    func divisionAsymmetryPartitionsBoundedCellStateWithoutAssigningFateOutputs() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(of: "kernel void divideAndReduceOrganismCells"))
+        let end = try #require(shader.range(
+            of: "float activeCount = 0.0",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let division = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(shader.contains("inline float conservativeDivisionDelta"))
+        #expect(division.contains("parent.signals.xy -= morphogenPartition"))
+        #expect(division.contains("child.signals.xy += morphogenPartition"))
+        #expect(division.contains("state - stateDelta"))
+        #expect(division.contains("state + stateDelta"))
+        #expect(!division.contains("parent.regulation ="))
+        #expect(!division.contains("child.regulation ="))
+    }
+
+    @Test
+    func activeLocalDetachmentPenalizesRefusionWithoutBlockingCompatibleMating() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(!shader.contains(
             "max(cell.tissueGeometry.w, other.tissueGeometry.w) < 0.32"
         ))
         #expect(shader.contains(
             "(0.00018 + detachmentRelease * 0.00012)"
         ))
-        #expect(shader.contains("float localDetachmentGate = 1.0 - smoothstep"))
+        #expect(shader.contains("float localDetachmentGate = mix("))
+        #expect(shader.contains("0.30, 1.0,"))
         #expect(shader.contains("float compressiveContactGate = 1.0 - smoothstep"))
         #expect(shader.contains("localDetachmentGate * compressiveContactGate"))
     }
@@ -204,6 +265,59 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func extracellularDevelopmentIsPersistentLocalAndEnergeticallyPaid() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("float4 extracellular = developmentalIn.read"))
+        #expect(shader.contains("float4 developmentalLaplacian"))
+        #expect(shader.contains("float extracellularReceptorBalance"))
+        #expect(shader.contains("float extracellularMatrixConstruction"))
+        #expect(shader.contains("cellEnergyExchange, energyTileBase, 8u"))
+        #expect(shader.contains("cellEnergyExchange, energyTileBase, 10u"))
+        #expect(shader.contains("kernel void damageOrganismCells"))
+        #expect(!shader.contains("targetMorphology"))
+    }
+
+    @Test
+    func separatedFragmentsMustRestartDevelopmentBeforeReproductionIsCounted() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("componentRegeneratedFlag"))
+        #expect(shader.contains("if (agent.generation > 0u)"))
+        #expect(shader.contains("agent.componentFlags |= componentRegeneratedFlag"))
+        #expect(shader.contains("kernel void markDamagedComponents"))
+        #expect(shader.contains("kernel void selectRegenerativeQualificationTarget"))
+        #expect(shader.contains("kernel void damageSelectedTargetCells"))
+        #expect(shader.contains("kernel void measureQualificationTarget"))
+        #expect(shader.contains("componentChallengedFlag"))
+        #expect(shader.contains("bool struck = false"))
+        #expect(shader.contains("bool completedChallengeWindow"))
+        #expect(shader.contains("bool stableHomeostasis = regeneratedDescendant"))
+    }
+
+    @Test
+    func pairedRegenerationProtocolUsesSameSeedShamAndStrictRecoveryGate() throws {
+        let runner = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/RegenerationExperiment.swift"),
+            encoding: .utf8
+        )
+        #expect(runner.contains("mode: .shamRegenerativeTarget"))
+        #expect(runner.contains("mode: .targetedRegenerativeWound"))
+        #expect(runner.contains("recoveredRelativeToSham"))
+        #expect(runner.contains("minimumTrials: 8"))
+        #expect(runner.contains("threshold: 0.5"))
+        #expect(runner.contains("target_matrix"))
+        #expect(runner.contains("target_wound_cue"))
+    }
+
+    @Test
     func ecologicalTraitsActThroughLocalPhysicsAndCarryWorkCosts() throws {
         let shader = try String(
             contentsOf: repositoryRoot
@@ -248,14 +362,83 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func experimentJournalUsesSchema12() throws {
+    func experimentJournalUsesSchema16() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
             encoding: .utf8
         )
-        #expect(renderer.contains("schemaVersion: 12"))
-        #expect(!renderer.contains("schemaVersion: 11"))
+        #expect(renderer.contains("schemaVersion: 16"))
+        #expect(!renderer.contains("schemaVersion: 14"))
+    }
+
+    @Test
+    func cellularRepairIsLocalPaidAndSelfTerminating() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(of: "kernel void evolveOrganismCells"))
+        let end = try #require(shader.range(
+            of: "kernel void evolveCellMembranes",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let evolution = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(shader.contains("inline float cellularRepairUrgency"))
+        #expect(shader.contains("inline float repairAdjustedATPPotential"))
+        #expect(evolution.contains("otherSupportPotential - cellSupportPotential"))
+        #expect(evolution.contains("float requestedRepairWork = repairUrgency * repairCommitment"))
+        #expect(evolution.contains("float paidRepairWork = requestedRepairWork * expenseScale"))
+        #expect(evolution.contains("float membraneRepair = paidRepairWork * membraneRepairEfficiency"))
+        #expect(evolution.contains("1.0 - recoveryAllocation * 0.94"))
+        #expect(shader.contains("float homeostaticEnergySupport = cellularEnergySupport"))
+        #expect(shader.contains("homeostaticEnergySupport >= 0.32"))
+        #expect(!evolution.contains("atp < 0.18 ? 0.36"))
+        #expect(!shader.contains("cellAggregate.physiology.y >= 0.16"))
+        #expect(!evolution.contains("componentChallengedFlag"))
+        #expect(!evolution.contains("componentQualificationTargetFlag"))
+    }
+
+    @Test
+    func crossbreedingRequiresCompatibleJunctionAndPreservesTwoProgramParents() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let definition = try #require(shader.range(of: "inline AgentState recombineCellPrograms"))
+        let division = try #require(shader.range(of: "kernel void divideAndReduceOrganismCells"))
+        let call = try #require(shader.range(
+            of: "recombineCellPrograms(",
+            range: definition.upperBound..<shader.endIndex
+        ))
+        let divisionBody = String(shader[division.lowerBound..<shader.endIndex])
+        #expect(call.lowerBound > division.lowerBound)
+        #expect(divisionBody.contains("findCellJunction"))
+        #expect(divisionBody.contains("recognitionCompatibility"))
+        #expect(divisionBody.contains("bilateralInvestment"))
+        #expect(divisionBody.contains("recombinationEligible"))
+        #expect(divisionBody.contains("junctionMaturity > 0.001"))
+        #expect(divisionBody.contains("pow(max(combinedSuitability"))
+        #expect(divisionBody.contains("recombinationScore * 0.28"))
+        #expect(divisionBody.contains("programCrossbred"))
+        #expect(divisionBody.contains("lineageEvents, identityCounters, 6u"))
+        #expect(shader.contains("secondParentProgramIndex"))
+        #expect(shader.contains("childProgram.ancestryFlags = 1u"))
+        #expect(shader.contains("float crossbreedingPreparation = mixedProgramTissue"))
+        #expect(shader.contains("crossbreedingPreparation * 0.000075"))
+        #expect(shader.contains("fusionEligible && fusionDrive > 0.008"))
+        #expect(shader.contains("inheritedA.social.x, inheritedB.social.x"))
+        #expect(shader.contains("float nonAggression = 1.0 - saturate(predation * 1.8)"))
+        #expect(shader.contains("float localDetachmentGate = mix("))
+        #expect(shader.contains("compressiveContactGate"))
+        #expect(shader.contains("-0.00001, 0.00036, separatingSpeed"))
+        #expect(shader.contains("uint fusionJunction = findOrCreateCellJunction"))
+        #expect(shader.contains("junctionStates[fusionJunction].flags = 3u"))
+        #expect(shader.contains("identityCounters[13]"))
+        #expect(shader.contains("identityCounters[14]"))
+        #expect(shader.contains("identityCounters[15]"))
     }
 
     @Test
@@ -521,6 +704,70 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func presentationAllowsBoundedConcurrencyAndFailsClosed() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let execution = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Metal4Execution.swift"),
+            encoding: .utf8
+        )
+        let metalView = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/MetalEvolutionView.swift"),
+            encoding: .utf8
+        )
+        let store = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionStore.swift"),
+            encoding: .utf8
+        )
+
+        #expect(execution.contains(
+            "claimedDrawableIDs.count < Self.maximumInFlightSubmissions"
+        ))
+        #expect(!execution.contains("guard claimedDrawableIDs.isEmpty"))
+        #expect(renderer.contains("maximumInteractiveInFlightSubmissions = 2"))
+        #expect(renderer.contains(
+            "layer.maximumDrawableCount = Metal4ExecutionContext.maximumInFlightSubmissions"
+        ))
+        #expect(renderer.contains(
+            "unfinishedCommandBuffers < interactiveInFlightSubmissionLimit"
+        ))
+        #expect(renderer.contains(
+            "maximumCommandBuffers: interactiveInFlightSubmissionLimit"
+        ))
+        #expect(renderer.contains("runtimeTelemetryPublicationInterval = 1.0 / 12.0"))
+        #expect(renderer.contains("publishRuntimeTelemetry(force: true)"))
+        #expect(renderer.contains("updateInteractiveInFlightSubmissionLimit"))
+        #expect(store.contains("struct RendererSettings: Sendable, Equatable"))
+        #expect(metalView.contains("private var lastRendererSettings: RendererSettings?"))
+        #expect(metalView.contains("guard settings != lastRendererSettings else { return }"))
+        #expect(renderer.contains("var presentationEncoded = false"))
+        #expect(renderer.contains("if !presentationEncoded"))
+        #expect(renderer.contains("commandBuffer.cancelPresentation()"))
+        let compactionSignature = """
+        private func encodeVisibleCellCompaction(
+                into commandBuffer: Metal4CommandBufferContext,
+                settings: RendererSettings
+            ) -> Bool
+        """
+        let bloomSignature = """
+        private func encodeBloom(
+                source: MTLTexture,
+                textureA: MTLTexture,
+                uniforms: inout PostProcessUniforms,
+                into commandBuffer: Metal4CommandBufferContext
+            ) -> Bool
+        """
+        #expect(renderer.contains(compactionSignature))
+        #expect(renderer.contains(bloomSignature))
+    }
+
+    @Test
     func contactAndConnectivityReuseOneBoundedPairStream() throws {
         let shader = try String(
             contentsOf: repositoryRoot
@@ -549,6 +796,61 @@ struct ArchitectureBoundaryTests {
         #expect(!resolver.contains("hashHeads"))
         #expect(!union.contains("hashHeads"))
         #expect(shader.contains("invariantContactPairOverflow"))
+    }
+
+    @Test
+    func contactBroadPhaseUsesDirectGridAndLocalOcclusionCoordinates() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let exposureStart = try #require(shader.range(of: "kernel void measureCellMembraneExposure"))
+        let divisionStart = try #require(shader.range(
+            of: "kernel void divideAndReduceOrganismCells",
+            range: exposureStart.upperBound..<shader.endIndex
+        ))
+        let exposure = String(shader[exposureStart.lowerBound..<divisionStart.lowerBound])
+        #expect(shader.contains("constant uint cellSpatialHashAxisResolution = 128u"))
+        #expect(shader.contains("return coordinate.x + coordinate.y * cellSpatialHashAxisResolution"))
+        #expect(!shader.contains("visitedBuckets"))
+        #expect(exposure.contains("cell.position + localMidpoint - other.position"))
+        #expect(!exposure.contains("rotateWorldToTissue"))
+    }
+
+    @Test
+    func lifecycleQualificationIsObserverOnlyAndCannotStopOnSuccess() throws {
+        let lifecycle = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/LifecycleExperiment.swift"),
+            encoding: .utf8
+        )
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let entrypoint = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/AutogenesisMetalApp.swift"),
+            encoding: .utf8
+        )
+
+        #expect(lifecycle.contains("causalMutation: \"None."))
+        #expect(lifecycle.contains("mode: .shamRegenerativeTarget"))
+        #expect(lifecycle.contains("mode: .targetedRegenerativeWound"))
+        #expect(lifecycle.contains("valid < configuration.minimumValidCycles"))
+        #expect(!lifecycle.contains("completed < configuration.minimumValidCycles"))
+        #expect(lifecycle.contains("$0.type == \"fission\" && $0.parentBirthID == targetID"))
+        #expect(lifecycle.contains("postRecoveryFissionCount"))
+        #expect(lifecycle.contains("reportedGrandchildSnapshots"))
+        #expect(lifecycle.contains("stableGrandchildSnapshots"))
+        #expect(lifecycle.contains("$0.regeneratedDevelopment && $0.cellCount >= 2"))
+        #expect(lifecycle.contains("minimumTrials: configuration.minimumValidCycles"))
+        #expect(lifecycle.contains("threshold: 0.5"))
+        #expect(renderer.contains("recordedEvents.append(event)"))
+        #expect(renderer.contains("recordedComponentSnapshots.append("))
+        #expect(entrypoint.contains("case \"lifecycle-experiment\":"))
     }
 
     @Test

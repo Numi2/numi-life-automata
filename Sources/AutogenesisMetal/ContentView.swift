@@ -617,7 +617,7 @@ struct ContentView: View {
         guard recordedFissionCount > 0 else {
             return "No membrane-disconnected descendant has yet transmitted its already-present cell programs."
         }
-        return "\(recordedFissionCount) physical separations have produced \(store.livingDescendantCount) living descendants containing \(store.livingDescendantCellCount) cells. Component depth is G\(store.maximumLivingLineageGeneration); cell-division program replication is G\(store.maximumProgramReplicationGeneration)."
+        return "\(recordedFissionCount) physical separations have produced \(store.livingDescendantCount) living descendants containing \(store.livingDescendantCellCount) cells. \(store.regenerativeDescendantCount) restarted cell division after separation, \(store.challengedDescendantCount) were directly wounded, and \(store.homeostaticDescendantCount) subsequently maintained a multicellular, energetic, low-stress state. Component depth is G\(store.maximumLivingLineageGeneration); cell-division program replication is G\(store.maximumProgramReplicationGeneration)."
     }
 
     private var autonomyObservablesPanel: some View {
@@ -1321,7 +1321,7 @@ struct ContentView: View {
         case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
         case 2: "Local chemical affinity is sqrt(A·B) times permeability and toxin inhibition. Quantum order and mechanical activity add catalyst; catalyst then gates stored-energy production. Quantum order, catalyst, and E set the membrane target, while catalyst-dependent mineralization returns detritus to both substrates. Cells consume these fields for ATP and return mechanical work and detritus, closing the cross-scale loop."
         case 3: "A bounded sparse graph maps sixteen local mechanochemical and ecological inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Cell-cycle and biomass dynamics use measured substrate harvest relative to maintenance, work, and dissipation together with ATP reserve, exposed membrane, crowding, stress, and inherited regulation. Persistent junction ribbons read physical load and strain directly; amber packets show signed ATP sharing, cyan and magenta lanes show conductance-gated Ca*/ERK* propagation, and blue-green wound boundaries show ATP-funded repair. These render diagnostics never feed the cell update."
-        case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Lineage-colored junction rails identify contact between different generation-tagged programs. Fission transmits programs already present in cells without mutation; mutation occurs only during ATP-funded cell division."
+        case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Lineage-colored junction rails identify contact between different generation-tagged programs. Fission transmits programs already present in cells without mutation; ATP-funded cell division can mutate one program or crossbreed two compatible junction-linked programs."
         default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
         }
     }
@@ -1692,6 +1692,7 @@ struct ContentView: View {
         case .emergence: "point.3.connected.trianglepath.dotted"
         case .cellDivision: "arrow.triangle.2.circlepath"
         case .programMutation: "point.3.filled.connected.trianglepath.dotted"
+        case .crossbreeding: "arrow.triangle.merge"
         }
     }
 
@@ -1708,13 +1709,14 @@ struct ContentView: View {
         case .emergence: .green
         case .cellDivision: .cyan
         case .programMutation: .pink
+        case .crossbreeding: .purple
         }
     }
 
     private func eventCoordinateLabel(_ kind: EvolutionEventKind) -> String {
         switch kind {
         case .branching, .fusion: "CDEP"
-        case .cellDivision, .programMutation: "PGEN"
+        case .cellDivision, .programMutation, .crossbreeding: "PGEN"
         default: "EPOCH"
         }
     }

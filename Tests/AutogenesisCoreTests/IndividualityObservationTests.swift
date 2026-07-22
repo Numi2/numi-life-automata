@@ -4,6 +4,68 @@ import Testing
 
 struct IndividualityObservationTests {
     @Test
+    func replicatedRegenerationUsesAPredeclaredWilsonGate() {
+        let underpowered = BinomialQualification.evidence(
+            recovery: BinomialQualification.wilson95(successes: 4, trials: 4),
+            minimumTrials: 8,
+            threshold: 0.5
+        )
+        let robust = BinomialQualification.evidence(
+            recovery: BinomialQualification.wilson95(successes: 24, trials: 24),
+            minimumTrials: 8,
+            threshold: 0.5
+        )
+        let failed = BinomialQualification.evidence(
+            recovery: BinomialQualification.wilson95(successes: 0, trials: 8),
+            minimumTrials: 8,
+            threshold: 0.5
+        )
+
+        #expect(underpowered.state == .inconclusive)
+        #expect(robust.state == .supported)
+        #expect(failed.state == .notSupported)
+        #expect(robust.estimate?.lower ?? 0 > 0.5)
+    }
+
+    @Test
+    func regenerationRequiresDivisionAndSustainedHomeostasisAfterSeparation() {
+        let mereFission = RegenerativeReproductionAssessment.evaluate(
+            separatedDescendantCount: 1,
+            regenerativeDescendantCount: 0,
+            challengedDescendantCount: 0,
+            homeostaticDescendantCount: 0,
+            conservationValid: true
+        )
+        let restartedOnly = RegenerativeReproductionAssessment.evaluate(
+            separatedDescendantCount: 1,
+            regenerativeDescendantCount: 1,
+            challengedDescendantCount: 0,
+            homeostaticDescendantCount: 0,
+            conservationValid: true
+        )
+        let challenged = RegenerativeReproductionAssessment.evaluate(
+            separatedDescendantCount: 1,
+            regenerativeDescendantCount: 1,
+            challengedDescendantCount: 1,
+            homeostaticDescendantCount: 0,
+            conservationValid: true
+        )
+        let completed = RegenerativeReproductionAssessment.evaluate(
+            separatedDescendantCount: 1,
+            regenerativeDescendantCount: 1,
+            challengedDescendantCount: 1,
+            homeostaticDescendantCount: 1,
+            conservationValid: true
+        )
+
+        #expect(mereFission.state == .inconclusive)
+        #expect(restartedOnly.state == .inconclusive)
+        #expect(challenged.state == .inconclusive)
+        #expect(completed.state == .supported)
+        #expect(completed.timeBasis == .accumulatedHistory)
+    }
+
+    @Test
     func autonomyRemainsAVectorRatherThanCollapsingIntoFitness() {
         let observation = ComponentObservation(
             step: 1_200,

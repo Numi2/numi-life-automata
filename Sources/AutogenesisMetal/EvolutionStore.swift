@@ -39,6 +39,7 @@ enum EvolutionEventKind: Sendable, Equatable {
     case emergence
     case cellDivision
     case programMutation
+    case crossbreeding
 }
 
 struct EvolutionEvent: Identifiable, Sendable, Equatable {
@@ -436,7 +437,7 @@ struct EvolutionSnapshot: Sendable, Equatable {
     }
 }
 
-struct RendererSettings: Sendable {
+struct RendererSettings: Sendable, Equatable {
     var isRunning: Bool
     var stepsPerFrame: Int
     var resourceFlux: Float
@@ -473,6 +474,7 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var events: [EvolutionEvent] = []
     @Published private(set) var founderCount = 0
     @Published private(set) var fusionEventCount = 0
+    @Published private(set) var crossbreedingEventCount = 0
     @Published private(set) var followedAgentID: Int?
     @Published private(set) var observableAgentCount = 0
     @Published private(set) var resolvedIndividualCount = 0
@@ -488,6 +490,9 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var runtimeTelemetry = RendererRuntimeTelemetry.idle
     @Published private(set) var maximumLivingLineageGeneration: UInt32 = 0
     @Published private(set) var livingDescendantCount = 0
+    @Published private(set) var regenerativeDescendantCount = 0
+    @Published private(set) var challengedDescendantCount = 0
+    @Published private(set) var homeostaticDescendantCount = 0
     @Published private(set) var resolvedDescendantCount = 0
     @Published private(set) var livingDescendantCellCount = 0
     @Published private(set) var followedEnergeticIndependence: Float = 0
@@ -578,6 +583,7 @@ final class EvolutionStore: ObservableObject {
         addedColonyCount = 0
         founderCount = 0
         fusionEventCount = 0
+        crossbreedingEventCount = 0
         lineageAnalysis = .empty
         lineageBranches.removeAll(keepingCapacity: true)
         componentAncestryEdges.removeAll(keepingCapacity: true)
@@ -746,6 +752,15 @@ final class EvolutionStore: ObservableObject {
         maximumLivingLineageGeneration = agents.map(\.generation).max() ?? 0
         let livingDescendants = agents.filter { $0.generation > 0 }
         livingDescendantCount = livingDescendants.count
+        regenerativeDescendantCount = livingDescendants.count {
+            $0.hasRegeneratedDevelopment
+        }
+        challengedDescendantCount = livingDescendants.count {
+            $0.hasReceivedDamageChallenge
+        }
+        homeostaticDescendantCount = livingDescendants.count {
+            $0.hasDemonstratedHomeostasis
+        }
         livingDescendantCellCount = livingDescendants.reduce(0) {
             $0 + max(Int(($1.morphology.x * 24).rounded()), 1)
         }
@@ -1245,6 +1260,20 @@ final class EvolutionStore: ObservableObject {
                         record.topologyHash,
                         record.mutationDistance,
                         record.resonanceFrequency
+                    )
+                )
+            case .crossbreeding:
+                crossbreedingEventCount += 1
+                recordEvent(
+                    generation: Int(record.generation),
+                    kind: .crossbreeding,
+                    title: "Crossbred program in daughter cell #\(record.birthID)",
+                    detail: String(
+                        format: "GPU step %u; compatible donor cell #%u contributed the second inherited program; recombination distance %.5f; resulting topology hash %08X.",
+                        record.step,
+                        record.parentBirthID,
+                        record.mutationDistance,
+                        record.topologyHash
                     )
                 )
             }
