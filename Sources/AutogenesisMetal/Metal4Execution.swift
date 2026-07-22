@@ -876,6 +876,11 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         for handler in handlers {
             handler(self)
         }
+        // A completed context can remain reachable briefly through client telemetry.
+        // Release drawable and transient resource ownership immediately at GPU completion.
+        retainedResources.removeAll(keepingCapacity: false)
+        drawable = nil
+        timestampLabels.removeAll(keepingCapacity: false)
         completionSemaphore.signal()
     }
 

@@ -1181,6 +1181,25 @@ private struct PostProcessUniforms {
     var frameIndex: UInt32
 }
 
+private final class RenderTargetSet {
+    let size: MTLSize
+    let heap: any MTLHeap
+    let sceneColor: MTLTexture
+    let bloomTexture: MTLTexture
+
+    init(
+        size: MTLSize,
+        heap: any MTLHeap,
+        sceneColor: MTLTexture,
+        bloomTexture: MTLTexture
+    ) {
+        self.size = size
+        self.heap = heap
+        self.sceneColor = sceneColor
+        self.bloomTexture = bloomTexture
+    }
+}
+
 private struct AgentState {
     var position: SIMD2<Float>
     var velocity: SIMD2<Float>
@@ -1770,9 +1789,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let compositePipeline: MTLRenderPipelineState
     private let spinorDisplayPipeline: MTLRenderPipelineState
     private let pipelineBuildTelemetry: Metal4PipelineBuildTelemetry
-    private var sceneColor: MTLTexture?
-    private var bloomTextureA: MTLTexture?
-    private var renderTargetSize = MTLSize(width: 0, height: 0, depth: 1)
+    private var renderTargetCache: [RenderTargetSet] = []
     private var state: MTLTexture
     private var reactionState: MTLTexture
     private var genomeA: MTLTexture
@@ -4365,14 +4382,18 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             return
         }
 
-        guard ensureRenderTargets(width: drawableTexture.width, height: drawableTexture.height),
-              let sceneColor,
-              let bloomTextureA else {
+        guard let renderTargets = renderTargets(
+            width: drawableTexture.width,
+            height: drawableTexture.height
+        ) else {
             commandBuffer.cancelPresentation()
             return
         }
+        let sceneColor = renderTargets.sceneColor
+        let bloomTextureA = renderTargets.bloomTexture
         commandBuffer.retainResources([
             drawableTexture as AnyObject,
+            renderTargets.heap as AnyObject,
             sceneColor as AnyObject,
             bloomTextureA as AnyObject
         ])
@@ -4554,13 +4575,24 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.endEncoding()
     }
 
-    private func ensureRenderTargets(width: Int, height: Int) -> Bool {
+    private func renderTargets(width: Int, height: Int) -> RenderTargetSet? {
         let size = MTLSize(width: width, height: height, depth: 1)
-        if size.width == renderTargetSize.width,
-           size.height == renderTargetSize.height,
-           sceneColor != nil,
-           bloomTextureA != nil {
-            return true
+        if let index = renderTargetCache.firstIndex(where: {
+            $0.size.width == size.width && $0.size.height == size.height
+        }) {
+            let targets = renderTargetCache.remove(at: index)
+            renderTargetCache.append(targets)
+            return targets
+        }
+
+        // Do not evict a heap while an older submission can still reference it. The
+        // current uncommitted submission occupies one slot, so a depth of one is drained.
+        if renderTargetCache.count >= 2,
+           commandQueue.unfinishedSubmissionCount > 1 {
+            return nil
+        }
+        if renderTargetCache.count >= 2 {
+            renderTargetCache.removeFirst(renderTargetCache.count - 1)
         }
 
         let sceneDescriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -4581,17 +4613,40 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         bloomDescriptor.storageMode = .private
         bloomDescriptor.usage = [.shaderRead, .shaderWrite]
 
-        guard let nextScene = device.makeTexture(descriptor: sceneDescriptor),
-              let nextBloomA = device.makeTexture(descriptor: bloomDescriptor) else {
-            return false
+        let sceneSizeAndAlign = device.heapTextureSizeAndAlign(descriptor: sceneDescriptor)
+        let bloomSizeAndAlign = device.heapTextureSizeAndAlign(descriptor: bloomDescriptor)
+        let bloomOffset = Self.alignUp(
+            sceneSizeAndAlign.size,
+            alignment: bloomSizeAndAlign.align
+        )
+        let heapDescriptor = MTLHeapDescriptor()
+        heapDescriptor.storageMode = .private
+        heapDescriptor.hazardTrackingMode = .tracked
+        heapDescriptor.type = .automatic
+        heapDescriptor.size = bloomOffset + bloomSizeAndAlign.size
+
+        guard let heap = device.makeHeap(descriptor: heapDescriptor),
+              let nextScene = heap.makeTexture(descriptor: sceneDescriptor),
+              let nextBloomA = heap.makeTexture(descriptor: bloomDescriptor) else {
+            return nil
         }
+        heap.label = "Bounded transient render targets \(width)x\(height)"
         nextScene.label = "Linear HDR simulation scene"
         nextBloomA.label = "Single-pass quarter-resolution bloom"
-        sceneColor = nextScene
-        bloomTextureA = nextBloomA
-        commandQueue.replaceDynamicAllocations([nextScene, nextBloomA])
-        renderTargetSize = size
-        return true
+        let targets = RenderTargetSet(
+            size: size,
+            heap: heap,
+            sceneColor: nextScene,
+            bloomTexture: nextBloomA
+        )
+        renderTargetCache.append(targets)
+        commandQueue.replaceDynamicAllocations(renderTargetCache.map(\.heap))
+        return targets
+    }
+
+    private static func alignUp(_ value: Int, alignment: Int) -> Int {
+        guard alignment > 1 else { return value }
+        return (value + alignment - 1) & ~(alignment - 1)
     }
 
     private func encodeAgentObservation(

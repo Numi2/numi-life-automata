@@ -243,6 +243,84 @@ struct IndividualityObservationTests {
     }
 
     @Test
+    func longitudinalObserverMemoryIsIndependentOfPopulationSizeAndDuration() {
+        let cohortCapacity = 4
+        let sampleCapacity = 16
+        var observer = IndividualityObserverEngine(
+            maximumTrackedCandidatesPerLevel: cohortCapacity,
+            historyCapacity: sampleCapacity
+        )
+
+        for step in 0..<160 {
+            var candidates: [IndividualityCandidate] = []
+            for componentID in 0..<80 {
+                let component = UInt64(componentID)
+                candidates.append(IndividualityCandidate(
+                    observation: observation(
+                        step: UInt64(step),
+                        id: component,
+                        level: .membraneConnectedComponent,
+                        cellCount: 3
+                    ),
+                    positionX: Double(componentID) / 80,
+                    positionY: 0.5,
+                    isSeparatedDescendant: componentID > 0,
+                    environmentalDependence: sin(Double(step + componentID) * 0.1)
+                ))
+                candidates.append(IndividualityCandidate(
+                    observation: observation(
+                        step: UInt64(step),
+                        id: 10_000 + component,
+                        level: .cell,
+                        cellCount: 1
+                    ),
+                    positionX: Double(componentID) / 80,
+                    positionY: 0.5,
+                    isSeparatedDescendant: componentID > 0,
+                    environmentalDependence: cos(Double(step + componentID) * 0.13),
+                    parentComponentID: component
+                ))
+            }
+            _ = observer.observe(candidates, evaluationStride: 10_000)
+        }
+
+        #expect(observer.trackedCandidateCount == 2 * cohortCapacity)
+        #expect(observer.storedHistorySampleCount ==
+            2 * cohortCapacity * sampleCapacity)
+    }
+
+    private func observation(
+        step: UInt64,
+        id: UInt64,
+        level: CandidatePartitionLevel,
+        cellCount: Int
+    ) -> ComponentObservation {
+        ComponentObservation(
+            step: step,
+            candidateID: id,
+            partitionLevel: level,
+            cellCount: cellCount,
+            harvestedATP: 0.8,
+            importedATP: 0.1,
+            repairFlux: 0.2,
+            membraneIntegrity: 0.9,
+            exposedPerimeter: 0.7,
+            damageFlux: 0.02,
+            membraneTurnover: 0.01,
+            strainToCalcium: 0.3,
+            calciumToERK: 0.3,
+            erkToTraction: 0.3,
+            tractionToStrain: 0.3,
+            junctionTransmission: 0.2,
+            atpSharing: level == .cell ? 0 : 0.2,
+            rejection: 0,
+            withinComponentReplicationAdvantage: 0,
+            descendantRepresentation: 0.2,
+            parentResemblance: 0.8
+        )
+    }
+
+    @Test
     func evolutionaryClaimsDeclareAccumulatedTimeBasis() {
         let claims = EvolutionaryEvidence.evaluate(
             selection: SelectionPartition(

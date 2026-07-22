@@ -465,6 +465,28 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func transientRenderMemoryIsHeapBackedBoundedAndCompletionRetired() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let execution = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Metal4Execution.swift"),
+            encoding: .utf8
+        )
+
+        #expect(renderer.contains("private var renderTargetCache: [RenderTargetSet] = []"))
+        #expect(renderer.contains("renderTargetCache.count >= 2"))
+        #expect(renderer.contains("commandQueue.unfinishedSubmissionCount > 1"))
+        #expect(renderer.contains("device.makeHeap(descriptor: heapDescriptor)"))
+        #expect(renderer.contains("replaceDynamicAllocations(renderTargetCache.map(\\.heap))"))
+        #expect(execution.contains("retainedResources.removeAll(keepingCapacity: false)"))
+        #expect(execution.contains("drawable = nil"))
+    }
+
+    @Test
     func contactAndConnectivityReuseOneBoundedPairStream() throws {
         let shader = try String(
             contentsOf: repositoryRoot
