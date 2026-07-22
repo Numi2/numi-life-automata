@@ -7772,6 +7772,14 @@ inline float3 mapToDisplay(
     return saturate(mapped + dither / 1023.0);
 }
 
+inline float4 finiteHDRColor(float3 color, float gain) {
+    color *= gain;
+    if (!all(isfinite(color))) {
+        return float4(0.0015, 0.003, 0.006, 1.0);
+    }
+    return float4(clamp(color, 0.0, 16.0), 1.0);
+}
+
 fragment float4 compositeFragment(
     RasterData input [[stage_in]],
     texture2d<half, access::sample> scene [[texture(0)]],
@@ -9112,7 +9120,7 @@ float4 quantumSurfaceForScale(
         ? smoothstep(420.0, 900.0, observationZoom) : 0.0;
     if (latticeReveal >= 0.999) {
         float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
-        return float4(max(spinorTile, 0.0) * 1.16, 1.0);
+        return finiteHDRColor(spinorTile, 1.16);
     }
 
     float density = 1.0 - exp(-probability * 285000.0);
@@ -9187,7 +9195,7 @@ float4 quantumSurfaceForScale(
             quantumOnlyColor += float3(1.0, 0.42, 0.025) * coinContour *
                 coinPerturbation * feedbackWindow * density * 0.24;
         }
-        return float4(max(quantumOnlyColor, 0.0) * 1.16, 1.0);
+        return finiteHDRColor(quantumOnlyColor, 1.16);
     }
 
     float4 localState = state.sample(fieldSampler, uv, 0);
@@ -9256,7 +9264,7 @@ float4 quantumSurfaceForScale(
     float3 spinorTile = spinorCellVisualization(uv, wave, currentStrength);
     color = mix(color, spinorTile, latticeReveal);
 
-    return float4(max(color, 0.0) * 1.16, 1.0);
+    return finiteHDRColor(color, 1.16);
 }
 
 #define NUMI_QUANTUM_SURFACE(NAME, SCALE) \
@@ -9465,7 +9473,7 @@ fragment float4 worldSurfaceFragment(
             (1.0 - rock) * 0.14;
     }
 
-    return float4(max(color, 0.0) * 1.08, 1.0);
+    return finiteHDRColor(color, 1.08);
 }
 
 fragment float4 cellularSurfaceFragment(
@@ -9535,7 +9543,7 @@ fragment float4 cellularSurfaceFragment(
         color += float3(0.01, 0.24, 0.15) * contactSubstrate * 0.10;
     }
     float contextExposure = uniforms.displayMode == 5 ? 0.82 : 0.64;
-    return float4(max(color, 0.0) * contextExposure, 1.0);
+    return finiteHDRColor(color, contextExposure);
 }
 
 fragment float4 worldFragment(
@@ -9852,5 +9860,5 @@ fragment float4 worldFragment(
     color += float3(0.66, 1.0, 0.90) * bodyEdge * quantumReveal *
         (0.22 + currentStrength * 0.52);
     color = 1.0 - exp(-max(color, 0.0) * 1.46);
-    return float4(color, 1.0);
+    return finiteHDRColor(color, 1.0);
 }

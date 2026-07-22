@@ -1650,6 +1650,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         "NUMI_GPU_TIMING"
     ] == "1"
     private static let gpuTimingEnabled = gpuFrameTimingEnabled || gpuTimingLogEnabled
+    private static let experimentalMeshCellRenderingEnabled =
+        ProcessInfo.processInfo.environment["NUMI_EXPERIMENTAL_MESH_CELLS"] == "1"
 
     private let device: MTLDevice
     private let tuningProfile: MetalDeviceTuningProfile
@@ -4286,8 +4288,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             let descriptor = MTL4RenderPassDescriptor()
             let attachment = descriptor.colorAttachments[0]!
             attachment.texture = drawableTexture
-            attachment.loadAction = .dontCare
+            attachment.loadAction = .clear
             attachment.storeAction = .store
+            attachment.clearColor = MTLClearColorMake(0.0015, 0.003, 0.006, 1)
+            commandBuffer.retainResources([drawableTexture as AnyObject])
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else {
                 commandBuffer.cancelPresentation()
                 return
@@ -4318,6 +4322,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             commandBuffer.cancelPresentation()
             return
         }
+        commandBuffer.retainResources([
+            drawableTexture as AnyObject,
+            sceneColor as AnyObject,
+            bloomTextureA as AnyObject
+        ])
         postUniforms.sourceSize = SIMD2<Float>(Float(sceneColor.width), Float(sceneColor.height))
         if observationZoom > 0.35, observationZoom < 180 {
             encodeVisibleCellCompaction(into: commandBuffer, settings: settings)
@@ -4338,7 +4347,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         if observationZoom > 0.35, observationZoom < 180 {
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
-            if tuningProfile == .m4Optimized {
+            if tuningProfile == .m4Optimized && Self.experimentalMeshCellRenderingEnabled {
                 encoder.setRenderPipelineState(cellMeshRenderPipeline)
                 encoder.setMeshBuffer(agentState, offset: 0, index: 0)
                 encoder.setMeshBuffer(agentOccupancy, offset: 0, index: 1)
@@ -4422,8 +4431,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let drawableDescriptor = MTL4RenderPassDescriptor()
         let drawableAttachment = drawableDescriptor.colorAttachments[0]!
         drawableAttachment.texture = drawableTexture
-        drawableAttachment.loadAction = .dontCare
+        drawableAttachment.loadAction = .clear
         drawableAttachment.storeAction = .store
+        drawableAttachment.clearColor = MTLClearColorMake(0.0015, 0.003, 0.006, 1)
         guard let compositeEncoder = commandBuffer.makeRenderCommandEncoder(
             descriptor: drawableDescriptor
         ) else { return }

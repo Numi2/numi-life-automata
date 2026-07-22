@@ -370,9 +370,15 @@ struct ArchitectureBoundaryTests {
         #expect(renderer.contains("spinorDisplayPipeline"))
         #expect(renderer.contains("if renderScale == 5"))
         #expect(renderer.contains("Single-pass quarter-resolution bloom"))
+        #expect(renderer.contains("attachment.loadAction = .clear"))
+        #expect(renderer.contains("drawableAttachment.loadAction = .clear"))
+        #expect(renderer.contains("commandBuffer.retainResources(["))
         #expect(!renderer.contains("bloomBlurPipeline"))
         #expect(!renderer.contains("bloomTextureB"))
         #expect(shader.contains("fragment float4 spinorDisplayFragment"))
+        #expect(shader.contains("inline float4 finiteHDRColor"))
+        #expect(shader.contains("return finiteHDRColor(color, 1.08);"))
+        #expect(shader.contains("return finiteHDRColor(color, contextExposure);"))
         #expect(!shader.contains("kernel void blurBloom"))
     }
 
@@ -467,7 +473,7 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func m4UsesAdaptiveMeshContoursWithVertexFallback() throws {
+    func m4KeepsAdaptiveMeshContoursBehindAnExplicitStabilityGate() throws {
         let shader = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
@@ -486,11 +492,26 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("using CellContourMesh = metal::mesh"))
         #expect(shader.contains("void cellContourMesh("))
         #expect(shader.contains("output.set_primitive_count(segmentCount)"))
-        #expect(renderer.contains("if tuningProfile == .m4Optimized"))
+        #expect(renderer.contains("NUMI_EXPERIMENTAL_MESH_CELLS"))
+        #expect(renderer.contains(
+            "if tuningProfile == .m4Optimized && Self.experimentalMeshCellRenderingEnabled"
+        ))
         #expect(renderer.contains("cellMeshRenderPipeline"))
         #expect(renderer.contains("cellRenderPipeline"))
         #expect(execution.contains("MTL4MeshRenderPipelineDescriptor"))
         #expect(execution.contains("drawMeshThreadgroups("))
+    }
+
+    @Test
+    func archiveMissFallbackDoesNotReattachTheRejectedArchive() throws {
+        let execution = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Metal4Execution.swift"),
+            encoding: .utf8
+        )
+        #expect(!execution.contains("taskOptions.lookupArchives = [loadedArchive]"))
+        #expect(execution.contains("NUMI_ENABLE_METAL4_ARCHIVE"))
+        #expect(!execution.contains("NUMI_DISABLE_METAL4_ARCHIVE"))
     }
 
     @Test

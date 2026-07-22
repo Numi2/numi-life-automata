@@ -55,15 +55,16 @@ final class Metal4PipelineFactory {
             name: "Replicator",
             extension: "mtl4archive"
         )
-        let archiveDisabled = ProcessInfo.processInfo.environment[
-            "NUMI_DISABLE_METAL4_ARCHIVE"
+        // The packaged archive remains opt-in until every captured perspective pipeline
+        // passes the M4 corruption soak. Runtime compilation still uses the packaged metallib.
+        let archiveEnabled = ProcessInfo.processInfo.environment[
+            "NUMI_ENABLE_METAL4_ARCHIVE"
         ] == "1"
-        if !archiveDisabled,
+        if archiveEnabled,
            let bundledArchiveURL,
            let loadedArchive = try? device.makeArchive(url: bundledArchiveURL) {
             archive = loadedArchive
             archiveURL = bundledArchiveURL
-            taskOptions.lookupArchives = [loadedArchive]
             archiveLoaded = true
         } else {
             archive = nil
@@ -665,6 +666,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
     private var didCommit = false
     private var timestampLabels: [String] = []
     private var phaseTimingEnabled = false
+    private var retainedResources: [AnyObject] = []
 
     init(
         owner: Metal4ExecutionContext,
@@ -775,6 +777,10 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
         guard let drawable else { return }
         owner.releaseDrawable(identifier: ObjectIdentifier(drawable as AnyObject))
         self.drawable = nil
+    }
+
+    func retainResources(_ resources: [AnyObject]) {
+        retainedResources.append(contentsOf: resources)
     }
 
     func enablePhaseTiming() {
