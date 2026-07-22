@@ -162,6 +162,8 @@ struct CellState {
     float4 environment;
     // Persistent tissue polarity, fate memory, and junction morphogen transport.
     float4 development;
+    // Supracellular integument coverage/tension, locomotor appendage maturity, and gait phase.
+    float4 collectiveBoundary;
 };
 
 // Four packed half4 episodes. Each episode is
@@ -3394,6 +3396,7 @@ inline CellState emptyCell() {
     cell.tissueForce = float4(0.0);
     cell.environment = float4(0.0);
     cell.development = float4(1.0, 0.0, 0.5, 0.0);
+    cell.collectiveBoundary = float4(0.0);
     return cell;
 }
 
@@ -3450,6 +3453,7 @@ inline CellState founderCell(AgentState agent, ResonanceGenome resonanceGenome, 
     cell.development = float4(
         cos(founderPolarityAngle), sin(founderPolarityAngle), 0.5, 0.0
     );
+    cell.collectiveBoundary = float4(0.0);
     return cell;
 }
 
@@ -5954,6 +5958,8 @@ kernel void evolveOrganismCells(
     float junctionMaterialDemand = 0.0;
     float junctionStrainMemory = 0.0;
     float junctionPolarityAlignment = 0.0;
+    float neighborIntegument = 0.0;
+    float integumentTransmission = 0.0;
     float2 nearestContact = float2(0.0);
     float nearestDistance = 10.0;
     float contactCount = 0.0;
@@ -6033,6 +6039,11 @@ kernel void evolveOrganismCells(
                     ) * weight;
                     junctionPolarityAlignment +=
                         cellJunctions[junctionIndex].remodeling.w * weight;
+                    neighborIntegument += max(
+                        other.collectiveBoundary.x,
+                        other.collectiveBoundary.y
+                    ) * conductance;
+                    integumentTransmission += conductance;
                     uint transportProgramIndex = cellIdentities[otherIndex].programIndex;
                     AgentState transportProgram = agent;
                     float transportCompatibility = 1.0;
@@ -6107,6 +6118,8 @@ kernel void evolveOrganismCells(
         ? saturate(outgoingRejectionTotal * inverseMixedContactWeight) : 0.0;
     float meanRecognitionCompatibility = mixedContactWeight > 0.0001
         ? saturate(recognitionCompatibilityTotal * inverseMixedContactWeight) : -1.0;
+    float transmittedIntegument = integumentTransmission > 0.0001
+        ? saturate(neighborIntegument / integumentTransmission) : 0.0;
 
     float2 heading = tissueHeading(agent);
     float2 lateral = float2(-heading.y, heading.x);
@@ -6330,6 +6343,12 @@ kernel void evolveOrganismCells(
         (0.72 + max(voltage, 0.0) * 0.20) * (0.68 + erk * 0.62), 0.11);
 
     float membraneExposure = saturate(cell.tissueGeometry.z);
+    float multicellularExpression =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    float previousIntegumentCoverage = saturate(cell.collectiveBoundary.x);
+    float previousIntegumentTension = saturate(cell.collectiveBoundary.y);
+    float previousAppendageMaturity = saturate(cell.collectiveBoundary.z);
+    float previousGaitPhase = fract(cell.collectiveBoundary.w + 1.0);
     float uptakePotential = 0.00125 * (
         localState.x * cell.phenotype.z + localEcology.x * cell.phenotype.w +
         localEcology.y * agent.geneC.z * 0.34
@@ -6350,6 +6369,13 @@ kernel void evolveOrganismCells(
         incomingRejection * 0.44 + barrierLoad * 0.24 +
         environmentalDrive * (1.0 - frequencyMatch) * 0.30
     ) * mix(1.0, 0.78, extracellularMatrixSupport) + woundCue * 0.46);
+    float integumentProtection = multicellularExpression * previousIntegumentCoverage *
+        sqrt(saturate(cell.physiology.w)) *
+        (0.42 + previousIntegumentTension * 0.58);
+    externalStress = saturate(
+        externalStress * (1.0 - integumentProtection * 0.64) +
+        woundCue * integumentProtection * 0.30
+    );
     float resourceTotal = max(localState.x + localEcology.x + localEcology.y, 0.0001);
     float extracellularReceptorBalance =
         localDevelopmentalField.x * development.morphogenTransport.x -
@@ -6489,6 +6515,32 @@ kernel void evolveOrganismCells(
     float locomotorConstruction = membraneExposure * motilityProgram * erk *
         saturate(cell.physiology.x) * mix(0.72, 1.22, fateMemory) * metabolicReadiness *
         discretionaryActivityScale;
+    float integumentSynthesisDrive = multicellularExpression * membraneExposure *
+        repairProgram * saturate(cell.physiology.x) * metabolicReadiness *
+        (adhesiveProgram * 0.58 + secretionProgram * 0.42) *
+        (0.62 + extracellularMatrixSupport * 0.38) * discretionaryActivityScale;
+    float integumentDamageDrive = saturate(
+        localContactDamage * 0.82 + woundCue * 0.48 + toxinLoad * 0.18 +
+        max(cell.membrane.z - 1.28, 0.0) * 0.32
+    );
+    float collectiveBoundarySupport = max(
+        previousIntegumentCoverage, transmittedIntegument * 0.78
+    );
+    float integumentTensionTarget = multicellularExpression * collectiveBoundarySupport *
+        sqrt(max(adhesiveProgram * contractileProgram, 0.0)) *
+        (0.48 + saturate(junctionConductance) * 0.52) *
+        saturate(cell.physiology.w);
+    float appendageGrowthDrive = multicellularExpression * membraneExposure *
+        previousIntegumentCoverage * motilityProgram *
+        (0.24 + erk * 0.76) * (0.44 + fateMemory * 0.56) *
+        metabolicReadiness * discretionaryActivityScale;
+    float collectiveBoundaryMaintenance = multicellularExpression * (
+        previousIntegumentCoverage * 0.34 +
+        previousIntegumentTension *
+            (0.24 + previousIntegumentCoverage * 0.20) +
+        previousAppendageMaturity *
+            (0.30 + motilityProgram * (0.18 + erk * 0.34))
+    );
     float localMatrixNeed = 1.0 - extracellularMatrixSupport;
     float extracellularMatrixConstruction = membraneExposure * adhesiveProgram *
         repairProgram * saturate(cell.physiology.x) *
@@ -6499,10 +6551,11 @@ kernel void evolveOrganismCells(
         (0.20 + woundCue * 0.80) * metabolicReadiness;
     float structuralDrag = 1.0 / (
         1.0 + armorConstruction * 1.50 + predatoryConstruction * 0.35 +
-            sensorConstruction * 0.12
+            sensorConstruction * 0.12 + previousIntegumentCoverage * 0.18
     );
     float uptakeGain = mix(0.66, 1.42, permeabilityProgram) *
-        (1.0 - armorConstruction * 0.28);
+        (1.0 - armorConstruction * 0.28) *
+        (1.0 + integumentProtection * (0.12 + secretionProgram * 0.18));
     uint energyTileBase = (coordinate.y * uniforms.width + coordinate.x) *
         worldExchangeChannelCount;
     float requestedResourceA = localState.x * cell.phenotype.z * 0.00125 *
@@ -6549,7 +6602,10 @@ kernel void evolveOrganismCells(
         predatoryConstruction * 0.000060 + sensorConstruction * 0.000025 +
         locomotorConstruction * 0.000040 +
         extracellularMatrixConstruction * 0.000052 +
-        extracellularMatrixRemodeling * 0.000030;
+        extracellularMatrixRemodeling * 0.000030 +
+        integumentSynthesisDrive * 0.000082 +
+        appendageGrowthDrive * 0.000068 +
+        collectiveBoundaryMaintenance * 0.000018;
     float junctionMaterialWork = junctionMaterialDemand * 0.0000045 +
         junctionStrainMemory * 0.000016;
     float cellularCatalystSecretion = secretionProgram * agent.geneA.y *
@@ -6607,6 +6663,34 @@ kernel void evolveOrganismCells(
     float unclampedATP = availableATP - paidATPExpense;
     float overflowHeat = max(unclampedATP - 1.2, 0.0);
     float atp = clamp(unclampedATP, 0.0, 1.2);
+    float integumentErosion = integumentDamageDrive * 0.0038 +
+        (1.0 - multicellularExpression) * 0.014 +
+        (1.0 - expenseScale) * previousIntegumentCoverage * 0.0018;
+    float integumentCoverage = clamp(
+        previousIntegumentCoverage +
+            integumentSynthesisDrive * expenseScale *
+                (1.0 - previousIntegumentCoverage) * 0.0052 -
+            integumentErosion,
+        0.0, 1.0
+    );
+    float integumentTension = mix(
+        previousIntegumentTension,
+        integumentTensionTarget * max(
+            integumentCoverage, transmittedIntegument * 0.78
+        ),
+        0.010 + expenseScale * 0.024
+    ) * mix(0.92, 1.0, multicellularExpression);
+    float appendageTarget = smoothstep(
+        0.0025, 0.055, appendageGrowthDrive
+    ) * (0.72 + integumentCoverage * 0.28);
+    float appendageMaturity = mix(
+        previousAppendageMaturity, appendageTarget,
+        0.006 + expenseScale * 0.014
+    ) * mix(0.90, 1.0, multicellularExpression);
+    float gaitPhase = fract(
+        previousGaitPhase + naturalFrequency *
+            (0.52 + erk * 1.18) * (0.40 + appendageMaturity * 0.60)
+    );
     float netProgramContribution = uptake - paidATPExpense;
     float detritusEnergy = maintenance * 0.34;
     float heatExport = conversionHeat + maintenance * 0.66 + dissipation +
@@ -6679,14 +6763,16 @@ kernel void evolveOrganismCells(
     float permeabilityTurnover = permeabilityProgram * 0.000024 *
         mix(0.18, 1.0, metabolicReadiness);
     float membraneRepairEfficiency = mix(1.20, 2.35, repairProgram) *
-        (0.82 + extracellularMatrixSupport * 0.18);
+        (0.82 + extracellularMatrixSupport * 0.18) *
+        (1.0 + integumentCoverage * integumentTension * 0.28);
     float membraneRepair = paidRepairWork * membraneRepairEfficiency +
         repairProgram * metabolicReadiness * 0.000018;
     float membraneATPSetpoint = mix(0.12, 0.27, metabolicReadiness);
     float membraneIntegrity = clamp(
         cell.physiology.w + (atp - membraneATPSetpoint) * 0.00020 + membraneRepair -
             stress * 0.00022 - apoptosis * 0.00031 - permeabilityTurnover -
-            incomingRejection * 0.00026,
+            incomingRejection * 0.00026 +
+            integumentCoverage * integumentTension * expenseScale * 0.000026,
         0.0, 1.0
     );
     float energySupport = cellularEnergySupport(
@@ -6773,6 +6859,10 @@ kernel void evolveOrganismCells(
     cell.development = float4(
         developmentalPolarity, fateMemory, junctionTransport
     );
+    cell.collectiveBoundary = float4(
+        integumentCoverage, saturate(integumentTension),
+        saturate(appendageMaturity), gaitPhase
+    );
 
     float2 boundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
         ? normalize(cell.tissueGeometry.xy)
@@ -6804,6 +6894,12 @@ kernel void evolveOrganismCells(
         (0.000045 + cell.phenotype.y * 0.000105) *
         (0.46 + adhesiveProgram * 0.54) *
         (1.0 + extracellularMatrixSupport * adhesiveProgram * 0.38) * structuralDrag;
+    float appendageGrip = appendageMaturity * integumentCoverage *
+        (0.38 + extracellularMatrixSupport * 0.42 + shearAnchoring * 0.20);
+    activeTraction *= 1.0 + appendageGrip * 1.45;
+    activeTraction += tractionDirection * appendageGrip *
+        (0.000020 + contractility * 0.000034) *
+        (0.72 + 0.28 * sin(gaitPhase * 2.0 * M_PI_F));
     activeTraction += boundaryNormal * exposure * contractility * tractionGain *
         (0.000014 + adhesiveProgram * 0.000026) * structuralDrag;
     float2 localFieldMotion = rotateWorldToTissue(localMechanical.xy, agent);
@@ -7018,6 +7114,19 @@ kernel void evolveCellMembranes(
         (0.35 + saturate(cell.resonance.z * 5.0) * 0.65);
     float locomotorConstruction = exposure * cell.regulationB.w * cell.signaling.y *
         saturate(cell.physiology.x);
+    float integumentCoverage = saturate(cell.collectiveBoundary.x);
+    float integumentTension = saturate(cell.collectiveBoundary.y);
+    float appendageMaturity = saturate(cell.collectiveBoundary.z);
+    float gaitPhase = fract(cell.collectiveBoundary.w + 1.0);
+    float lateralBoundaryAffinity = smoothstep(0.30, 0.76, abs(boundaryNormal.y));
+    float sidePhase = boundaryNormal.y >= 0.0 ? 0.0 : M_PI_F;
+    float strideWave = sin(gaitPhase * 2.0 * M_PI_F + sidePhase);
+    float2 appendageDirection = normalize(
+        boundaryNormal * 0.90 + float2(strideWave * 0.34, 0.0) +
+        boundaryNormal * 0.0001
+    );
+    float appendageExtension = appendageMaturity * lateralBoundaryAffinity *
+        (0.62 + 0.38 * (0.5 + 0.5 * strideWave));
 
     float signedDoubleArea = 0.0;
     float perimeter = 0.0;
@@ -7048,33 +7157,41 @@ kernel void evolveCellMembranes(
             sensorConstruction;
         float locomotorLobe = pow(saturate(dot(radialNormal, tractionDirection)), 4.0) *
             locomotorConstruction;
+        float appendageLobe = pow(
+            saturate(dot(radialNormal, appendageDirection)), 9.0
+        ) * appendageExtension;
         float armorPlate = pow(saturate(dot(radialNormal, boundaryNormal)), 2.0) *
             armorConstruction;
         float vertexTargetRadius = targetRadius * (
             1.0 + predatoryLobe * 0.58 + sensorLobe * 0.34 +
-            locomotorLobe * 0.24 + armorPlate * 0.10
+            locomotorLobe * 0.24 + appendageLobe * 0.78 + armorPlate * 0.10
         );
         float stiffness = mix(0.006, 0.026, saturate(cell.physiology.w *
-            localIntegrity[vertexIndex])) * (1.0 + armorPlate * 0.92);
+            localIntegrity[vertexIndex])) * (1.0 + armorPlate * 0.92) *
+            (1.0 + integumentCoverage * integumentTension * 1.10);
         float2 edgeForce = toPrevious / previousLength * (previousLength - restEdge) * stiffness +
             toNext / nextLength * (nextLength - restEdge) * stiffness;
         float bendingStiffness = mix(
             0.010,
             0.030 + cell.regulation.y * 0.022,
             saturate(localIntegrity[vertexIndex])
-        );
+        ) * (1.0 + integumentCoverage * integumentTension * 0.72) *
+            mix(1.0, 0.52, appendageLobe);
         float2 bendingForce = (positions[previous] + positions[next] - current * 2.0) *
             bendingStiffness;
         float2 pressureForce = radialNormal * areaError *
             (0.0018 + cell.physiology.x * 0.0028);
         float2 morphogenesisForce = radialNormal *
             clamp(vertexTargetRadius - radialLength, -0.08, 0.12) *
-            (0.0048 + cell.regulationB.w * 0.0042 + armorPlate * 0.0020);
+            (0.0048 + cell.regulationB.w * 0.0042 + armorPlate * 0.0020 +
+                appendageLobe * 0.0048);
         float2 contractileForce = -radialNormal * cell.mechanics.x *
             (0.00028 + cell.regulation.z * 0.00062);
         float contactPressure = previousPressure[vertexIndex] * 0.72;
         float integrityTarget = clamp(
-            cell.physiology.w - contactPressure * 8.0 - cell.signals.z * 0.08,
+            cell.physiology.w - contactPressure * 8.0 *
+                (1.0 - integumentCoverage * integumentTension * 0.58) -
+                cell.signals.z * 0.08,
             0.04, 1.0
         );
         float integrity = mix(
@@ -8085,17 +8202,29 @@ kernel void resolveMembraneContacts(
                                 other.regulation.y * other.regulation.w * otherAgent.geneA.w *
                                 saturate(other.physiology.x) *
                                 pow(saturate(dot(otherLocalDirection, boundaryB)), 2.0);
+                            float collectiveDefenseA = saturate(
+                                cell.collectiveBoundary.x *
+                                (0.38 + cell.collectiveBoundary.y * 0.62) *
+                                pow(saturate(dot(localDirection, boundaryA)), 2.0)
+                            );
+                            float collectiveDefenseB = saturate(
+                                other.collectiveBoundary.x *
+                                (0.38 + other.collectiveBoundary.y * 0.62) *
+                                pow(saturate(dot(otherLocalDirection, boundaryB)), 2.0)
+                            );
                             float attackA = sameOwner ? 0.0 :
                                 attackConstructionA * (0.20 + pairDifference * 0.80);
                             float attackB = sameOwner ? 0.0 :
                                 attackConstructionB * (0.20 + pairDifference * 0.80);
                             float defenseA = saturate(
                                 supportA.integrity * (0.50 + cell.phenotype.x * 0.24 +
-                                    armorConstructionA * 0.62)
+                                    armorConstructionA * 0.62 +
+                                    collectiveDefenseA * 0.88)
                             );
                             float defenseB = saturate(
                                 supportB.integrity * (0.50 + other.phenotype.x * 0.24 +
-                                    armorConstructionB * 0.62)
+                                    armorConstructionB * 0.62 +
+                                    collectiveDefenseB * 0.88)
                             );
                             float damageToA = contactStrength * attackB * (1.12 - defenseA) * 0.010;
                             float damageToB = contactStrength * attackA * (1.12 - defenseB) * 0.010;
@@ -8112,10 +8241,12 @@ kernel void resolveMembraneContacts(
                             float freshDamageB = smoothstep(0.0000001, 0.000004, damageToB);
                             float breachA = saturate(
                                 localFailureA * 0.78 + freshDamageA * 0.42
-                            ) * cell.tissueGeometry.z;
+                            ) * cell.tissueGeometry.z *
+                                (1.0 - collectiveDefenseA * 0.84);
                             float breachB = saturate(
                                 localFailureB * 0.78 + freshDamageB * 0.42
-                            ) * other.tissueGeometry.z;
+                            ) * other.tissueGeometry.z *
+                                (1.0 - collectiveDefenseB * 0.84);
                             float availableFromA = min(
                                 cell.physiology.x * 0.012 / 0.82,
                                 max(cell.physiology.y - 0.16, 0.0) * 0.004 / 0.30
@@ -8226,19 +8357,26 @@ kernel void resolveMembraneContacts(
                                 float metabolicInvestment = sqrt(max(
                                     cell.physiology.x * other.physiology.x, 0.0
                                 ));
+                                float collectiveCohesion = max(
+                                    cell.collectiveBoundary.x * cell.collectiveBoundary.y,
+                                    other.collectiveBoundary.x * other.collectiveBoundary.y
+                                );
                                 float pairAdhesion = min(cell.phenotype.x, other.phenotype.x) *
                                     sqrt(max(cell.physiology.w * other.physiology.w, 0.0)) *
                                     inheritedJunctionMaterial.x *
                                     (1.0 - localRelease * 0.94) *
-                                    (1.0 + localNurture * 0.32);
+                                    (1.0 + localNurture * 0.32) *
+                                    (1.0 + collectiveCohesion * 1.18);
                                 float pairDamping = inheritedJunctionMaterial.z *
-                                    (0.28 + topologyIntegrity * 0.72);
+                                    (0.28 + topologyIntegrity * 0.72) *
+                                    (1.0 + collectiveCohesion * 0.46);
                                 float pairPermeability = inheritedJunctionMaterial.w *
                                     (0.22 + min(cell.regulationB.x, other.regulationB.x) * 0.78) *
                                     topologyIntegrity * (1.0 + localNurture * 0.72);
                                 float pairCorticalTension = inheritedJunctionMaterial.y *
                                     (0.24 + 0.38 * (cell.regulation.z + other.regulation.z)) *
-                                    (1.0 - localRelease * 0.58);
+                                    (1.0 - localRelease * 0.58) *
+                                    (1.0 + collectiveCohesion * 1.32);
                                 float4 targetMaterial = clamp(float4(
                                     pairAdhesion * (0.42 + metabolicInvestment * 0.76),
                                     pairDamping,
@@ -8750,7 +8888,9 @@ kernel void accumulateSimulationInvariants(
         CellState cell = cells[gid];
         bool validState = all(isfinite(cell.position)) && all(isfinite(cell.velocity)) &&
             all(isfinite(cell.physiology)) && all(isfinite(cell.membrane)) &&
-            all(isfinite(cell.development)) &&
+            all(isfinite(cell.development)) && all(isfinite(cell.collectiveBoundary)) &&
+            all(cell.collectiveBoundary >= float4(0.0)) &&
+            all(cell.collectiveBoundary <= float4(1.0001)) &&
             cell.physiology.w >= 0.0 && cell.physiology.w <= 1.0001;
         float signedDoubleArea = 0.0;
         float perimeter = 0.0;
@@ -9284,6 +9424,13 @@ kernel void divideAndReduceOrganismCells(
                 )
                 : 0.50;
             float parentMaterialShare = 1.0 - childMaterialShare;
+            // Existing sheath material is divided with the two new surfaces;
+            // cytokinesis cannot duplicate a mature integument or appendage for free.
+            parent.collectiveBoundary.xy *= sqrt(parentMaterialShare);
+            child.collectiveBoundary.xy *= sqrt(childMaterialShare);
+            parent.collectiveBoundary.z *= parentMaterialShare;
+            child.collectiveBoundary.z *= childMaterialShare;
+            child.collectiveBoundary.w = fract(parent.collectiveBoundary.w + 0.5);
             float preDivisionATP = parent.physiology.x;
             float preDivisionBiomass = parent.physiology.y;
             parent.physiology.x = preDivisionATP * parentMaterialShare;
@@ -10759,6 +10906,7 @@ struct JunctionRasterData {
     float4 transport;
     float4 lineageA;
     float4 lineageB;
+    float collectiveCohesion;
     float visibility;
 };
 
@@ -10859,9 +11007,15 @@ vertex JunctionRasterData junctionVertex(
     float strain = clamp(junctionStates[junctionIndex].remodeling.y * 18.0, -1.0, 1.0);
     float strength = saturate(junctionStates[junctionIndex].strength);
     float corticalTension = saturate(junctionStates[junctionIndex].material.w);
+    float collectiveCohesion = saturate(max(
+        stateA.collectiveBoundary.y, stateB.collectiveBoundary.y
+    ));
     float thickness = clamp(
-        worldUnit * uniforms.cameraZoom * (0.010 + load * 0.012 + corticalTension * 0.004),
-        0.0018, 0.012
+        worldUnit * uniforms.cameraZoom * (
+            0.010 + load * 0.012 + corticalTension * 0.004 +
+            collectiveCohesion * 0.014
+        ),
+        0.0018, 0.020
     );
     float2 normal = normalize(float2(-clipDelta.y, clipDelta.x));
     float2 clipPosition = mix(clipA, clipB, coordinate.x) +
@@ -10870,6 +11024,7 @@ vertex JunctionRasterData junctionVertex(
     output.position = float4(clipPosition, 0.0, 1.0);
     output.ribbonCoordinate = coordinate;
     output.mechanics = float4(load, strain, strength, corticalTension);
+    output.collectiveCohesion = collectiveCohesion;
 
     float4 interactionA = programInteractions[cellA];
     float4 interactionB = programInteractions[cellB];
@@ -10967,6 +11122,9 @@ fragment float4 junctionFragment(
     float lineageRail = smoothstep(0.62, 0.80, side) *
         (1.0 - smoothstep(0.88, 1.0, side));
     float3 lineageColor = mix(input.lineageA.rgb, input.lineageB.rgb, along);
+    color += mix(lineageColor, float3(0.84, 1.0, 0.94), 0.34) *
+        ribbon * input.collectiveCohesion *
+        (0.30 + centerRail * 0.42);
     float lineagePacket = 0.72 + 0.28 * sin(
         along * 14.0 - time * 0.018 + signedStrain * 2.0
     );
@@ -10979,7 +11137,8 @@ fragment float4 junctionFragment(
         load, max(abs(atpFlux), max(abs(calciumFlux), abs(erkFlux)))
     );
     float alpha = ribbon * input.visibility * saturate(
-        0.16 + strength * 0.18 + load * 0.28 + activity * 0.34 + mixedPrograms * 0.18
+        0.16 + strength * 0.18 + load * 0.28 + activity * 0.34 +
+        mixedPrograms * 0.18 + input.collectiveCohesion * 0.32
     );
     color *= input.visibility;
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
@@ -11005,6 +11164,7 @@ struct CellRasterData {
     float4 tissueForce;
     float4 environment;
     float4 development;
+    float4 collectiveBoundary;
     float4 programEcology;
     float4 construction;
     float lineageHue;
@@ -11133,6 +11293,7 @@ inline CellRasterData makeCellRasterData(
     output.tissueForce = cell.tissueForce;
     output.environment = cell.environment;
     output.development = cell.development;
+    output.collectiveBoundary = cell.collectiveBoundary;
     output.programEcology = programInteractions[cellIndex];
     uint programIndex = cellIdentities[cellIndex].programIndex;
     AgentState cellProgram = agentWithCellProgram(
@@ -11297,6 +11458,9 @@ fragment float4 cellFragment(
     float nucleus = (1.0 - smoothstep(nucleusRadius, nucleusRadius + aa * 2.0,
         length(p - nucleusPosition))) * body;
     float exposure = saturate(input.edgeExposure);
+    float integumentCoverage = saturate(input.collectiveBoundary.x) * exposure;
+    float integumentTension = saturate(input.collectiveBoundary.y);
+    float collectiveUnity = saturate(max(integumentCoverage, integumentTension));
     float2 boundaryNormal = length(input.tissueGeometry.xy) > 0.0001
         ? normalize(input.tissueGeometry.xy) : morphologyAxis;
     float2 surfaceDirection = length(p) > 0.001 ? normalize(p) : boundaryNormal;
@@ -11306,6 +11470,10 @@ fragment float4 cellFragment(
         smoothstep(0.82, 1.0, radius) * 0.82;
     membrane *= membraneContinuity;
     exposedArc *= membraneContinuity;
+    float integumentBand = body * smoothstep(
+        1.0 - membraneThickness * (1.42 + integumentCoverage * 0.72),
+        0.992, radius
+    ) * integumentCoverage * membraneContinuity;
     float woundArc = membrane * smoothstep(0.08, 0.78, localFailure);
     float repairDemand = saturate((1.0 - integrity) * 1.5 + localStrain * 0.30);
     float repairFront = membrane * paidRepair * repairDemand *
@@ -11384,8 +11552,14 @@ fragment float4 cellFragment(
             length(p - coarseContactDirection * 0.78))) * coarseContactStrength * body;
         float energyCore = (1.0 - smoothstep(0.08, 0.42, radius)) *
             morphologyCytoplasm * coarseATP;
-        float outerMembrane = morphologyExposedArc;
-        float internalMembrane = morphologyMembrane * (1.0 - exposure);
+        float collectiveEnvelope = body * smoothstep(
+            0.78 - integumentCoverage * 0.10, 0.992, radius
+        ) * integumentCoverage * membraneContinuity;
+        float outerMembrane = max(morphologyExposedArc, collectiveEnvelope);
+        float internalMembrane = morphologyMembrane * (1.0 - exposure) *
+            (1.0 - collectiveUnity * mix(0.88, 0.38, organismDetail));
+        float coarseNucleus = nucleus *
+            (1.0 - collectiveUnity * mix(0.82, 0.24, organismDetail));
         float nucleusRing = (1.0 - smoothstep(aa * 1.1, aa * 3.0,
             abs(length(p - nucleusPosition) - nucleusRadius * 1.18))) *
             morphologyCytoplasm;
@@ -11412,7 +11586,7 @@ fragment float4 cellFragment(
         coarseColor += mix(roleColor, float3(0.94, 0.99, 1.0),
             0.28 + autonomySignal * 0.22) * outerMembrane *
             (0.44 + autonomySignal * 0.34);
-        coarseColor += mix(float3(0.98, 0.12, 0.66), coarseLineage, 0.28) * nucleus *
+        coarseColor += mix(float3(0.98, 0.12, 0.66), coarseLineage, 0.28) * coarseNucleus *
             (0.24 + organismDetail * 0.62);
         coarseColor += mix(float3(0.06, 0.78, 1.0), float3(1.0, 0.18, 0.64),
             coarseERK) * nucleusRing * (0.16 + organismDetail * 0.28);
@@ -11426,7 +11600,7 @@ fragment float4 cellFragment(
             (0.045 + saturate(input.mechanics.x) * 0.095);
         coarseColor += float3(0.02, 0.88, 1.0) * coarseCalcium * morphologyMembrane *
             (0.22 + organismDetail * 0.42);
-        coarseColor += float3(0.98, 0.08, 0.66) * coarseERK * nucleus *
+        coarseColor += float3(0.98, 0.08, 0.66) * coarseERK * coarseNucleus *
             (0.26 + organismDetail * 0.54);
         coarseColor += float3(0.02, 1.0, 0.58) * tractionTrack *
             (0.42 + organismDetail * 0.52);
@@ -11445,6 +11619,12 @@ fragment float4 cellFragment(
         coarseColor += float3(0.08, 0.92, 0.62) * morphologyExposedArc * input.construction.y * 0.72;
         coarseColor += float3(0.04, 0.78, 1.0) * morphologyExposedArc * input.construction.z * 0.88;
         coarseColor += float3(0.12, 1.0, 0.42) * morphologyExposedArc * input.construction.w * 0.74;
+        float3 integumentColor = mix(
+            coarseLineage, float3(0.84, 1.0, 0.94),
+            0.24 + integumentTension * 0.34
+        );
+        coarseColor += integumentColor * collectiveEnvelope *
+            (0.76 + integumentTension * 0.54);
         coarseColor += mix(
             float3(0.08, 0.96, 0.70), float3(0.96, 0.99, 1.0), autonomySignal
         ) * morphologyExposedArc * autonomySignal * autonomyPulse *
@@ -11470,7 +11650,7 @@ fragment float4 cellFragment(
             coarseColor += mix(
                 float3(1.0, 0.70, 0.02), float3(0.08, 1.0, 0.56),
                 saturate(input.development.z)
-            ) * nucleus * 0.96;
+            ) * coarseNucleus * 0.96;
             coarseColor += float3(0.90, 0.98, 1.0) * morphologyMembrane *
                 saturate(input.development.w * 28.0) * 0.82;
         } else if (uniforms.displayMode == 5) {
@@ -11480,7 +11660,7 @@ fragment float4 cellFragment(
             coarseColor = float3(0.008, 0.014, 0.022) * body;
             coarseColor += float3(0.02, 0.88, 1.0) * mechanicsCalcium *
                 morphologyMembrane * 1.24;
-            coarseColor += float3(0.98, 0.08, 0.66) * calciumERK * nucleus * 1.36;
+            coarseColor += float3(0.98, 0.08, 0.66) * calciumERK * coarseNucleus * 1.36;
             coarseColor += float3(0.08, 1.0, 0.56) * erkTraction *
                 morphologyCytoplasm * 0.82;
         }
@@ -11559,6 +11739,8 @@ fragment float4 cellFragment(
         (0.12 + frequencyMatch * 0.64);
     float3 membraneColor = mix(differentiatedLineage, voltageColor, 0.58);
     color += membraneColor * membrane * (0.30 + integrity * 0.34);
+    color += mix(lineage, float3(0.84, 1.0, 0.94), 0.30 + integumentTension * 0.28) *
+        integumentBand * (0.68 + integumentTension * 0.74);
     color += float3(1.0, 0.58, 0.025) * mitochondria * atp * 0.62;
     color += mix(float3(0.86, 0.06, 0.68), lineage, 0.34) * nucleus * 0.72;
     color += float3(0.96, 0.90, 0.58) * cleavage * cycle * 0.56;

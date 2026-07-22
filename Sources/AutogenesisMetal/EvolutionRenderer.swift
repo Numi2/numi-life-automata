@@ -1554,6 +1554,7 @@ private struct CellState {
     var tissueForce: SIMD4<Float>
     var environment: SIMD4<Float>
     var development: SIMD4<Float>
+    var collectiveBoundary: SIMD4<Float>
 }
 
 private struct CellIdentity {
@@ -2273,7 +2274,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         precondition(MemoryLayout<AgentState>.stride == 192, "AgentState Metal ABI drift")
         precondition(MemoryLayout<AgentObservationRecord>.stride == 176, "AgentObservationRecord Metal ABI drift")
         precondition(MemoryLayout<CellObservationRecord>.stride == 160, "CellObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellState>.stride == 288, "CellState Metal ABI drift")
+        precondition(MemoryLayout<CellState>.stride == 304, "CellState Metal ABI drift")
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
         precondition(MemoryLayout<CellMemoryState>.stride == 32, "CellMemoryState Metal ABI drift")
         precondition(MemoryLayout<CellCorpseState>.stride == 56, "CellCorpseState Metal ABI drift")
