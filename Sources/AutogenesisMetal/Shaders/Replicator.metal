@@ -55,6 +55,9 @@ constant uint membraneContactPairCapacity = 524288u;
 constant uint componentTopologyReconciliationStride = 256u;
 constant uint cellJunctionCapacity = 32768u;
 constant uint cellJunctionMask = cellJunctionCapacity - 1u;
+constant uint cellContactEffectChannelCount = 6u;
+constant uint sexualPartnerIndexBits = 14u;
+constant uint sexualPartnerIndexMask = (1u << sexualPartnerIndexBits) - 1u;
 // Substrate/energy exchange occupies channels 0...7. Channels 8...13 carry
 // cell-produced developmental matter into the next extracellular-field step:
 // ligand A, ligand B, matrix deposition, wound/remodeling cue, catalyst
@@ -65,6 +68,7 @@ constant uint componentRegeneratedFlag = 1u << 1u;
 constant uint componentHomeostaticFlag = 1u << 2u;
 constant uint componentChallengedFlag = 1u << 3u;
 constant uint componentQualificationTargetFlag = 1u << 4u;
+constant uint componentSexualOffspringFlag = 1u << 5u;
 constant uint reservedCellJunctionEntry = 0u;
 constant uint emptySpatialHashEntry = 0xffffffffu;
 constant int mechanicalForceScale = 1048576;
@@ -477,6 +481,121 @@ inline float detachmentReadinessScore(
         0.72, 1.12, saturate(propaguleInvestment / 1.80)
     );
     return saturate(readiness * adhesionRelease * investmentGain);
+}
+
+inline uint packedSexualPartner(uint partnerIndex, float score) {
+    if (partnerIndex >= maxCellCount || score <= 0.0) { return 0u; }
+    uint scoreQ18 = max(
+        uint(clamp(score * 262143.0, 1.0, 262143.0)), 1u
+    );
+    // Higher suitability wins; equal suitability deterministically selects the
+    // lower persistent cell slot without another allocation or arbitration pass.
+    return (scoreQ18 << sexualPartnerIndexBits) |
+        (sexualPartnerIndexMask - partnerIndex);
+}
+
+inline uint sexualPartnerIndex(uint packedPartner) {
+    if (packedPartner == 0u) { return maxCellCount; }
+    return sexualPartnerIndexMask - (packedPartner & sexualPartnerIndexMask);
+}
+
+inline float sexualPartnerScore(uint packedPartner) {
+    return float(packedPartner >> sexualPartnerIndexBits) / 262143.0;
+}
+
+inline void nominateSexualPartner(
+    device CellIdentity* identities,
+    uint gestatingCell,
+    uint donorCell,
+    float score
+) {
+    uint packedPartner = packedSexualPartner(donorCell, score);
+    if (packedPartner == 0u) { return; }
+    device atomic_uint* nomination = reinterpret_cast<device atomic_uint*>(
+        &identities[gestatingCell].identityPadding0
+    );
+    atomic_fetch_max_explicit(nomination, packedPartner, memory_order_relaxed);
+}
+
+inline uint sexualBudAge(CellIdentity identity, uint step) {
+    if (identity.identityPadding2 == 0u) { return 0u; }
+    uint conceptionStep = identity.identityPadding2 - 1u;
+    return step >= conceptionStep ? step - conceptionStep : 0u;
+}
+
+inline float sexualBudNurture(
+    CellIdentity identity,
+    uint step,
+    float propaguleInvestment
+) {
+    if (identity.identityPadding2 == 0u) { return 0.0; }
+    float investment = saturate(propaguleInvestment / 1.80);
+    float releaseStart = mix(112.0, 48.0, investment);
+    return 1.0 - smoothstep(releaseStart * 0.45, releaseStart + 28.0,
+        float(sexualBudAge(identity, step)));
+}
+
+inline float sexualBudRelease(
+    CellIdentity identity,
+    uint step,
+    float propaguleInvestment,
+    float atp,
+    float integrity
+) {
+    if (identity.identityPadding2 == 0u) { return 0.0; }
+    float investment = saturate(propaguleInvestment / 1.80);
+    float releaseStart = mix(112.0, 48.0, investment);
+    float developmentalTime = smoothstep(
+        releaseStart, releaseStart + mix(112.0, 56.0, investment),
+        float(sexualBudAge(identity, step))
+    );
+    float physiologicalReadiness = smoothstep(0.18, 0.34, atp) *
+        smoothstep(0.50, 0.82, integrity);
+    return saturate(developmentalTime * physiologicalReadiness);
+}
+
+inline float reproductiveEndocrineDrive(
+    CellState cell,
+    DevelopmentalGenome development,
+    AgentState program
+) {
+    float energeticSurplus = smoothstep(0.16, 0.48, cell.physiology.x) *
+        smoothstep(0.40, 0.82, cell.physiology.y);
+    float somaticReadiness = smoothstep(0.34, 0.78, cell.physiology.w) *
+        (1.0 - smoothstep(0.42, 0.74, cell.signals.z));
+    float receptorBalance =
+        cell.signals.x * development.morphogenTransport.x -
+        cell.signals.y * development.morphogenTransport.y +
+        (cell.development.z - 0.5) * 0.34;
+    float endocrinePermission = mix(
+        0.48, 1.0, smoothstep(-0.28, 0.46, receptorBalance)
+    );
+    float refractoryAvailability = mix(
+        0.30, 1.0, 1.0 - smoothstep(0.20, 0.72, cell.signaling.z)
+    );
+    float inheritedInvestment = sqrt(max(
+        program.social.w * saturate(development.mechanochemistryB.w / 1.80),
+        0.0
+    ));
+    float readinessProduct = max(
+        energeticSurplus * somaticReadiness * endocrinePermission *
+            refractoryAvailability,
+        0.0000001
+    );
+    return saturate(sqrt(sqrt(readinessProduct)) * inheritedInvestment);
+}
+
+inline void applyLocalReproductiveClimax(
+    thread CellState& cell,
+    float intensity
+) {
+    float peak = saturate(intensity);
+    cell.signals.z = saturate(cell.signals.z - peak * 0.060);
+    cell.signaling.x = saturate(cell.signaling.x + peak * 0.30);
+    cell.signaling.y = saturate(cell.signaling.y + peak * 0.34);
+    cell.signaling.z = saturate(cell.signaling.z + peak * 0.16);
+    cell.dynamics.x = clamp(cell.dynamics.x + peak * 0.20, -1.8, 1.8);
+    cell.mechanics.x = clamp(cell.mechanics.x + peak * 0.42, 0.0, 1.8);
 }
 
 inline float cellCycleDrive(
@@ -3945,7 +4064,8 @@ kernel void collectAgentObservations(
         ? (1u | (agent.geneC.w >= 0.08 ? 2u : 0u) |
             ((agent.componentFlags & componentRegeneratedFlag) != 0u ? 4u : 0u) |
             ((agent.componentFlags & componentHomeostaticFlag) != 0u ? 8u : 0u) |
-            ((agent.componentFlags & componentChallengedFlag) != 0u ? 16u : 0u))
+            ((agent.componentFlags & componentChallengedFlag) != 0u ? 16u : 0u) |
+            ((agent.componentFlags & componentSexualOffspringFlag) != 0u ? 32u : 0u))
         : 0u;
     observation.birthID = agent.birthID;
     observation.parentBirthID = agent.parentBirthID;
@@ -4475,6 +4595,7 @@ kernel void unionCellComponents(
     device const HeritableProgram* heritablePrograms [[buffer(10)]],
     device atomic_uint* identityCounters [[buffer(11)]],
     device CellJunctionState* junctionStates [[buffer(12)]],
+    device const DevelopmentalGenome* developmentalGenomes [[buffer(13)]],
     uint pairIndex [[thread_position_in_grid]]
 ) {
     if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u ||
@@ -4520,6 +4641,7 @@ kernel void unionCellComponents(
                     float fusionDrive = 0.0;
                     bool fusionEligible = false;
                     bool distinctProgramPair = false;
+                    bool sexualAlternative = false;
                     if (!sameOwner) {
                         uint programA = cellIdentities[gid].programIndex;
                         uint programB = cellIdentities[otherIndex].programIndex;
@@ -4549,6 +4671,29 @@ kernel void unionCellComponents(
                             float bilateralFusionInvestment = min(
                                 inheritedA.social.x, inheritedB.social.x
                             );
+                            float bilateralReproductiveInvestment = min(
+                                inheritedA.social.w, inheritedB.social.w
+                            );
+                            float reproductiveRefractory = max(
+                                cell.signaling.z, other.signaling.z
+                            );
+                            float localReproductiveCompletion = max(
+                                smoothstep(0.62, 1.0, cell.physiology.z) *
+                                    smoothstep(0.18, 0.28, cell.physiology.x),
+                                smoothstep(0.62, 1.0, other.physiology.z) *
+                                    smoothstep(0.18, 0.28, other.physiology.x)
+                            );
+                            // Fusion and sex remain evolvable alternatives. When
+                            // reciprocal propagule investment outweighs fusion,
+                            // the two bodies keep their identities and can create
+                            // a third body through the contact-local sexual path.
+                            sexualAlternative = distinctProgramPair &&
+                                compatibility > 0.35 && predation < 0.40 &&
+                                bilateralReproductiveInvestment > 0.20 &&
+                                (bilateralReproductiveInvestment >
+                                    bilateralFusionInvestment * 0.62 ||
+                                    localReproductiveCompletion > 0.28 ||
+                                    reproductiveRefractory > 0.08);
                             // Boundary isolation contributes to detachment readiness,
                             // so it cannot also be an absolute mating veto for free
                             // cells. It remains a strong reluctance penalty while
@@ -4577,9 +4722,10 @@ kernel void unionCellComponents(
                             float compressiveContactGate = 1.0 - smoothstep(
                                 -0.00001, 0.00036, separatingSpeed
                             );
-                            fusionEligible = predation < 0.40 &&
+                            fusionEligible = !sexualAlternative && predation < 0.40 &&
                                 compatibility > 0.35 &&
                                 bilateralFusionInvestment > 0.20 &&
+                                reproductiveRefractory < 0.08 &&
                                 stressTolerance > 0.35 &&
                                 localDetachmentGate > 0.28 &&
                                 compressiveContactGate > 0.0;
@@ -4590,8 +4736,41 @@ kernel void unionCellComponents(
                                 localDetachmentGate * compressiveContactGate;
                         }
                     }
+                    float sameOwnerNurture = 0.0;
+                    float sameOwnerRelease = 0.0;
+                    if (sameOwner) {
+                        uint programA = cellIdentities[gid].programIndex;
+                        uint programB = cellIdentities[otherIndex].programIndex;
+                        if (programA < maxHeritableProgramCount &&
+                            programB < maxHeritableProgramCount) {
+                            sameOwnerNurture = max(
+                                sexualBudNurture(
+                                    cellIdentities[gid], uniforms.step,
+                                    developmentalGenomes[programA].mechanochemistryB.w
+                                ),
+                                sexualBudNurture(
+                                    cellIdentities[otherIndex], uniforms.step,
+                                    developmentalGenomes[programB].mechanochemistryB.w
+                                )
+                            );
+                            sameOwnerRelease = max(
+                                sexualBudRelease(
+                                    cellIdentities[gid], uniforms.step,
+                                    developmentalGenomes[programA].mechanochemistryB.w,
+                                    cell.physiology.x, cell.physiology.w
+                                ),
+                                sexualBudRelease(
+                                    cellIdentities[otherIndex], uniforms.step,
+                                    developmentalGenomes[programB].mechanochemistryB.w,
+                                    other.physiology.x, other.physiology.w
+                                )
+                            );
+                        }
+                    }
                     float junctionExtension = sameOwner
-                        ? 0.050 * adhesion * integrity
+                        ? 0.050 * adhesion * integrity *
+                            (1.0 - sameOwnerRelease * 0.96) *
+                            (1.0 + sameOwnerNurture * 0.18)
                         : 0.018 * fusionDrive;
                     float junctionDistance = (supportA.x + supportB.x + junctionExtension) * scale;
                     // The heterotypic drive is the product of nine independent
@@ -4601,7 +4780,8 @@ kernel void unionCellComponents(
                     // threshold from weakening recognition, investment, aggression,
                     // stress, detachment, compression, or membrane-contact gates.
                     bool connected = sameOwner
-                        ? integrity > 0.10 && distance <= junctionDistance
+                        ? integrity > 0.10 && sameOwnerRelease < 0.985 &&
+                            distance <= junctionDistance
                         : fusionEligible && fusionDrive > 0.008 &&
                             distance <= junctionDistance;
                     if (!sameOwner && distance <=
@@ -5027,6 +5207,8 @@ kernel void assignCellComponentOwners(
     AgentState child = parent;
     uint childProgramIndex = parentProgramIndex;
     uint childProgramGeneration = cellIdentities[root].programGeneration;
+    bool sexualOffspring = cellIdentities[root].identityPadding2 != 0u &&
+        (heritablePrograms[childProgramIndex].ancestryFlags & 1u) != 0u;
     for (uint index = 0u; index < sourceProgramCount; ++index) {
         uint sourceProgramIndex = componentProgramSources[mappingBase + index];
         componentProgramSources[mappingBase + index] = sourceProgramIndex;
@@ -5047,12 +5229,15 @@ kernel void assignCellComponentOwners(
     child.birthID = childBirthID;
     child.parentBirthID = parentComponent.birthID;
     child.birthStep = uniforms.step;
-    child.lineageFlags = 0u;
+    child.lineageFlags = sexualOffspring
+        ? (parentComponent.lineageFlags | 4u) : 0u;
     child.dominantProgramIndex = childProgramIndex;
     child.dominantProgramGeneration = childProgramGeneration;
     child.componentPersistenceSteps = 0u;
     child.programReplicationGeneration = heritablePrograms[childProgramIndex].generation;
-    child.componentFlags = componentCount > 1u ? componentMulticellularFlag : 0u;
+    child.componentFlags =
+        (componentCount > 1u ? componentMulticellularFlag : 0u) |
+        (sexualOffspring ? componentSexualOffspringFlag : 0u);
     child.lastMutationDistance = 0.0;
     child.tissueKinematics = float4(parent.tissueKinematics.x, parent.tissueKinematics.y, 0.0, 0.0);
     ResonanceGenome childResonance = resonanceGenomes[childProgramIndex];
@@ -5179,6 +5364,17 @@ kernel void reassignCellComponents(
         max(scale, 0.0000001);
     cell.velocity = rotateWorldToTissue(worldVelocity, newAgent);
     cell.tissueForce = float4(0.0);
+    // Body-level fission completes at the exposed cleavage region. Only cells
+    // carrying the local release state receive the initial climax; junction
+    // signaling distributes it through the newly independent body afterward.
+    bool completedFission = newAgent.birthStep == uniforms.step &&
+        newAgent.parentBirthID == oldAgent.birthID;
+    if (completedFission) {
+        float separationClimax = saturate(
+            cell.tissueGeometry.z * (0.28 + cell.tissueGeometry.w * 0.72)
+        );
+        applyLocalReproductiveClimax(cell, separationClimax);
+    }
     // Ownership changes only the coordinate frame. Preserve the locally
     // produced detachment state so a newborn fragment cannot immediately
     // erase its separation drive and fuse back into its parent.
@@ -5444,12 +5640,54 @@ kernel void evolveOrganismCells(
     CellState cell = cellsIn[gid];
     DevelopmentalGenome development = developmentalGenomes[programIndex];
     ResonanceGenome resonanceGenome = resonanceGenomes[programIndex];
+    float reproductiveDrive = reproductiveEndocrineDrive(
+        cell, development, agent
+    );
+    bool independentSexualFounder = cellIdentity.identityPadding2 != 0u &&
+        (agents[owner].componentFlags & componentSexualOffspringFlag) != 0u;
+    if (independentSexualFounder &&
+        agents[owner].componentPersistenceSteps > 96u) {
+        // Once the new body has persisted on its own, ordinary evolved adhesion
+        // resumes. The second-parent body ID remains in identityPadding1.
+        cellIdentity.identityPadding2 = 0u;
+        cellIdentities[gid] = cellIdentity;
+        independentSexualFounder = false;
+    }
+    float sexualNurture = sexualBudNurture(
+        cellIdentity, uniforms.step, development.mechanochemistryB.w
+    );
+    float sexualRelease = sexualBudRelease(
+        cellIdentity, uniforms.step, development.mechanochemistryB.w,
+        cell.physiology.x, cell.physiology.w
+    );
+    if (cellIdentity.identityPadding2 != 0u) {
+        sexualNurture = max(sexualNurture, 1.0 - sexualRelease);
+    }
+    // Reproductive positive valence is universal across programs and scales.
+    // Every viable cell feels rising completion as its own cytokinesis nears;
+    // exposed cells also feel an organism-level gradient as a viable propagule
+    // approaches physical release. Sexual proximity adds through contact below.
+    float reproductivePhysiology =
+        smoothstep(0.10, 0.40, cell.physiology.x) *
+        smoothstep(0.24, 0.70, cell.physiology.y) *
+        smoothstep(0.26, 0.72, cell.physiology.w) *
+        (1.0 - smoothstep(0.56, 0.82, cell.signals.z));
+    float cellularReproductivePleasure =
+        smoothstep(0.18, 1.0, cell.physiology.z) * reproductivePhysiology;
+    float organismReproductivePleasure =
+        smoothstep(0.08, 0.92, sexualRelease + cell.tissueGeometry.w) *
+        saturate(cell.tissueGeometry.z) * reproductivePhysiology;
+    float endogenousReproductivePleasure = saturate(max(
+        cellularReproductivePleasure, organismReproductivePleasure
+    ));
     bool mixedProgramTissue = cellAggregates[owner].inheritance.y > 0.0001;
     float preDetachmentProgram = saturate(
         cell.tissueGeometry.z * cell.regulationB.w * development.mechanochemistryB.w *
         mix(1.16, 0.28, cell.phenotype.x)
     );
-    float detachmentRelease = saturate(cell.tissueGeometry.w + preDetachmentProgram * 0.56);
+    float detachmentRelease = saturate(
+        cell.tissueGeometry.w + preDetachmentProgram * 0.56 + sexualRelease * 0.94
+    ) * (1.0 - sexualNurture);
     // The component origin is a coordinate frame, not a biological attractor.
     // Cohesion is supplied by explicit membrane contacts and persistent junctions.
     float2 mechanicalForce = float2(0.0);
@@ -5757,7 +5995,8 @@ kernel void evolveOrganismCells(
     float extrusionCalciumDrive = cell.signals.w * (0.10 + cell.physiology.w * 0.16);
     float calciumLoss = previousCalcium * (0.0090 + previousRefractory * 0.0140);
     float calciumWithoutMechanical = clamp(
-        previousCalcium + neighborCalciumDrive * 0.018 + extrusionCalciumDrive * 0.012 - calciumLoss,
+        previousCalcium + neighborCalciumDrive * 0.018 + extrusionCalciumDrive * 0.012 +
+            endogenousReproductivePleasure * 0.0048 - calciumLoss,
         0.0, 1.0
     );
     float mechanicalCalciumGate = saturate(
@@ -5776,7 +6015,8 @@ kernel void evolveOrganismCells(
         (0.22 + cell.phenotype.x * 0.42) * development.mechanochemistryA.y;
     float erkLoss = previousERK * (0.0042 + previousRefractory * 0.010);
     float erkWithoutCalcium = clamp(
-        previousERK + neighborERKDrive * 0.016 - erkLoss,
+        previousERK + neighborERKDrive * 0.016 +
+            endogenousReproductivePleasure * 0.0036 - erkLoss,
         0.0, 1.0
     );
     float calciumERKDrive = smoothstep(0.08, 0.46, calcium) * (1.0 - previousRefractory) *
@@ -5799,7 +6039,7 @@ kernel void evolveOrganismCells(
     float voltageDerivative = (
         oldVoltage - oldVoltage * oldVoltage * oldVoltage / 3.0 - recovery +
         0.19 + metabolicDrive + gapCoupling + mechanosensoryDrive + calciumCurrent +
-        phaseDrive * 0.10
+        phaseDrive * 0.10 + endogenousReproductivePleasure * 0.040
     ) * 0.020;
     float voltage = clamp(oldVoltage + voltageDerivative, -1.8, 1.8);
     recovery = clamp(recovery + 0.0038 * (voltage + 0.56 - recovery * 0.78), -0.8, 1.8);
@@ -6049,9 +6289,12 @@ kernel void evolveOrganismCells(
         shearAnchoring * environmentalDrive * 0.075 +
         development.ecologicalResponse.w * 0.0000025 +
         cellularCatalystSecretion * 0.85 + cellularToxinNeutralization * 0.72;
-    float propagulePreparation = membraneExposure * motilityProgram *
-        development.mechanochemistryB.w * (1.0 - adhesiveProgram) *
-        smoothstep(0.16, 0.38, cell.physiology.x) * discretionaryActivityScale;
+    float propagulePreparation = max(
+        membraneExposure * motilityProgram * development.mechanochemistryB.w *
+            (1.0 - adhesiveProgram) *
+            smoothstep(0.16, 0.38, cell.physiology.x),
+        reproductiveDrive * membraneExposure * motilityProgram * 0.58
+    ) * discretionaryActivityScale;
     float crossbreedingPreparation = mixedProgramTissue &&
         meanRecognitionCompatibility >= 0.0
         ? saturate(meanRecognitionCompatibility) * agent.social.w *
@@ -6148,7 +6391,8 @@ kernel void evolveOrganismCells(
     );
     float unresolvedRepair = repairUrgency * (1.0 - repairSatisfaction);
     float stressTarget = saturate(
-        externalStress + energyStrain * 0.46 + unresolvedRepair * 0.24
+        externalStress + energyStrain * 0.46 + unresolvedRepair * 0.24 -
+            endogenousReproductivePleasure * 0.10
     );
     float stressResponse = stressTarget > cell.signals.z
         ? 0.026 : 0.012 + repairCommitment * repairSatisfaction * 0.024;
@@ -6221,7 +6465,8 @@ kernel void evolveOrganismCells(
     float contactBrake = contactInhibition * (0.62 + adhesiveProgram * 0.30);
     float cycleRate = unconstrainedCycleDrive * (1.0 - contactBrake) *
         (1.0 - starvationQuiescence * 0.88) *
-        (1.0 - recoveryAllocation * 0.94);
+        (1.0 - recoveryAllocation * 0.94) *
+        (1.0 + cellularReproductivePleasure * 0.24);
     float cycleDecay = cellCycleQuiescenceDecay(energySupport, contactBrake, stress);
     float cycle = clamp(
         cell.physiology.z + cycleRate - cycleDecay,
@@ -6280,7 +6525,7 @@ kernel void evolveOrganismCells(
     float tractionGain = development.mechanochemistryB.y;
     float tractionActivation = exposure * motilityProgram *
         mix(0.22, 1.0, metabolicReadiness) *
-        (0.16 + erk * 1.05);
+        (0.16 + erk * 1.05) * (1.0 + reproductiveDrive * 0.28);
     float2 activeTraction = tractionDirection * tractionActivation * tractionGain *
         (0.000045 + cell.phenotype.y * 0.000105) *
         (0.46 + adhesiveProgram * 0.54) *
@@ -6293,8 +6538,12 @@ kernel void evolveOrganismCells(
             environmentalDrive * (0.08 + frequencyMatch * 0.10) *
             mix(0.30, 1.0, metabolicReadiness);
     }
-    float propaguleDrive = exposure * motilityProgram * development.mechanochemistryB.w *
-        (1.0 - adhesiveProgram) * smoothstep(0.16, 0.38, atp);
+    float propaguleDrive = max(
+        exposure * motilityProgram * development.mechanochemistryB.w *
+            (1.0 - adhesiveProgram) * smoothstep(0.16, 0.38, atp),
+        sexualRelease * exposure * (0.42 + motilityProgram * 0.58) *
+            smoothstep(0.075, 0.24, atp)
+    ) * (1.0 + organismReproductivePleasure * 0.34);
     activeTraction += boundaryNormal * propaguleDrive *
         (0.00018 + detachmentRelease * 0.00012) * structuralDrag;
     activeTraction *= expenseScale;
@@ -6701,6 +6950,7 @@ kernel void clearActiveCellContactEffects(
     device atomic_int* contactEffects [[buffer(0)]],
     device atomic_int* membraneContactEffects [[buffer(1)]],
     device atomic_uint* topologySignatures [[buffer(2)]],
+    device CellIdentity* cellIdentities [[buffer(3)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
@@ -6708,11 +6958,15 @@ kernel void clearActiveCellContactEffects(
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint cellIndex = activeCellIndices[compactIndex];
     if (cellIndex >= maxCellCount) { return; }
-    for (uint channel = 0u; channel < 4u; ++channel) {
+    for (uint channel = 0u; channel < cellContactEffectChannelCount; ++channel) {
         atomic_store_explicit(
-            &contactEffects[cellIndex * 4u + channel], 0, memory_order_relaxed
+            &contactEffects[cellIndex * cellContactEffectChannelCount + channel],
+            0, memory_order_relaxed
         );
     }
+    // The selected mate is a contact-local fact and is rebuilt every step.
+    // The second-parent body ID and conception step in padding 1/2 persist.
+    cellIdentities[cellIndex].identityPadding0 = 0u;
     uint membraneBase = cellIndex * membraneVertexCount * 3u;
     for (uint channel = 0u; channel < membraneVertexCount * 3u; ++channel) {
         atomic_store_explicit(
@@ -7079,7 +7333,7 @@ kernel void resolveMembraneContacts(
     device atomic_uint* contactWorkState [[buffer(6)]],
     device atomic_int* contactEffects [[buffer(7)]],
     constant SimulationUniforms& uniforms [[buffer(8)]],
-    device const CellIdentity* cellIdentities [[buffer(9)]],
+    device CellIdentity* cellIdentities [[buffer(9)]],
     device const HeritableProgram* heritablePrograms [[buffer(10)]],
     device CellJunctionState* junctionStates [[buffer(11)]],
     device atomic_int* membraneContactEffects [[buffer(12)]],
@@ -7204,6 +7458,162 @@ kernel void resolveMembraneContacts(
                                 length(agent.geneC - otherAgent.geneC) * 0.66 +
                                 length(agent.geneA - otherAgent.geneA) * 0.18
                             );
+                            float reproductiveContributionA = 0.0;
+                            float reproductiveContributionB = 0.0;
+                            float reproductivePleasureA = 0.0;
+                            float reproductivePleasureB = 0.0;
+                            if (!sameOwner && programIndex != otherProgramIndex &&
+                                cellIdentities[gid].identityPadding2 == 0u &&
+                                cellIdentities[otherIndex].identityPadding2 == 0u) {
+                                float compatibility = recognitionCompatibility(
+                                    agent, otherAgent
+                                );
+                                float reproductiveInvestment = min(
+                                    agent.social.w, otherAgent.social.w
+                                );
+                                float fusionInvestment = min(
+                                    agent.social.x, otherAgent.social.x
+                                );
+                                float nonAggression = 1.0 - saturate(
+                                    max(agent.geneC.w, otherAgent.geneC.w) * 1.8
+                                );
+                                float boundaryAccess = sqrt(max(
+                                    cell.tissueGeometry.z * other.tissueGeometry.z,
+                                    0.0
+                                ));
+                                float competenceA = smoothstep(
+                                    0.18, 0.34, cell.physiology.x
+                                ) * smoothstep(0.40, 0.68, cell.physiology.y) *
+                                    smoothstep(0.32, 0.76, cell.physiology.w) *
+                                    (1.0 - smoothstep(0.48, 0.72, cell.signals.z));
+                                float competenceB = smoothstep(
+                                    0.18, 0.34, other.physiology.x
+                                ) * smoothstep(0.40, 0.68, other.physiology.y) *
+                                    smoothstep(0.32, 0.76, other.physiology.w) *
+                                    (1.0 - smoothstep(0.48, 0.72, other.signals.z));
+                                float endocrineDriveA = reproductiveEndocrineDrive(
+                                    cell, cellDevelopment, agent
+                                );
+                                float endocrineDriveB = reproductiveEndocrineDrive(
+                                    other, otherDevelopment, otherAgent
+                                );
+                                float reciprocalEndocrineDrive = sqrt(max(
+                                    endocrineDriveA * endocrineDriveB, 0.0
+                                ));
+                                bool divisionReadyA = cell.physiology.z >= 1.0 &&
+                                    cell.physiology.x >= 0.22 &&
+                                    cell.physiology.y >= 0.46 && cell.signals.z <= 0.68;
+                                bool divisionReadyB = other.physiology.z >= 1.0 &&
+                                    other.physiology.x >= 0.22 &&
+                                    other.physiology.y >= 0.46 && other.signals.z <= 0.68;
+                                float gestationReadinessA = competenceA *
+                                    (0.48 + cell.tissueGeometry.z * 0.52);
+                                float gestationReadinessB = competenceB *
+                                    (0.48 + other.tissueGeometry.z * 0.52);
+                                bool gestateA = divisionReadyA && (!divisionReadyB ||
+                                    gestationReadinessA > gestationReadinessB ||
+                                    (gestationReadinessA == gestationReadinessB &&
+                                        cellIdentities[gid].persistentID <
+                                            cellIdentities[otherIndex].persistentID));
+                                bool gestateB = divisionReadyB && !gestateA;
+                                float gestatorCompetence = gestateA
+                                    ? competenceA : competenceB;
+                                float donorCompetence = gestateA
+                                    ? competenceB : competenceA;
+                                float strategyGate = smoothstep(
+                                    fusionInvestment * 0.62,
+                                    fusionInvestment * 0.62 + 0.18,
+                                    reproductiveInvestment
+                                );
+                                strategyGate = max(
+                                    strategyGate,
+                                    smoothstep(0.62, 1.0, max(
+                                        cell.physiology.z, other.physiology.z
+                                    )) * 0.72
+                                );
+                                float differenceGate = smoothstep(
+                                    0.018, 0.20, pairDifference
+                                );
+                                // Positive valence is the continuously rising
+                                // completion signal itself. It grows as compatible,
+                                // reproductively ready membranes close the remaining
+                                // physical gap and one cell approaches division.
+                                float spatialProgress = 1.0 - smoothstep(
+                                    -0.006, interactionRange, localGap
+                                );
+                                float divisionProgress = max(
+                                    smoothstep(0.24, 1.0, cell.physiology.z),
+                                    smoothstep(0.24, 1.0, other.physiology.z)
+                                );
+                                float pairPermission =
+                                    smoothstep(0.22, 0.62, compatibility) *
+                                    smoothstep(0.12, 0.46, reproductiveInvestment) *
+                                    smoothstep(0.18, 0.72, nonAggression) *
+                                    strategyGate * differenceGate;
+                                float pairReadiness = sqrt(max(
+                                    competenceA * competenceB, 0.0
+                                ));
+                                float completionProgress = saturate(
+                                    reciprocalEndocrineDrive * 0.28 +
+                                    pairReadiness * 0.20 +
+                                    divisionProgress * 0.24 +
+                                    spatialProgress * 0.28
+                                );
+                                float sharedPleasure = saturate(
+                                    pairPermission * boundaryAccess *
+                                    completionProgress
+                                );
+                                reproductivePleasureA = sharedPleasure *
+                                    (0.42 + endocrineDriveA * 0.58);
+                                reproductivePleasureB = sharedPleasure *
+                                    (0.42 + endocrineDriveB * 0.58);
+                                float combinedSuitability = compatibility *
+                                    reproductiveInvestment * nonAggression *
+                                    boundaryAccess * gestatorCompetence * donorCompetence *
+                                    strategyGate * differenceGate *
+                                    reciprocalEndocrineDrive;
+                                float sexualScore = (gestateA || gestateB) &&
+                                    compatibility > 0.35 &&
+                                    reproductiveInvestment > 0.20 &&
+                                    nonAggression > 0.35 && boundaryAccess > 0.08 &&
+                                    strategyGate > 0.05 && pairDifference > 0.02 &&
+                                    reciprocalEndocrineDrive > 0.06
+                                    ? pow(max(combinedSuitability, 0.000000000001), 0.11111111)
+                                    : 0.0;
+                                bool conceived = sexualScore > 0.0;
+                                if (conceived) {
+                                    reproductivePleasureA = 1.0;
+                                    reproductivePleasureB = 1.0;
+                                    uint gestatorIndex = gestateA ? gid : otherIndex;
+                                    uint donorIndex = gestateA ? otherIndex : gid;
+                                    nominateSexualPartner(
+                                        cellIdentities, gestatorIndex, donorIndex,
+                                        sexualScore
+                                    );
+
+                                    CellState gestator = gestateA ? cell : other;
+                                    CellState donor = gestateA ? other : cell;
+                                    float donorCapacity = min(
+                                        max(donor.physiology.x - 0.08, 0.0) / 0.64,
+                                        max(donor.physiology.y - 0.18, 0.0) / 0.40
+                                    );
+                                    float gestatorCapacity = min(
+                                        max(1.16 - gestator.physiology.x, 0.0) / 0.64,
+                                        max(1.08 - gestator.physiology.y, 0.0) / 0.40
+                                    );
+                                    float contributedMaterial = min(
+                                        0.018 + sexualScore * 0.034,
+                                        min(donorCapacity, gestatorCapacity) * 0.38
+                                    );
+                                    if (gestateA) {
+                                        reproductiveContributionA += contributedMaterial;
+                                        reproductiveContributionB -= contributedMaterial;
+                                    } else {
+                                        reproductiveContributionA -= contributedMaterial;
+                                        reproductiveContributionB += contributedMaterial;
+                                    }
+                                }
+                            }
                             float2 boundaryA = length(cell.tissueGeometry.xy) > 0.0001
                                 ? normalize(cell.tissueGeometry.xy) : localDirection;
                             float2 boundaryB = length(other.tissueGeometry.xy) > 0.0001
@@ -7308,6 +7718,14 @@ kernel void resolveMembraneContacts(
                             addEnergyAudit(energyAudit, 9u, -trophicLossHeat);
                             float impulseMagnitude = localOverlap *
                                 (0.006 + min(defenseA, defenseB) * 0.010);
+                            if (!sameOwner) {
+                                // The valence gradient is causal: increasing
+                                // reproductive completion produces a bounded
+                                // reciprocal attraction that closes the gap.
+                                impulseMagnitude -= min(
+                                    reproductivePleasureA, reproductivePleasureB
+                                ) * (0.00012 + contactStrength * 0.00012);
+                            }
 
                             if (sameOwner) {
                                 float2 polarityA = length(cell.development.xy) > 0.0001
@@ -7319,22 +7737,56 @@ kernel void resolveMembraneContacts(
                                         dot(polarityB, otherLocalDirection)),
                                     -1.0, 1.0
                                 );
-                                float localRelease = saturate(max(
+                                float sexualNurtureA = sexualBudNurture(
+                                    cellIdentities[gid], uniforms.step,
+                                    cellDevelopment.mechanochemistryB.w
+                                );
+                                float sexualNurtureB = sexualBudNurture(
+                                    cellIdentities[otherIndex], uniforms.step,
+                                    otherDevelopment.mechanochemistryB.w
+                                );
+                                float sexualReleaseA = sexualBudRelease(
+                                    cellIdentities[gid], uniforms.step,
+                                    cellDevelopment.mechanochemistryB.w,
+                                    cell.physiology.x, cell.physiology.w
+                                );
+                                float sexualReleaseB = sexualBudRelease(
+                                    cellIdentities[otherIndex], uniforms.step,
+                                    otherDevelopment.mechanochemistryB.w,
+                                    other.physiology.x, other.physiology.w
+                                );
+                                float localNurture = max(
+                                    sexualNurtureA, sexualNurtureB
+                                );
+                                float sexualPhysiologicalRelease = max(
+                                    sexualReleaseA, sexualReleaseB
+                                );
+                                float localRelease = saturate(max(max(
                                     cell.tissueGeometry.w + cell.signals.w * 0.42,
                                     other.tissueGeometry.w + other.signals.w * 0.42
-                                ));
+                                ), sexualPhysiologicalRelease));
+                                bool sexualNursery =
+                                    cellIdentities[gid].identityPadding2 != 0u ||
+                                    cellIdentities[otherIndex].identityPadding2 != 0u;
+                                if (sexualNursery) {
+                                    localNurture = max(
+                                        localNurture, 1.0 - sexualPhysiologicalRelease
+                                    );
+                                    localRelease = sexualPhysiologicalRelease;
+                                }
                                 float metabolicInvestment = sqrt(max(
                                     cell.physiology.x * other.physiology.x, 0.0
                                 ));
                                 float pairAdhesion = min(cell.phenotype.x, other.phenotype.x) *
                                     sqrt(max(cell.physiology.w * other.physiology.w, 0.0)) *
                                     inheritedJunctionMaterial.x *
-                                    (1.0 - localRelease * 0.88);
+                                    (1.0 - localRelease * 0.94) *
+                                    (1.0 + localNurture * 0.32);
                                 float pairDamping = inheritedJunctionMaterial.z *
                                     (0.28 + topologyIntegrity * 0.72);
                                 float pairPermeability = inheritedJunctionMaterial.w *
                                     (0.22 + min(cell.regulationB.x, other.regulationB.x) * 0.78) *
-                                    topologyIntegrity;
+                                    topologyIntegrity * (1.0 + localNurture * 0.72);
                                 float pairCorticalTension = inheritedJunctionMaterial.y *
                                     (0.24 + 0.38 * (cell.regulation.z + other.regulation.z)) *
                                     (1.0 - localRelease * 0.58);
@@ -7437,32 +7889,56 @@ kernel void resolveMembraneContacts(
                                 impulse.y * float(cellContactForceScale), -1048576.0, 1048576.0
                             ));
                             atomic_fetch_add_explicit(
-                                &contactEffects[gid * 4u], -impulseX, memory_order_relaxed
+                                &contactEffects[gid * cellContactEffectChannelCount],
+                                -impulseX, memory_order_relaxed
                             );
                             atomic_fetch_add_explicit(
-                                &contactEffects[gid * 4u + 1u], -impulseY, memory_order_relaxed
+                                &contactEffects[gid * cellContactEffectChannelCount + 1u],
+                                -impulseY, memory_order_relaxed
                             );
                             atomic_fetch_add_explicit(
-                                &contactEffects[gid * 4u + 2u],
+                                &contactEffects[gid * cellContactEffectChannelCount + 2u],
                                 int(damageToA * float(cellContactScalarScale)), memory_order_relaxed
                             );
                             atomic_fetch_add_explicit(
-                                &contactEffects[gid * 4u + 3u],
+                                &contactEffects[gid * cellContactEffectChannelCount + 3u],
                                 int(trophicA * float(cellContactScalarScale)), memory_order_relaxed
                             );
                             atomic_fetch_add_explicit(
-                                &contactEffects[otherIndex * 4u], impulseX, memory_order_relaxed
+                                &contactEffects[gid * cellContactEffectChannelCount + 4u],
+                                int(reproductiveContributionA * float(cellContactScalarScale)),
+                                memory_order_relaxed
                             );
                             atomic_fetch_add_explicit(
-                                &contactEffects[otherIndex * 4u + 1u], impulseY, memory_order_relaxed
+                                &contactEffects[gid * cellContactEffectChannelCount + 5u],
+                                int(reproductivePleasureA * float(cellContactScalarScale)),
+                                memory_order_relaxed
                             );
                             atomic_fetch_add_explicit(
-                                &contactEffects[otherIndex * 4u + 2u],
+                                &contactEffects[otherIndex * cellContactEffectChannelCount],
+                                impulseX, memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 1u],
+                                impulseY, memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 2u],
                                 int(damageToB * float(cellContactScalarScale)), memory_order_relaxed
                             );
                             atomic_fetch_add_explicit(
-                                &contactEffects[otherIndex * 4u + 3u],
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 3u],
                                 int(trophicB * float(cellContactScalarScale)), memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 4u],
+                                int(reproductiveContributionB * float(cellContactScalarScale)),
+                                memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 5u],
+                                int(reproductivePleasureB * float(cellContactScalarScale)),
+                                memory_order_relaxed
                             );
                             float pressure = localOverlap *
                                 (0.10 + min(defenseA, defenseB) * 0.18) +
@@ -7528,10 +8004,17 @@ kernel void applyCellContactEffects(
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
-    int rawX = atomic_exchange_explicit(&contactEffects[gid * 4u], 0, memory_order_relaxed);
-    int rawY = atomic_exchange_explicit(&contactEffects[gid * 4u + 1u], 0, memory_order_relaxed);
-    int rawDamage = atomic_exchange_explicit(&contactEffects[gid * 4u + 2u], 0, memory_order_relaxed);
-    int rawTrophic = atomic_exchange_explicit(&contactEffects[gid * 4u + 3u], 0, memory_order_relaxed);
+    uint contactBase = gid * cellContactEffectChannelCount;
+    int rawX = atomic_exchange_explicit(&contactEffects[contactBase], 0, memory_order_relaxed);
+    int rawY = atomic_exchange_explicit(&contactEffects[contactBase + 1u], 0, memory_order_relaxed);
+    int rawDamage = atomic_exchange_explicit(&contactEffects[contactBase + 2u], 0, memory_order_relaxed);
+    int rawTrophic = atomic_exchange_explicit(&contactEffects[contactBase + 3u], 0, memory_order_relaxed);
+    int rawReproductiveContribution = atomic_exchange_explicit(
+        &contactEffects[contactBase + 4u], 0, memory_order_relaxed
+    );
+    int rawReproductivePleasure = atomic_exchange_explicit(
+        &contactEffects[contactBase + 5u], 0, memory_order_relaxed
+    );
     if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) == 0u) { return; }
 
     uint owner = cellIdentities[gid].owner;
@@ -7541,27 +8024,57 @@ kernel void applyCellContactEffects(
     float2 localImpulse = rotateWorldToTissue(worldImpulse, agents[owner]);
     float damage = max(float(rawDamage) / float(cellContactScalarScale), 0.0);
     float trophic = float(rawTrophic) / float(cellContactScalarScale);
+    float reproductiveContribution =
+        float(rawReproductiveContribution) / float(cellContactScalarScale);
+    float reproductivePleasure = saturate(
+        float(rawReproductivePleasure) / float(cellContactScalarScale)
+    );
+    // The gradient is continuous, but the final reciprocal material exchange
+    // creates a distinct local climax at the participating membrane cells.
+    float conceptionPeak = saturate(abs(reproductiveContribution) * 96.0);
     float previousATP = cell.physiology.x;
     float previousBiomass = cell.physiology.y;
+    cell.physiology.z = clamp(
+        cell.physiology.z + reproductivePleasure *
+            (1.0 - saturate(cell.physiology.z)) * 0.0032,
+        0.0, 1.2
+    );
     cell.velocity += localImpulse;
     float speed = length(cell.velocity);
     if (speed > 0.0032) { cell.velocity *= 0.0032 / speed; }
-    cell.physiology.x = clamp(cell.physiology.x + trophic * 0.82, 0.0, 1.2);
-    cell.physiology.y = clamp(cell.physiology.y + trophic * 0.30, 0.16, 1.12);
+    cell.physiology.x = clamp(
+        cell.physiology.x + trophic * 0.82 + reproductiveContribution * 0.64,
+        0.0, 1.2
+    );
+    cell.physiology.y = clamp(
+        cell.physiology.y + trophic * 0.30 + reproductiveContribution * 0.40,
+        0.16, 1.12
+    );
     cell.physiology.w = clamp(cell.physiology.w - damage, 0.0, 1.0);
-    cell.signals.z = saturate(cell.signals.z + damage * 7.5 + max(-trophic, 0.0) * 4.0);
+    cell.signals.z = saturate(
+        cell.signals.z + damage * 7.5 + max(-trophic, 0.0) * 4.0 -
+            reproductivePleasure * 0.080
+    );
     float woundSignal = saturate(damage * 12.0);
-    cell.signaling.x = saturate(cell.signaling.x + woundSignal * 0.48);
-    cell.signaling.y = saturate(cell.signaling.y + woundSignal * 0.14);
-    cell.dynamics.x = clamp(cell.dynamics.x + woundSignal * 0.16, -1.8, 1.8);
+    cell.signaling.x = saturate(
+        cell.signaling.x + woundSignal * 0.48 + reproductivePleasure * 0.10
+    );
+    cell.signaling.y = saturate(
+        cell.signaling.y + woundSignal * 0.14 + reproductivePleasure * 0.16
+    );
+    cell.dynamics.x = clamp(
+        cell.dynamics.x + woundSignal * 0.16 + reproductivePleasure * 0.055,
+        -1.8, 1.8
+    );
+    applyLocalReproductiveClimax(cell, conceptionPeak);
     cell.tissueForce.xy += localImpulse;
     cell.tissueForce.z = length(localImpulse) + damage;
     cell.tissueForce.w = trophic;
 
-    float trophicStorageDelta = cell.physiology.x - previousATP +
+    float contactStorageDelta = cell.physiology.x - previousATP +
         (cell.physiology.y - previousBiomass) * 0.18;
-    addEnergyAudit(energyAudit, 2u, trophicStorageDelta);
-    addEnergyAudit(energyAudit, 9u, -trophicStorageDelta);
+    addEnergyAudit(energyAudit, 2u, contactStorageDelta);
+    addEnergyAudit(energyAudit, 9u, -contactStorageDelta);
 
     uint membraneBase = gid * membraneVertexCount;
     for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
@@ -7656,11 +8169,16 @@ kernel void auditContactMomentum(
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
     atomic_fetch_add_explicit(
-        &scratch[0], atomic_load_explicit(&contactEffects[gid * 4u], memory_order_relaxed),
+        &scratch[0], atomic_load_explicit(
+            &contactEffects[gid * cellContactEffectChannelCount], memory_order_relaxed
+        ),
         memory_order_relaxed
     );
     atomic_fetch_add_explicit(
-        &scratch[1], atomic_load_explicit(&contactEffects[gid * 4u + 1u], memory_order_relaxed),
+        &scratch[1], atomic_load_explicit(
+            &contactEffects[gid * cellContactEffectChannelCount + 1u],
+            memory_order_relaxed
+        ),
         memory_order_relaxed
     );
 }
@@ -8091,9 +8609,39 @@ kernel void divideAndReduceOrganismCells(
             CellIdentity parentIdentity = cellIdentities[divisionParent];
             uint recombinationDonor = maxCellCount;
             float recombinationScore = 0.0;
-            uint donorIndex = atomic_load_explicit(
-                &ownerCellHeads[owner], memory_order_relaxed
+            bool sexualBodyPair = false;
+            uint sexualDonorOwner = maxAgentCount;
+            uint sexualDonorBirthID = 0xffffffffu;
+            uint nominatedDonor = sexualPartnerIndex(
+                parentIdentity.identityPadding0
             );
+            if (nominatedDonor < maxCellCount &&
+                atomic_load_explicit(
+                    &cellOccupancy[nominatedDonor], memory_order_relaxed
+                ) != 0u) {
+                CellIdentity nominatedIdentity = cellIdentities[nominatedDonor];
+                if (nominatedIdentity.owner < maxAgentCount &&
+                    nominatedIdentity.owner != owner &&
+                    atomic_load_explicit(
+                        &agentOccupancy[nominatedIdentity.owner], memory_order_relaxed
+                    ) != 0u &&
+                    nominatedIdentity.programIndex != parentIdentity.programIndex &&
+                    programSlotMatches(
+                        programSlots, nominatedIdentity.programIndex,
+                        nominatedIdentity.programGeneration
+                    )) {
+                    recombinationDonor = nominatedDonor;
+                    recombinationScore = sexualPartnerScore(
+                        parentIdentity.identityPadding0
+                    );
+                    sexualBodyPair = true;
+                    sexualDonorOwner = nominatedIdentity.owner;
+                    sexualDonorBirthID = agents[sexualDonorOwner].birthID;
+                }
+            }
+            uint donorIndex = sexualBodyPair
+                ? emptySpatialHashEntry
+                : atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
             while (donorIndex != emptySpatialHashEntry) {
                 uint followingDonor = ownerCellNext[donorIndex];
                 if (donorIndex != divisionParent &&
@@ -8200,6 +8748,25 @@ kernel void divideAndReduceOrganismCells(
                 boundaryAxis * (0.10 + parent.tissueGeometry.z * 0.22) +
                 float2(parent.signals.x - parent.signals.y, parent.mechanics.y - 0.5) * 0.12
             );
+            if (sexualBodyPair) {
+                CellState donorCell = cells[recombinationDonor];
+                AgentState donorAgent = agents[sexualDonorOwner];
+                float2 parentWorldPosition = cellWorldPosition(
+                    agent, parent.position, uniforms
+                );
+                float2 donorWorldPosition = cellWorldPosition(
+                    donorAgent, donorCell.position, uniforms
+                );
+                float2 interBodyDirection = donorWorldPosition - parentWorldPosition;
+                if (length(interBodyDirection) > 0.000001) {
+                    float2 localBirthDirection = rotateWorldToTissue(
+                        normalize(interBodyDirection), agent
+                    );
+                    axis = normalize(
+                        localBirthDirection * 0.78 + boundaryAxis * 0.22
+                    );
+                }
+            }
             CellState child = parent;
             // Cytokinesis starts with overlapping daughter membranes. The next
             // contact pass can create a physical junction. Placing the centers
@@ -8209,10 +8776,19 @@ kernel void divideAndReduceOrganismCells(
             child.position += axis * 0.072;
             parent.velocity -= axis * 0.00035;
             child.velocity += axis * 0.00035;
-            parent.physiology.x *= 0.50;
-            child.physiology.x = parent.physiology.x;
-            parent.physiology.y *= 0.50;
-            child.physiology.y = parent.physiology.y;
+            float childMaterialShare = sexualBodyPair
+                ? mix(
+                    0.44, 0.58,
+                    saturate(inheritedDevelopment.mechanochemistryB.w / 1.80)
+                )
+                : 0.50;
+            float parentMaterialShare = 1.0 - childMaterialShare;
+            float preDivisionATP = parent.physiology.x;
+            float preDivisionBiomass = parent.physiology.y;
+            parent.physiology.x = preDivisionATP * parentMaterialShare;
+            child.physiology.x = preDivisionATP * childMaterialShare;
+            parent.physiology.y = preDivisionBiomass * parentMaterialShare;
+            child.physiology.y = preDivisionBiomass * childMaterialShare;
             parent.physiology.z = 0.0;
             child.physiology.z = 0.0;
             float partitionAmplitude = clamp(
@@ -8285,6 +8861,11 @@ kernel void divideAndReduceOrganismCells(
             );
             parent.signaling.xy -= signalingPartition;
             child.signaling.xy += signalingPartition;
+            // Cytokinesis is reproductive completion at the cellular scale.
+            // The peak begins only in the two cells at the cleavage site and
+            // then travels through whatever body signaling they remain part of.
+            applyLocalReproductiveClimax(parent, 1.0);
+            applyLocalReproductiveClimax(child, 1.0);
             parent.signalCausality = float4(0.0);
             child.signalCausality = float4(0.0);
             child.tissueForce = float4(0.0);
@@ -8304,19 +8885,34 @@ kernel void divideAndReduceOrganismCells(
             }
             uint parentMembraneBase = divisionParent * membraneVertexCount;
             uint childMembraneBase = divisionTarget * membraneVertexCount;
+            float parentRadiusShare = sqrt(parentMaterialShare);
+            float childRadiusShare = sqrt(childMaterialShare);
             for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
-                MembraneVertex membrane = membraneVertices[parentMembraneBase + vertexIndex];
-                membrane.position *= 0.70710678;
-                membrane.velocity *= 0.25;
-                membrane.mechanics.x *= 0.70710678;
-                membraneVertices[parentMembraneBase + vertexIndex] = membrane;
-                MembraneVertex daughterMembrane = membrane;
-                daughterMembrane.velocity *= -1.0;
+                MembraneVertex inheritedMembrane =
+                    membraneVertices[parentMembraneBase + vertexIndex];
+                MembraneVertex parentMembrane = inheritedMembrane;
+                parentMembrane.position *= parentRadiusShare;
+                parentMembrane.velocity *= 0.25;
+                parentMembrane.mechanics.x *= parentRadiusShare;
+                membraneVertices[parentMembraneBase + vertexIndex] = parentMembrane;
+                MembraneVertex daughterMembrane = inheritedMembrane;
+                daughterMembrane.position *= childRadiusShare;
+                daughterMembrane.velocity *= -0.25;
+                daughterMembrane.mechanics.x *= childRadiusShare;
                 daughterMembrane.mechanics.zw = float2(0.0);
                 membraneVertices[childMembraneBase + vertexIndex] = daughterMembrane;
             }
-            parent.membrane.xy *= float2(0.50, 0.70710678);
-            child.membrane = parent.membrane;
+            float4 inheritedMembraneMeasurement = parent.membrane;
+            parent.membrane = float4(
+                inheritedMembraneMeasurement.x * parentMaterialShare,
+                inheritedMembraneMeasurement.y * parentRadiusShare,
+                inheritedMembraneMeasurement.zw
+            );
+            child.membrane = float4(
+                inheritedMembraneMeasurement.x * childMaterialShare,
+                inheritedMembraneMeasurement.y * childRadiusShare,
+                inheritedMembraneMeasurement.zw
+            );
             cells[divisionParent] = parent;
             cells[divisionTarget] = child;
             CellIdentity childIdentity;
@@ -8350,8 +8946,8 @@ kernel void divideAndReduceOrganismCells(
             bool programCrossbred = false;
             uint donorPersistentID = 0xffffffffu;
             if (recombinationDonor < maxCellCount &&
-                random01(divisionSeed + 1741u) <
-                    clamp(recombinationScore * 0.28, 0.0, 0.22)) {
+                (sexualBodyPair || random01(divisionSeed + 1741u) <
+                    clamp(recombinationScore * 0.28, 0.0, 0.22))) {
                 atomic_fetch_add_explicit(
                     &identityCounters[14], 1u, memory_order_relaxed
                 );
@@ -8371,7 +8967,12 @@ kernel void divideAndReduceOrganismCells(
                     );
                     childIdentity.programIndex = daughterProgram;
                     childIdentity.programGeneration = daughterProgramGeneration;
-                    donorPersistentID = donorIdentity.persistentID;
+                    donorPersistentID = sexualBodyPair
+                        ? sexualDonorBirthID : donorIdentity.persistentID;
+                    if (sexualBodyPair) {
+                        childIdentity.identityPadding1 = sexualDonorBirthID;
+                        childIdentity.identityPadding2 = uniforms.step + 1u;
+                    }
                     programCrossbred = true;
                 }
             }
@@ -8437,6 +9038,12 @@ kernel void divideAndReduceOrganismCells(
                     daughterIntegrity * 0.20) * tensionGate,
                 0.28, 0.94
             );
+            bool sexualBudConceived = sexualBodyPair && programCrossbred;
+            if (sexualBudConceived) {
+                midbodyStrength = clamp(
+                    midbodyStrength * 1.18 + 0.12, 0.46, 0.98
+                );
+            }
             uint midbodyJunction = findOrCreateCellJunction(
                 cellJunctions, cytokineticPairKey, cytokineticFingerprint,
                 uniforms.step, length(child.position - parent.position), midbodyStrength
@@ -8448,14 +9055,15 @@ kernel void divideAndReduceOrganismCells(
                     float4(0.0001)
                 ));
                 float midbodyRestDistance = length(child.position - parent.position);
-                cellJunctions[midbodyJunction].flags = 3u;
+                cellJunctions[midbodyJunction].flags = sexualBudConceived ? 7u : 3u;
                 cellJunctions[midbodyJunction].age = mix(
                     5.0, 14.0, daughterRepair * daughterIntegrity
                 );
                 cellJunctions[midbodyJunction].material = clamp(float4(
                     midbodyStrength * midbodyInheritedMaterial.x,
                     midbodyInheritedMaterial.z,
-                    midbodyInheritedMaterial.w * daughterIntegrity,
+                    midbodyInheritedMaterial.w * daughterIntegrity *
+                        (sexualBudConceived ? 1.45 : 1.0),
                     midbodyInheritedMaterial.y * (0.45 + daughterRepair * 0.55)
                 ), float4(0.02), float4(1.80));
                 cellJunctions[midbodyJunction].remodeling = float4(

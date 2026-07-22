@@ -1712,6 +1712,7 @@ struct AgentObservation: Sendable, Equatable {
     let hasRegeneratedDevelopment: Bool
     let hasReceivedDamageChallenge: Bool
     let hasDemonstratedHomeostasis: Bool
+    let isSexualOffspring: Bool
     let genomeHash: UInt32
     let topologyHash: UInt32
     let morphology: SIMD4<Float>
@@ -2504,7 +2505,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let contactWorkStateLength = Self.contactWorkStateCount * MemoryLayout<UInt32>.stride
         let cellTopologySignatureLength = Self.maxCellCount * 4 * MemoryLayout<UInt32>.stride
         let contactPairDispatchLength = 3 * MemoryLayout<UInt32>.stride
-        let cellContactEffectLength = Self.maxCellCount * 4 * MemoryLayout<Int32>.stride
+        let cellContactEffectLength = Self.maxCellCount * 6 * MemoryLayout<Int32>.stride
         let membraneContactEffectLength = Self.maxCellCount * Self.membraneVertexCount * 3 *
             MemoryLayout<Int32>.stride
         let cellJunctionLength = Self.cellJunctionCapacity * MemoryLayout<CellJunctionState>.stride
@@ -4096,7 +4097,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
         encoder.memoryBarrier(resources: [
             cellContactEffects, membraneContactEffects, cellJunctions, energyAudit,
-            identityCounters, contactWorkState, cellTopologySignatures
+            identityCounters, contactWorkState, cellTopologySignatures, cellIdentities
         ])
 
         encoder.setComputePipelineState(detectCellTopologyChangesPipeline)
@@ -4279,6 +4280,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellContactEffects, offset: 0, index: 0)
         encoder.setBuffer(membraneContactEffects, offset: 0, index: 1)
         encoder.setBuffer(cellTopologySignatures, offset: 0, index: 2)
+        encoder.setBuffer(cellIdentities, offset: 0, index: 3)
         dispatchCells(encoder, pipeline: clearActiveCellContactEffectsPipeline)
 
         encoder.setComputePipelineState(clearOwnerCellListsPipeline)
@@ -4287,7 +4289,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(activeComponentCount, offset: 0, index: 2)
         dispatchActiveComponents(encoder, pipeline: clearOwnerCellListsPipeline)
         encoder.memoryBarrier(resources: [
-            cellContactEffects, membraneContactEffects, cellTopologySignatures, ownerCellHeads
+            cellContactEffects, membraneContactEffects, cellTopologySignatures,
+            cellIdentities, ownerCellHeads
         ])
 
         encoder.setComputePipelineState(buildCellSpatialHashPipeline)
@@ -4344,6 +4347,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(heritablePrograms, offset: 0, index: 10)
         encoder.setBuffer(identityCounters, offset: 0, index: 11)
         encoder.setBuffer(cellJunctions, offset: 0, index: 12)
+        encoder.setBuffer(developmentalGenomes, offset: 0, index: 13)
         encoder.dispatchThreadgroups(
             indirectBuffer: contactPairDispatchArguments,
             indirectBufferOffset: 0,
@@ -5266,6 +5270,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     hasRegeneratedDevelopment: record.flags & 4 != 0,
                     hasReceivedDamageChallenge: record.flags & 16 != 0,
                     hasDemonstratedHomeostasis: record.flags & 8 != 0,
+                    isSexualOffspring: record.flags & 32 != 0,
                     genomeHash: record.genomeHash,
                     topologyHash: record.topologyHash,
                     morphology: record.morphology,
