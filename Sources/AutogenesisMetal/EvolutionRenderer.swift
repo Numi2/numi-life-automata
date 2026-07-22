@@ -119,10 +119,13 @@ extension EvolutionRenderer {
         var programMutations: UInt64 = 0
         var latestSample: ExperimentSample?
         var interventionSample: ExperimentSample?
-        var observationSamples: [ExperimentSample] = []
+        var maximumObservedComponentDescentDepth: UInt32 = 0
+        var maximumObservedLivingDescendants = 0
+        var lastAccumulatedObservationStep: UInt64?
         var componentContributions: Set<ComponentContribution> = []
         var previousProgramRepresentations: [ProgramRepresentation] = []
         var selectionIntervals: [MultilevelSelectionInterval] = []
+        var observedSelectionIntervalCount: UInt64 = 0
         var individualityObserver = IndividualityObserverEngine()
         var latestObserverResult: IndividualityObserverResult?
         var componentMorphologyArchive: [UInt32: MorphologyDescriptor] = [:]
@@ -217,13 +220,22 @@ extension EvolutionRenderer {
                     componentContributions: &componentContributions,
                     previousProgramRepresentations: &previousProgramRepresentations,
                     selectionIntervals: &selectionIntervals,
+                    observedSelectionIntervalCount: &observedSelectionIntervalCount,
                     individualityObserver: &individualityObserver,
                     latestObserverResult: &latestObserverResult,
                     componentMorphologyArchive: &componentMorphologyArchive,
                     componentMorphologyOrder: &componentMorphologyOrder
                 )
                 if let latestSample {
-                    observationSamples.append(latestSample)
+                    maximumObservedComponentDescentDepth = max(
+                        maximumObservedComponentDescentDepth,
+                        latestSample.maximumComponentDescentDepth
+                    )
+                    maximumObservedLivingDescendants = max(
+                        maximumObservedLivingDescendants,
+                        latestSample.livingDescendants
+                    )
+                    lastAccumulatedObservationStep = latestSample.step
                 }
                 if interventionBoundary {
                     interventionSample = latestSample
@@ -272,14 +284,23 @@ extension EvolutionRenderer {
                         componentContributions: &componentContributions,
                         previousProgramRepresentations: &previousProgramRepresentations,
                         selectionIntervals: &selectionIntervals,
+                        observedSelectionIntervalCount: &observedSelectionIntervalCount,
                         individualityObserver: &individualityObserver,
                         latestObserverResult: &latestObserverResult,
                         componentMorphologyArchive: &componentMorphologyArchive,
                         componentMorphologyOrder: &componentMorphologyOrder
                     )
                     if let latestSample,
-                       observationSamples.last?.step != latestSample.step {
-                        observationSamples.append(latestSample)
+                       lastAccumulatedObservationStep != latestSample.step {
+                        maximumObservedComponentDescentDepth = max(
+                            maximumObservedComponentDescentDepth,
+                            latestSample.maximumComponentDescentDepth
+                        )
+                        maximumObservedLivingDescendants = max(
+                            maximumObservedLivingDescendants,
+                            latestSample.livingDescendants
+                        )
+                        lastAccumulatedObservationStep = latestSample.step
                     }
                     report = latestSample?.invariantReport ?? report
                 }
@@ -298,10 +319,10 @@ extension EvolutionRenderer {
                     invariantReport: report,
                     individualityEvidence: individualityEvidence(
                         observerResult: latestObserverResult,
-                        maximumComponentDescentDepth: observationSamples
-                            .map(\.maximumComponentDescentDepth).max() ?? 0,
-                        livingSeparatedDescendantCount: observationSamples
-                            .map(\.livingDescendants).max() ?? 0,
+                        maximumComponentDescentDepth:
+                            maximumObservedComponentDescentDepth,
+                        livingSeparatedDescendantCount:
+                            maximumObservedLivingDescendants,
                         selection: MultilevelPriceAnalysis.summarize(selectionIntervals),
                         invariantReport: report
                     ),
@@ -333,10 +354,10 @@ extension EvolutionRenderer {
             invariantReport: finalReport,
             individualityEvidence: individualityEvidence(
                 observerResult: latestObserverResult,
-                maximumComponentDescentDepth: observationSamples
-                    .map(\.maximumComponentDescentDepth).max() ?? 0,
-                livingSeparatedDescendantCount: observationSamples
-                    .map(\.livingDescendants).max() ?? 0,
+                maximumComponentDescentDepth:
+                    maximumObservedComponentDescentDepth,
+                livingSeparatedDescendantCount:
+                    maximumObservedLivingDescendants,
                 selection: MultilevelPriceAnalysis.summarize(selectionIntervals),
                 invariantReport: finalReport
             ),
@@ -533,6 +554,7 @@ extension EvolutionRenderer {
         componentContributions: inout Set<ComponentContribution>,
         previousProgramRepresentations: inout [ProgramRepresentation],
         selectionIntervals: inout [MultilevelSelectionInterval],
+        observedSelectionIntervalCount: inout UInt64,
         individualityObserver: inout IndividualityObserverEngine,
         latestObserverResult: inout IndividualityObserverResult?,
         componentMorphologyArchive: inout [UInt32: MorphologyDescriptor],
@@ -949,10 +971,15 @@ extension EvolutionRenderer {
                 descendant: currentProgramRepresentations,
                 contributions: componentContributions
             )
-            selectionIntervals.append(interval)
+            retainSelectionInterval(
+                interval,
+                history: &selectionIntervals,
+                observedCount: &observedSelectionIntervalCount
+            )
             selectionInterval = interval
         }
         previousProgramRepresentations = currentProgramRepresentations
+        componentContributions.removeAll(keepingCapacity: true)
         let maximumDetachmentScore = living.map {
             Double(max(aggregates[$0].trophic.w, 0))
         }.max() ?? 0
@@ -1121,6 +1148,28 @@ extension EvolutionRenderer {
         )
         try journal.append("sample", sample)
         return sample
+    }
+
+    private func retainSelectionInterval(
+        _ interval: MultilevelSelectionInterval,
+        history: inout [MultilevelSelectionInterval],
+        observedCount: inout UInt64
+    ) {
+        let selectionHistoryCapacity = 4_096
+        observedCount &+= 1
+        guard history.count >= selectionHistoryCapacity else {
+            history.append(interval)
+            return
+        }
+
+        var random = observedCount &+ 0x9E37_79B9_7F4A_7C15
+        random = (random ^ (random >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        random = (random ^ (random >> 27)) &* 0x94D0_49BB_1331_11EB
+        random ^= random >> 31
+        let replacement = Int(random % observedCount)
+        if replacement < selectionHistoryCapacity {
+            history[replacement] = interval
+        }
     }
 }
 

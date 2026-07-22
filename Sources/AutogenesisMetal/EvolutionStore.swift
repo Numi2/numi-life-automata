@@ -518,6 +518,7 @@ final class EvolutionStore: ObservableObject {
     }
     private var individualityObserver = IndividualityObserverEngine()
     private var previousProgramRepresentations: [ProgramRepresentation] = []
+    private var pendingComponentContributions: Set<ComponentContribution> = []
     private var selectionIntervals: [MultilevelSelectionInterval] = []
     private var componentMorphologyArchive: [UInt32: MorphologyDescriptor] = [:]
     private var componentMorphologyOrder: [UInt32] = []
@@ -604,6 +605,7 @@ final class EvolutionStore: ObservableObject {
         observedAgents.removeAll(keepingCapacity: true)
         individualityObserver.reset()
         previousProgramRepresentations.removeAll(keepingCapacity: true)
+        pendingComponentContributions.removeAll(keepingCapacity: true)
         selectionIntervals.removeAll(keepingCapacity: true)
         componentMorphologyArchive.removeAll(keepingCapacity: true)
         componentMorphologyOrder.removeAll(keepingCapacity: true)
@@ -837,6 +839,7 @@ final class EvolutionStore: ObservableObject {
             componentAncestryEdges = componentAncestryEdges.filter {
                 UInt64($0.step) <= telemetry.scientificallyCommittedStep
             }
+            pendingComponentContributions.removeAll(keepingCapacity: true)
             individualityObserver.rollback(after: telemetry.scientificallyCommittedStep)
             previousProgramRepresentations.removeAll(keepingCapacity: true)
             selectionIntervals.removeAll(keepingCapacity: true)
@@ -1100,16 +1103,10 @@ final class EvolutionStore: ObservableObject {
             )
         }
         if !previousProgramRepresentations.isEmpty {
-            let contributions = Set(componentAncestryEdges.map {
-                ComponentContribution(
-                    descendantID: UInt64($0.descendantID),
-                    contributorID: UInt64($0.contributorID)
-                )
-            })
             let interval = MultilevelPriceAnalysis.interval(
                 parent: previousProgramRepresentations,
                 descendant: current,
-                contributions: contributions
+                contributions: pendingComponentContributions
             )
             if interval.independentDescendantComponents > 0 {
                 selectionIntervals.append(interval)
@@ -1123,6 +1120,7 @@ final class EvolutionStore: ObservableObject {
             }
         }
         previousProgramRepresentations = current
+        pendingComponentContributions.removeAll(keepingCapacity: true)
     }
 
     func applyLineageEvents(_ records: [RecordedLineageEvent]) {
@@ -1131,12 +1129,18 @@ final class EvolutionStore: ObservableObject {
             case .birth:
                 let parent = record.parentBirthID == .max ? nil : record.parentBirthID
                 if let parent {
-                    componentAncestryEdges.insert(ComponentAncestryEdge(
+                    let edge = ComponentAncestryEdge(
                         descendantID: record.birthID,
                         contributorID: parent,
                         step: record.step,
                         aroseByFusion: false
+                    )
+                    componentAncestryEdges.insert(edge)
+                    pendingComponentContributions.insert(ComponentContribution(
+                        descendantID: UInt64(edge.descendantID),
+                        contributorID: UInt64(edge.contributorID)
                     ))
+                    trimComponentAncestryHistory()
                 }
                 lineageBranches.insert(ObservedLineageBranch(
                     id: record.birthID,
@@ -1191,12 +1195,18 @@ final class EvolutionStore: ObservableObject {
                 )
             case .fusion:
                 fusionEventCount += 1
-                componentAncestryEdges.insert(ComponentAncestryEdge(
+                let edge = ComponentAncestryEdge(
                     descendantID: record.birthID,
                     contributorID: record.parentBirthID,
                     step: record.step,
                     aroseByFusion: true
+                )
+                componentAncestryEdges.insert(edge)
+                pendingComponentContributions.insert(ComponentContribution(
+                    descendantID: UInt64(edge.descendantID),
+                    contributorID: UInt64(edge.contributorID)
                 ))
+                trimComponentAncestryHistory()
                 recordEvent(
                     generation: Int(record.generation),
                     kind: .fusion,
@@ -1239,6 +1249,15 @@ final class EvolutionStore: ObservableObject {
                 )
             }
         }
+    }
+
+    private func trimComponentAncestryHistory() {
+        let capacity = 8_192
+        guard componentAncestryEdges.count > capacity + 512 else { return }
+        componentAncestryEdges = Set(componentAncestryEdges.sorted {
+            ($0.step, $0.descendantID, $0.contributorID) >
+                ($1.step, $1.descendantID, $1.contributorID)
+        }.prefix(capacity))
     }
 
     var effectiveZoom: Double {

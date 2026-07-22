@@ -259,6 +259,52 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func observerHistoriesRemainBoundedDuringLongRuns() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let store = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionStore.swift"),
+            encoding: .utf8
+        )
+        let lineage = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisCore/LineageAnalysis.swift"),
+            encoding: .utf8
+        )
+
+        #expect(!renderer.contains("observationSamples"))
+        #expect(renderer.contains("selectionHistoryCapacity = 4_096"))
+        #expect(renderer.contains("componentContributions.removeAll"))
+        #expect(store.contains("pendingComponentContributions.removeAll"))
+        #expect(store.contains("let capacity = 8_192"))
+        #expect(lineage.contains("maximumRetainedBirths: Int = 8_192"))
+        #expect(lineage.contains("pruneHistory(retaining:"))
+    }
+
+    @Test
+    func speedSelectorAvoidsTheLeakingMacOSSegmentedPickerAdapter() throws {
+        let content = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/ContentView.swift"),
+            encoding: .utf8
+        )
+        let metalView = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/MetalEvolutionView.swift"),
+            encoding: .utf8
+        )
+
+        #expect(!content.contains("Picker(\"Speed\""))
+        #expect(!content.contains(".pickerStyle(.segmented)"))
+        #expect(content.contains("ForEach([1, 3, 6, 24]"))
+        #expect(metalView.contains("@ObservedObject var store: EvolutionStore"))
+    }
+
+    @Test
     func cellRenderingRejectsMalformedMembraneTrianglesAtomically() throws {
         let shader = try String(
             contentsOf: repositoryRoot

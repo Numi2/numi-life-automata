@@ -132,6 +132,37 @@ import Testing
     #expect(persistent.meanMorphologyDistance > 0.5)
 }
 
+@Test func lineageTrackerBoundsRetainedHistoryWithoutLosingEventTotals() {
+    var tracker = LineageDivergenceTracker(maximumRetainedBirths: 8)
+    for birthID in UInt32(1)...UInt32(32) {
+        tracker.registerBirth(LineageBirthRecord(
+            birthID: birthID,
+            parentBirthID: birthID == 1 ? nil : birthID - 1,
+            birthStep: UInt64(birthID),
+            mutationDistance: 0.01,
+            genomeHash: birthID,
+            topologyHash: birthID
+        ))
+        if birthID < 32 {
+            tracker.registerDeath(birthID: birthID, step: UInt64(birthID + 1))
+        }
+    }
+
+    let analysis = tracker.analyze(
+        living: [LivingLineageSample(
+            birthID: 32,
+            topologyHash: 32,
+            morphology: MorphologyDescriptor(values: [0.5, 0.5])
+        )],
+        currentStep: 64,
+        minimumPersistenceSteps: 1
+    )
+
+    #expect(tracker.retainedBirthCount == 8)
+    #expect(analysis.recordedBirthCount == 32)
+    #expect(analysis.recordedDeathCount == 31)
+}
+
 @Test func laggedAssociationUsesDifferencedFixedLagPairs() {
     let increments = (0..<40).map { index in
         [0.8, -0.3, 0.5, 0.1, -0.6, 0.4][index % 6]

@@ -74,22 +74,35 @@ public struct LineageAnalysis: Sendable, Equatable {
 }
 
 public struct LineageDivergenceTracker: Sendable {
+    private let maximumRetainedBirths: Int
     private var births: [UInt32: LineageBirthRecord] = [:]
-    private var deathSteps: [UInt32: UInt64] = [:]
+    private var birthOrder: [UInt32] = []
+    private var totalBirthCount = 0
+    private var totalDeathCount = 0
 
-    public init() {}
+    public init(maximumRetainedBirths: Int = 8_192) {
+        self.maximumRetainedBirths = max(maximumRetainedBirths, 2)
+    }
+
+    public var retainedBirthCount: Int { births.count }
 
     public mutating func reset() {
         births.removeAll(keepingCapacity: true)
-        deathSteps.removeAll(keepingCapacity: true)
+        birthOrder.removeAll(keepingCapacity: true)
+        totalBirthCount = 0
+        totalDeathCount = 0
     }
 
     public mutating func registerBirth(_ record: LineageBirthRecord) {
+        if births[record.birthID] == nil {
+            birthOrder.append(record.birthID)
+            totalBirthCount += 1
+        }
         births[record.birthID] = record
     }
 
-    public mutating func registerDeath(birthID: UInt32, step: UInt64) {
-        deathSteps[birthID] = step
+    public mutating func registerDeath(birthID _: UInt32, step _: UInt64) {
+        totalDeathCount += 1
     }
 
     public func genealogicalDistance(from lhs: UInt32, to rhs: UInt32) -> Double {
@@ -119,19 +132,20 @@ public struct LineageDivergenceTracker: Sendable {
         return 1 + distance
     }
 
-    public func analyze(
+    public mutating func analyze(
         living: [LivingLineageSample],
         currentStep: UInt64,
         minimumPersistenceSteps: UInt64 = 1_200,
         divergenceThreshold: Double = 0.30
     ) -> LineageAnalysis {
+        pruneHistory(retaining: Set(living.map(\.birthID)))
         guard !living.isEmpty else {
             return LineageAnalysis(
                 persistentCladeCount: 0,
                 meanMorphologyDistance: 0,
                 meanGenealogicalDistance: 0,
-                recordedBirthCount: births.count,
-                recordedDeathCount: deathSteps.count
+                recordedBirthCount: totalBirthCount,
+                recordedDeathCount: totalDeathCount
             )
         }
 
@@ -172,9 +186,31 @@ public struct LineageDivergenceTracker: Sendable {
             persistentCladeCount: persistentRepresentative.count,
             meanMorphologyDistance: pairCount > 0 ? morphologyDistanceTotal / Double(pairCount) : 0,
             meanGenealogicalDistance: pairCount > 0 ? genealogicalDistanceTotal / Double(pairCount) : 0,
-            recordedBirthCount: births.count,
-            recordedDeathCount: deathSteps.count
+            recordedBirthCount: totalBirthCount,
+            recordedDeathCount: totalDeathCount
         )
+    }
+
+    private mutating func pruneHistory(retaining livingIDs: Set<UInt32>) {
+        guard births.count > maximumRetainedBirths else { return }
+
+        var retained = livingIDs
+        var frontier = Array(livingIDs)
+        while let birthID = frontier.popLast(),
+              retained.count < maximumRetainedBirths,
+              let parentID = births[birthID]?.parentBirthID,
+              retained.insert(parentID).inserted {
+            frontier.append(parentID)
+        }
+        for birthID in birthOrder.reversed()
+        where retained.count < maximumRetainedBirths {
+            if births[birthID] != nil {
+                retained.insert(birthID)
+            }
+        }
+
+        births = births.filter { retained.contains($0.key) }
+        birthOrder = birthOrder.filter { retained.contains($0) }
     }
 
     private func combinedDistance(

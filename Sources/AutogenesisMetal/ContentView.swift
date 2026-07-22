@@ -165,16 +165,31 @@ struct ContentView: View {
 
             commandDivider
 
-            Picker("Speed", selection: $store.stepsPerFrame) {
-                Text("1x").tag(1)
-                Text("3x").tag(3)
-                Text("6x").tag(6)
-                Text("24x").tag(24)
+            HStack(spacing: 0) {
+                ForEach([1, 3, 6, 24], id: \.self) { speed in
+                    Button {
+                        store.stepsPerFrame = speed
+                    } label: {
+                        Text("\(speed)x")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .frame(width: 31, height: 30)
+                            .background(
+                                store.stepsPerFrame == speed
+                                    ? Color.blue
+                                    : Color.clear
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(
+                        store.stepsPerFrame == speed ? Color.white : Color.secondary
+                    )
+                    .help("Run \(speed) biological solver step\(speed == 1 ? "" : "s") per rendered frame")
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 126)
-            .help("Exact biological solver steps per rendered frame")
+            .frame(width: 126, height: 30)
+            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 5))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
 
             commandDivider
 
