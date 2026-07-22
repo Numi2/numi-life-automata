@@ -9675,6 +9675,9 @@ kernel void compactVisibleJunctions(
     if (uniforms.step < lastSeen || uniforms.step - lastSeen > 180u ||
         junctionStates[junctionIndex].persistentFingerprint !=
             cellPairFingerprint(cellIdentities, cellA, cellB) ||
+        !isfinite(junctionStates[junctionIndex].restDistance) ||
+        !isfinite(junctionStates[junctionIndex].strength) ||
+        !isfinite(junctionStates[junctionIndex].age) ||
         !isfinite(junctionStates[junctionIndex].load) ||
         !all(isfinite(junctionStates[junctionIndex].material)) ||
         !all(isfinite(junctionStates[junctionIndex].remodeling))) { return; }
@@ -10258,6 +10261,12 @@ vertex JunctionRasterData junctionVertex(
     uint owner = identityA.owner;
     if (owner >= maxAgentCount || identityB.owner != owner ||
         atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return output; }
+    if (!isfinite(junctionStates[junctionIndex].restDistance) ||
+        !isfinite(junctionStates[junctionIndex].strength) ||
+        !isfinite(junctionStates[junctionIndex].age) ||
+        !isfinite(junctionStates[junctionIndex].load) ||
+        !all(isfinite(junctionStates[junctionIndex].material)) ||
+        !all(isfinite(junctionStates[junctionIndex].remodeling))) { return output; }
 
     AgentState agent = agents[owner];
     CellState stateA = cells[cellA];
@@ -10318,6 +10327,7 @@ vertex JunctionRasterData junctionVertex(
     float2 normal = normalize(float2(-clipDelta.y, clipDelta.x));
     float2 clipPosition = mix(clipA, clipB, coordinate.x) +
         normal * coordinate.y * thickness;
+    if (!all(isfinite(clipPosition))) { return output; }
     output.position = float4(clipPosition, 0.0, 1.0);
     output.ribbonCoordinate = coordinate;
     output.mechanics = float4(load, strain, strength, corticalTension);
@@ -10552,9 +10562,12 @@ inline CellRasterData makeCellRasterData(
     float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
     float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
         max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    // Do not reject one vertex of an otherwise valid triangle by screen position.
+    // Mixed valid/sentinel vertices form a giant clipped primitive and were able to
+    // overwrite large display tiles. The earlier physical bounds make finiteness a
+    // triangle-wide decision; normal raster clipping handles offscreen coordinates.
     finiteGeometry = finiteGeometry && all(isfinite(heading)) &&
-        all(isfinite(worldPosition)) && all(isfinite(screenUV)) &&
-        all(abs(screenUV - 0.5) <= float2(1.0));
+        all(isfinite(worldPosition)) && all(isfinite(screenUV));
     bool occupied = agentOccupancy[owner] != 0u && cellOccupancy[cellIndex] != 0u &&
         finiteGeometry && visibility > 0.001;
 

@@ -2225,6 +2225,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         "NUMI_SYNTHETIC_METAL_STALL_STEP"
     ].flatMap(UInt64.init)
     private var syntheticStallInjected = false
+    private var syntheticRetiredCommandBuffers = 0
     private var watchdogTimer: Timer?
     private var quantumStep: UInt32 = 0
     private var generation: UInt32 = 0
@@ -2969,6 +2970,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             recoveryCount = 0
             syntheticFaultInjected = false
             syntheticStallInjected = false
+            syntheticRetiredCommandBuffers = 0
             lastMetalError = nil
             quantumStep = 0
             generation = 0
@@ -3080,10 +3082,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 "\(error.localizedDescription) [\(String(describing: error))]"
             }
             Task { @MainActor [weak self] in
-                guard let self,
-                      !self.shouldSuppressCompletionForSyntheticStall(
-                        submittedStep: submittedStep
-                      ) else { return }
+                guard let self else { return }
+                if self.shouldSuppressCompletionForSyntheticStall(
+                    submittedStep: submittedStep
+                ) {
+                    // The synthetic probe hides semantic completion only after Metal's
+                    // real feedback has retired the resources. Remember that fact so
+                    // the watchdog can drain its simulated queue without weakening the
+                    // production retirement rule.
+                    self.syntheticRetiredCommandBuffers += 1
+                    return
+                }
                 self.completeSubmission(
                     status: status,
                     errorDescription: errorDescription,
@@ -3181,18 +3190,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         publishRuntimeTelemetry()
     }
 
-    private func handleSubmissionFailure(
-        _ message: String,
-        abandonInFlight: Bool = false
-    ) {
+    private func handleSubmissionFailure(_ message: String) {
         guard !submissionFaulted else { return }
         submissionFaulted = true
         submissionEpoch &+= 1
         recoveryCount &+= 1
         lastMetalError = message
-        if abandonInFlight {
-            unfinishedCommandBuffers = 0
-        }
+        // A timeout is not proof that Metal has retired the submitted work. Keep the
+        // old epoch's resources quarantined until every real feedback callback arrives;
+        // restoring into buffers that an overdue command buffer can still write causes
+        // visible tile corruption and can damage causal state.
         if unfinishedCommandBuffers == 0 {
             restoreLatestRecoveryCheckpoint()
         }
@@ -3203,9 +3210,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private func inspectCompletionWatchdog() {
         guard unfinishedCommandBuffers > 0,
               CFAbsoluteTimeGetCurrent() - lastCompletionTime > 5 else { return }
+        if syntheticRetiredCommandBuffers > 0 {
+            unfinishedCommandBuffers = max(
+                unfinishedCommandBuffers - syntheticRetiredCommandBuffers,
+                0
+            )
+            syntheticRetiredCommandBuffers = 0
+        }
         handleSubmissionFailure(
-            "Metal completion watchdog exceeded 5 seconds with \(unfinishedCommandBuffers) unfinished buffers; abandoning the stalled epoch and restoring the latest causal checkpoint.",
-            abandonInFlight: true
+            "Metal completion watchdog exceeded 5 seconds with \(unfinishedCommandBuffers) " +
+            "unfinished buffers; submission is paused until Metal retires the old epoch."
         )
     }
 
