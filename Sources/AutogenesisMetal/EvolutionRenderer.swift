@@ -1981,7 +1981,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let membraneContactPairCapacity = 524_288
     private static let contactWorkStateCount = 4
     private static let cellJunctionCapacity = 32_768
-    private static let worldExchangeChannelCount = 12
+    private static let worldExchangeChannelCount = 14
     private static let energyAuditChannelCount = 10
     private static let identityCounterCount = 19
     private static let invariantStateCount = 20
@@ -2737,7 +2737,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         cellContactEffects.label = "Accumulated cell contact effects"
         membraneContactEffects.label = "Equal-and-opposite membrane vertex forces"
         cellJunctions.label = "Persistent membrane junction hash"
-        cellEnergyExchange.label = "Fixed-point substrate, waste, ligand, and matrix exchange"
+        cellEnergyExchange.label = "Fixed-point substrate, catalyst, detox, ligand, and matrix exchange"
         energyAudit.label = "Global cellular energy conservation audit"
         invariantState.label = "Persistent fail-fast invariant audit"
         invariantScratch.label = "Invariant reduction scratch"

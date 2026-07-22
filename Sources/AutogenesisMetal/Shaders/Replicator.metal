@@ -55,10 +55,11 @@ constant uint membraneContactPairCapacity = 524288u;
 constant uint componentTopologyReconciliationStride = 256u;
 constant uint cellJunctionCapacity = 32768u;
 constant uint cellJunctionMask = cellJunctionCapacity - 1u;
-// Substrate/energy exchange occupies channels 0...7. Channels 8...11 carry
+// Substrate/energy exchange occupies channels 0...7. Channels 8...13 carry
 // cell-produced developmental matter into the next extracellular-field step:
-// ligand A, ligand B, matrix deposition, and wound/remodeling cue.
-constant uint worldExchangeChannelCount = 12u;
+// ligand A, ligand B, matrix deposition, wound/remodeling cue, catalyst
+// secretion, and toxin neutralization.
+constant uint worldExchangeChannelCount = 14u;
 constant uint componentMulticellularFlag = 1u << 0u;
 constant uint componentRegeneratedFlag = 1u << 1u;
 constant uint componentHomeostaticFlag = 1u << 2u;
@@ -2072,6 +2073,12 @@ kernel void reactWorld(
     float woundRemodelingCue = substrateFromFixed(atomic_exchange_explicit(
         &cellEnergyExchange[energyTileBase + 11u], 0u, memory_order_relaxed
     ));
+    float secretedCatalyst = substrateFromFixed(atomic_exchange_explicit(
+        &cellEnergyExchange[energyTileBase + 12u], 0u, memory_order_relaxed
+    ));
+    float neutralizedToxin = substrateFromFixed(atomic_exchange_explicit(
+        &cellEnergyExchange[energyTileBase + 13u], 0u, memory_order_relaxed
+    ));
 
     // Ligands diffuse and turn over, matrix persists locally, and the wound cue
     // spreads fastest but decays rapidly. No component identity enters this field.
@@ -2098,9 +2105,11 @@ kernel void reactWorld(
     resourceA = max(resourceA - consumedResourceA, 0.0);
     resourceB = max(resourceB - consumedResourceB, 0.0);
     detritus = max(detritus - consumedDetritus + returnedDetritus, 0.0);
+    catalyst += secretedCatalyst;
+    toxin = max(toxin - neutralizedToxin, 0.0);
     float mineralization = min(
         detritus,
-        uniforms.dt * detritus * (0.00035 + catalyst * 0.0032) *
+        uniforms.dt * detritus * (0.00035 + catalyst * 0.0056) *
             permeability * (1.0 - saturate(toxin) * 0.72)
     );
     detritus -= mineralization;
@@ -5754,8 +5763,8 @@ kernel void evolveOrganismCells(
     float starvationQuiescence = development.ecologicalResponse.w *
         (1.0 - proliferationProgram) * ecologicalScarcity;
     externalStress = saturate(
-        externalStress - toxinLoad * toxinTolerance * 0.54 -
-            environmentalDrive * shearAnchoring * 620.0
+        externalStress - toxinLoad * toxinTolerance * 0.68 -
+            environmentalDrive * shearAnchoring * 720.0
     );
     float2 previousMorphogens = saturate(cell.signals.xy);
     float activatorAutocatalysis = previousMorphogens.x * previousMorphogens.x /
@@ -5848,7 +5857,7 @@ kernel void evolveOrganismCells(
     float requestedResourceB = localEcology.x * cell.phenotype.w * 0.00125 *
         uptakeGain * extracellularAccess;
     float requestedDetritus = localEcology.y * agent.geneC.z * 0.00043 *
-        uptakeGain * (1.0 + detritalScavenging * 1.65) * extracellularAccess;
+        uptakeGain * (1.0 + detritalScavenging * 2.10) * extracellularAccess;
     float consumedResourceA = claimSubstrate(
         &cellEnergyExchange[energyTileBase], requestedResourceA
     );
@@ -5890,10 +5899,16 @@ kernel void evolveOrganismCells(
         extracellularMatrixRemodeling * 0.000030;
     float junctionMaterialWork = junctionMaterialDemand * 0.0000045 +
         junctionStrainMemory * 0.000016;
+    float cellularCatalystSecretion = secretionProgram * agent.geneA.y *
+        agent.geneA.w * membraneExposure * metabolicReadiness *
+        (0.000002 + localEcology.y * 0.000014);
+    float cellularToxinNeutralization = toxinTolerance * toxinLoad *
+        membraneExposure * metabolicReadiness * 0.000018;
     float ecologicalResponseWork = toxinTolerance * toxinLoad * 0.000022 +
         detritalScavenging * consumedDetritus * 0.045 +
         shearAnchoring * environmentalDrive * 0.075 +
-        development.ecologicalResponse.w * 0.0000025;
+        development.ecologicalResponse.w * 0.0000025 +
+        cellularCatalystSecretion * 0.85 + cellularToxinNeutralization * 0.72;
     float propagulePreparation = membraneExposure * motilityProgram *
         development.mechanochemistryB.w * (1.0 - adhesiveProgram) *
         smoothstep(0.16, 0.38, cell.physiology.x) * discretionaryActivityScale;
@@ -5963,6 +5978,14 @@ kernel void evolveOrganismCells(
         (extracellularMatrixRemodeling * 0.000060 +
             max(1.0 - cell.physiology.w, 0.0) * repairProgram * 0.000075) *
             developmentalOutputScale
+    );
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 12u,
+        cellularCatalystSecretion * expenseScale
+    );
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 13u,
+        cellularToxinNeutralization * expenseScale
     );
     float atpStorageDelta = atp - cell.physiology.x;
     float conservationResidual = substrateEnergy + atpSharingFlux -
@@ -7044,9 +7067,9 @@ kernel void resolveMembraneContacts(
                                 saturate(other.physiology.x) *
                                 pow(saturate(dot(otherLocalDirection, boundaryB)), 2.0);
                             float attackA = sameOwner ? 0.0 :
-                                attackConstructionA * pairDifference;
+                                attackConstructionA * (0.20 + pairDifference * 0.80);
                             float attackB = sameOwner ? 0.0 :
-                                attackConstructionB * pairDifference;
+                                attackConstructionB * (0.20 + pairDifference * 0.80);
                             float defenseA = saturate(
                                 supportA.integrity * (0.50 + cell.phenotype.x * 0.24 +
                                     armorConstructionA * 0.62)
@@ -7055,14 +7078,41 @@ kernel void resolveMembraneContacts(
                                 supportB.integrity * (0.50 + other.phenotype.x * 0.24 +
                                     armorConstructionB * 0.62)
                             );
-                            float damageToA = contactStrength * attackB * (1.12 - defenseA) * 0.0065;
-                            float damageToB = contactStrength * attackA * (1.12 - defenseB) * 0.0065;
-                            float breachA = (1.0 - smoothstep(0.12, 0.34, supportA.integrity)) *
-                                (1.0 - smoothstep(0.18, 0.42, cell.physiology.w));
-                            float breachB = (1.0 - smoothstep(0.12, 0.34, supportB.integrity)) *
-                                (1.0 - smoothstep(0.18, 0.42, other.physiology.w));
-                            float transferFromA = contactStrength * attackB * breachA * 0.0018;
-                            float transferFromB = contactStrength * attackA * breachB * 0.0018;
+                            float damageToA = contactStrength * attackB * (1.12 - defenseA) * 0.010;
+                            float damageToB = contactStrength * attackA * (1.12 - defenseB) * 0.010;
+                            // Digestion follows failure at the contacted membrane support.
+                            // Whole-cell integrity limits stores but is not a prerequisite
+                            // for beginning a local breach.
+                            float localFailureA = 1.0 - smoothstep(
+                                0.42, 0.90, supportA.integrity
+                            );
+                            float localFailureB = 1.0 - smoothstep(
+                                0.42, 0.90, supportB.integrity
+                            );
+                            float freshDamageA = smoothstep(0.0000001, 0.000004, damageToA);
+                            float freshDamageB = smoothstep(0.0000001, 0.000004, damageToB);
+                            float breachA = saturate(
+                                localFailureA * 0.78 + freshDamageA * 0.42
+                            ) * cell.tissueGeometry.z;
+                            float breachB = saturate(
+                                localFailureB * 0.78 + freshDamageB * 0.42
+                            ) * other.tissueGeometry.z;
+                            float availableFromA = min(
+                                cell.physiology.x * 0.012 / 0.82,
+                                max(cell.physiology.y - 0.16, 0.0) * 0.004 / 0.30
+                            );
+                            float availableFromB = min(
+                                other.physiology.x * 0.012 / 0.82,
+                                max(other.physiology.y - 0.16, 0.0) * 0.004 / 0.30
+                            );
+                            float transferFromA = min(
+                                contactStrength * attackB * breachA * 0.012,
+                                availableFromA
+                            );
+                            float transferFromB = min(
+                                contactStrength * attackA * breachB * 0.012,
+                                availableFromB
+                            );
                             if (!sameOwner && attackA + attackB > 0.000001) {
                                 bool breached = (attackB > 0.0 && breachA > 0.05) ||
                                     (attackA > 0.0 && breachB > 0.05);
