@@ -4412,13 +4412,17 @@ kernel void unionCellComponents(
                             // so it cannot also be an absolute mating veto for free
                             // cells. It remains a strong reluctance penalty while
                             // reciprocal adhesion and investment provide commitment.
-                            float localDetachmentGate = mix(
-                                0.30, 1.0,
-                                1.0 - smoothstep(
-                                    0.08, 0.72,
-                                    max(cell.tissueGeometry.w, other.tissueGeometry.w)
-                                )
+                            float detachmentPermission = 1.0 - smoothstep(
+                                0.08, 0.72,
+                                max(cell.tissueGeometry.w, other.tissueGeometry.w)
                             );
+                            // A clonal fragment that is actively detaching must
+                            // finish separating before it can heal back into its
+                            // parent. Distinct programs retain a reluctance floor
+                            // so compatible mating remains possible.
+                            float localDetachmentGate = distinctProgramPair
+                                ? mix(0.30, 1.0, detachmentPermission)
+                                : detachmentPermission;
                             float2 velocityA = agent.velocity +
                                 rotateTissueToWorld(cell.velocity, agent) * scale;
                             float2 velocityB = otherAgent.velocity +
@@ -4989,7 +4993,9 @@ kernel void reassignCellComponents(
         max(scale, 0.0000001);
     cell.velocity = rotateWorldToTissue(worldVelocity, newAgent);
     cell.tissueForce = float4(0.0);
-    cell.tissueGeometry.w = 0.0;
+    // Ownership changes only the coordinate frame. Preserve the locally
+    // produced detachment state so a newborn fragment cannot immediately
+    // erase its separation drive and fuse back into its parent.
     identity.owner = newOwner;
     cells[gid] = cell;
     cellIdentities[gid] = identity;

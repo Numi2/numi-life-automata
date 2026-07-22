@@ -191,7 +191,10 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains(
             "(0.00018 + detachmentRelease * 0.00012)"
         ))
-        #expect(shader.contains("float localDetachmentGate = mix("))
+        #expect(shader.contains("float detachmentPermission = 1.0 - smoothstep("))
+        #expect(shader.contains("float localDetachmentGate = distinctProgramPair"))
+        #expect(shader.contains("? mix(0.30, 1.0, detachmentPermission)"))
+        #expect(!shader.contains("cell.tissueGeometry.w = 0.0;"))
         #expect(shader.contains("0.30, 1.0,"))
         #expect(shader.contains("float compressiveContactGate = 1.0 - smoothstep"))
         #expect(shader.contains("localDetachmentGate * compressiveContactGate"))
@@ -456,7 +459,8 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("fusionEligible && fusionDrive > 0.008"))
         #expect(shader.contains("inheritedA.social.x, inheritedB.social.x"))
         #expect(shader.contains("float nonAggression = 1.0 - saturate(predation * 1.8)"))
-        #expect(shader.contains("float localDetachmentGate = mix("))
+        #expect(shader.contains("float localDetachmentGate = distinctProgramPair"))
+        #expect(shader.contains("? mix(0.30, 1.0, detachmentPermission)"))
         #expect(shader.contains("compressiveContactGate"))
         #expect(shader.contains("-0.00001, 0.00036, separatingSpeed"))
         #expect(shader.contains("uint fusionJunction = findOrCreateCellJunction"))
