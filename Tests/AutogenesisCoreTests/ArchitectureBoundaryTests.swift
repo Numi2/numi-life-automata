@@ -429,6 +429,35 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func indirectRenderArgumentsArePrivateRebuiltAndBoundedBeforeDereference() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+
+        #expect(shader.contains("kernel void resetRenderDrawArguments"))
+        #expect(shader.contains("kernel void finalizeRenderDrawArguments"))
+        #expect(shader.contains("&cellDrawArguments[0], membraneRenderSegmentCount * 3u"))
+        #expect(shader.contains("atomic_store_explicit(&junctionDrawArguments[0], 6u"))
+        #expect(shader.contains("if (instanceID >= maxCellCount || vertexID >="))
+        #expect(shader.contains("if (instanceID >= cellJunctionCapacity || vertexID >= 6u)"))
+        #expect(renderer.contains("resetRenderDrawArgumentsPipeline"))
+        #expect(renderer.contains("finalizeRenderDrawArgumentsPipeline"))
+        #expect(renderer.contains("private final class RenderSubmissionResources"))
+        #expect(renderer.contains("0..<Metal4ExecutionContext.maximumInFlightSubmissions"))
+        #expect(renderer.contains("commandBuffer.submissionSlotIndex"))
+        #expect(renderer.contains("encoder.memoryBarrier(resources: [\n            cellDrawArguments"))
+        #expect(!renderer.contains("cellDrawArguments.contents()"))
+        #expect(!renderer.contains("junctionDrawArguments.contents()"))
+    }
+
+    @Test
     func adaptiveCellMeshPublishesGeometryOnceAndSanitizesRasterOutput() throws {
         let shader = try String(
             contentsOf: repositoryRoot
@@ -477,14 +506,15 @@ struct ArchitectureBoundaryTests {
             encoding: .utf8
         )
 
-        #expect(renderer.contains("private var renderTargetCache: [RenderTargetSet] = []"))
-        #expect(renderer.contains("renderTargetCache.count >= 2"))
-        #expect(renderer.contains("commandQueue.unfinishedSubmissionCount > 1"))
+        #expect(renderer.contains("private let renderSubmissionResources: [RenderSubmissionResources]"))
+        #expect(renderer.contains("resources.renderTargets = targets"))
+        #expect(renderer.contains("renderSubmissionResources.reduce(UInt64(0))"))
         #expect(renderer.contains("device.makeHeap(descriptor: heapDescriptor)"))
         #expect(renderer.contains("residencySet.addAllocation(heap)"))
         #expect(renderer.contains("commandBuffer.useResidencySet(renderTargets.residencySet)"))
         #expect(!execution.contains("dynamicResidencySet"))
         #expect(execution.contains("commandBuffer.useResidencySet(residencySet)"))
+        #expect(execution.contains("var submissionSlotIndex: Int { slot.index }"))
         #expect(execution.contains("? [.dispatch, .blit, .vertex, .mesh, .fragment]"))
         #expect(execution.contains("retainedResources.removeAll(keepingCapacity: false)"))
         #expect(execution.contains("drawable = nil"))

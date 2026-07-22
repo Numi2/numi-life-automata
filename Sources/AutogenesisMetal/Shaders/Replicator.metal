@@ -7552,6 +7552,22 @@ kernel void expandAgents(
     agents[gid] = agent;
 }
 
+kernel void resetRenderDrawArguments(
+    device atomic_uint* cellDrawArguments [[buffer(0)]],
+    device atomic_uint* meshDispatchArguments [[buffer(1)]],
+    device atomic_uint* junctionDrawArguments [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    for (uint index = 0u; index < 4u; ++index) {
+        atomic_store_explicit(&cellDrawArguments[index], 0u, memory_order_relaxed);
+        atomic_store_explicit(&junctionDrawArguments[index], 0u, memory_order_relaxed);
+    }
+    for (uint index = 0u; index < 3u; ++index) {
+        atomic_store_explicit(&meshDispatchArguments[index], 0u, memory_order_relaxed);
+    }
+}
+
 kernel void compactVisibleCells(
     device const atomic_uint* agentOccupancy [[buffer(0)]],
     device const atomic_uint* cellOccupancy [[buffer(1)]],
@@ -7654,6 +7670,40 @@ kernel void compactVisibleJunctions(
     if (target < cellJunctionCapacity) {
         visibleJunctionIndices[target] = junctionIndex;
     }
+}
+
+kernel void finalizeRenderDrawArguments(
+    device atomic_uint* cellDrawArguments [[buffer(0)]],
+    device atomic_uint* meshDispatchArguments [[buffer(1)]],
+    device atomic_uint* junctionDrawArguments [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint cellCount = min(
+        atomic_load_explicit(&cellDrawArguments[1], memory_order_relaxed),
+        maxCellCount
+    );
+    uint meshCount = min(
+        atomic_load_explicit(&meshDispatchArguments[0], memory_order_relaxed),
+        maxCellCount
+    );
+    uint junctionCount = min(
+        atomic_load_explicit(&junctionDrawArguments[1], memory_order_relaxed),
+        cellJunctionCapacity
+    );
+    atomic_store_explicit(
+        &cellDrawArguments[0], membraneRenderSegmentCount * 3u, memory_order_relaxed
+    );
+    atomic_store_explicit(&cellDrawArguments[1], cellCount, memory_order_relaxed);
+    atomic_store_explicit(&cellDrawArguments[2], 0u, memory_order_relaxed);
+    atomic_store_explicit(&cellDrawArguments[3], 0u, memory_order_relaxed);
+    atomic_store_explicit(&meshDispatchArguments[0], meshCount, memory_order_relaxed);
+    atomic_store_explicit(&meshDispatchArguments[1], 1u, memory_order_relaxed);
+    atomic_store_explicit(&meshDispatchArguments[2], 1u, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[0], 6u, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[1], junctionCount, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[2], 0u, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[3], 0u, memory_order_relaxed);
 }
 
 struct RasterData {
@@ -8159,6 +8209,7 @@ vertex JunctionRasterData junctionVertex(
 ) {
     JunctionRasterData output = {};
     output.position = float4(3.0, 3.0, 0.0, 1.0);
+    if (instanceID >= cellJunctionCapacity || vertexID >= 6u) { return output; }
     uint junctionIndex = visibleJunctionIndices[instanceID];
     if (junctionIndex >= cellJunctionCapacity) { return output; }
     uint pairKey = atomic_load_explicit(
@@ -8422,9 +8473,12 @@ inline CellRasterData makeCellRasterData(
     uint vertexID,
     uint instanceID
 ) {
-    uint cellIndex = visibleCellIndices[instanceID];
     CellRasterData output = {};
     output.position = float4(3.0, 3.0, 0.0, 1.0);
+    if (instanceID >= maxCellCount || vertexID >= membraneRenderSegmentCount * 3u) {
+        return output;
+    }
+    uint cellIndex = visibleCellIndices[instanceID];
     if (cellIndex >= maxCellCount) { return output; }
     uint owner = cellIdentities[cellIndex].owner;
     if (owner >= maxAgentCount) { return output; }

@@ -676,6 +676,7 @@ final class Metal4CommandBufferContext: @unchecked Sendable {
     }
 
     var uniformBytesUsed: Int { slot.uniformArena.usedBytes }
+    var submissionSlotIndex: Int { slot.index }
 
     var status: Metal4CommandStatus {
         completionLock.lock()
