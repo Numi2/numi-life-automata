@@ -1590,6 +1590,10 @@ private struct ProgramSlotState {
     var referenceCount: UInt32
     var generation: UInt32
     var lineageHash: UInt32
+    var mutationHazard: UInt32
+    var mutationHazardPadding0: UInt32
+    var mutationHazardPadding1: UInt32
+    var mutationHazardPadding2: UInt32
 }
 
 private struct CellJunctionState {
@@ -2241,7 +2245,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         precondition(MemoryLayout<CellState>.stride == 288, "CellState Metal ABI drift")
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
         precondition(MemoryLayout<HeritableProgram>.stride == 128, "HeritableProgram Metal ABI drift")
-        precondition(MemoryLayout<ProgramSlotState>.stride == 16, "ProgramSlotState Metal ABI drift")
+        precondition(MemoryLayout<ProgramSlotState>.stride == 32, "ProgramSlotState Metal ABI drift")
         precondition(MemoryLayout<CellJunctionState>.stride == 64, "CellJunctionState Metal ABI drift")
         precondition(MemoryLayout<CellAggregate>.stride == 336, "CellAggregate Metal ABI drift")
         precondition(MemoryLayout<DevelopmentalGenome>.stride == 160, "DevelopmentalGenome Metal ABI drift")

@@ -190,6 +190,12 @@ struct ProgramSlotState {
     atomic_uint referenceCount;
     atomic_uint generation;
     uint lineageHash;
+    // Q32 accumulated replication hazard. Unsigned overflow schedules one
+    // mutation for the next successfully copied daughter program.
+    atomic_uint mutationHazard;
+    uint mutationHazardPadding0;
+    uint mutationHazardPadding1;
+    uint mutationHazardPadding2;
 };
 
 struct CellJunctionState {
@@ -998,7 +1004,7 @@ inline void mutateDevelopmentalGenome(
         length(child.junctionMaterial - oldJunctionMaterial) * 0.024 +
         length(child.ecologicalResponse - oldEcologicalResponse) * 0.022;
     uint structuralChanges = 0u;
-    bool structuralMutation = branchMutation || random01(seed + 719u) < child.mutation.w;
+    bool structuralMutation = branchMutation;
     if (structuralMutation) {
         uint operation = hash32(seed + 727u) % 5u;
         if (operation == 0u) {
@@ -3077,6 +3083,14 @@ inline uint claimHeritableProgram(
                 &programSlots[candidate].referenceCount, 0u, memory_order_relaxed
             );
             programSlots[candidate].lineageHash = 0u;
+            atomic_store_explicit(
+                &programSlots[candidate].mutationHazard,
+                hash32(seed ^ nextGeneration * 0x9e3779b9u),
+                memory_order_relaxed
+            );
+            programSlots[candidate].mutationHazardPadding0 = 0u;
+            programSlots[candidate].mutationHazardPadding1 = 0u;
+            programSlots[candidate].mutationHazardPadding2 = 0u;
             atomic_fetch_add_explicit(&identityCounters[4], 1u, memory_order_relaxed);
             programGeneration = nextGeneration;
             return candidate;
@@ -3147,9 +3161,30 @@ inline void abandonHeritableProgram(
     atomic_store_explicit(
         &programSlots[programIndex].referenceCount, 0u, memory_order_relaxed
     );
+    atomic_store_explicit(
+        &programSlots[programIndex].mutationHazard, 0u, memory_order_relaxed
+    );
     if (occupied != 0u) {
         atomic_fetch_sub_explicit(&identityCounters[4], 1u, memory_order_relaxed);
     }
+}
+
+inline bool accrueProgramMutationHazard(
+    device ProgramSlotState* programSlots,
+    uint programIndex,
+    uint programGeneration,
+    float probability
+) {
+    if (!programSlotMatches(programSlots, programIndex, programGeneration)) {
+        return false;
+    }
+    uint increment = uint(clamp(probability, 0.0, 0.99999994) * 4294967295.0);
+    if (increment == 0u) { return false; }
+    uint previous = atomic_fetch_add_explicit(
+        &programSlots[programIndex].mutationHazard, increment, memory_order_relaxed
+    );
+    uint accumulated = previous + increment;
+    return accumulated < previous;
 }
 
 inline uint substrateToFixed(float value) {
@@ -3736,6 +3771,12 @@ kernel void initializeAgents(
         atomic_store_explicit(&programSlots[programIndex].referenceCount, 0u, memory_order_relaxed);
         atomic_store_explicit(&programSlots[programIndex].generation, 0u, memory_order_relaxed);
         programSlots[programIndex].lineageHash = 0u;
+        atomic_store_explicit(
+            &programSlots[programIndex].mutationHazard, 0u, memory_order_relaxed
+        );
+        programSlots[programIndex].mutationHazardPadding0 = 0u;
+        programSlots[programIndex].mutationHazardPadding1 = 0u;
+        programSlots[programIndex].mutationHazardPadding2 = 0u;
         developmentalGenomes[programIndex] = emptyDevelopmentalGenome();
         resonanceGenomes[programIndex] = emptyResonanceGenome();
         uint nodeBase = programIndex * regulatoryNodeCapacity;
@@ -8086,10 +8127,13 @@ kernel void divideAndReduceOrganismCells(
                 parent.regulation.w * 0.55 + parent.physiology.x * 0.30 +
                 parent.physiology.w * 0.15
             );
+            float replicationDamage = saturate(
+                parent.signals.z * 0.58 + (1.0 - parent.physiology.w) * 0.42
+            );
             float replicationError = clamp(
-                inheritedAgent.geneB.y * uniforms.mutationScale *
-                    mix(1.45, 0.18, repairFidelity),
-                0.00005, 0.22
+                (0.020 + inheritedAgent.geneB.y * 0.62 + replicationDamage * 0.040) *
+                    mix(1.0, 0.42, repairFidelity) * max(uniforms.mutationScale, 0.25),
+                0.020, 0.10
             );
             bool programMutated = false;
             bool programCrossbred = false;
@@ -8120,8 +8164,11 @@ kernel void divideAndReduceOrganismCells(
                     programCrossbred = true;
                 }
             }
-            if (!programCrossbred &&
-                random01(divisionSeed + 1777u) < replicationError) {
+            bool mutationDue = !programCrossbred && accrueProgramMutationHazard(
+                programSlots, parentIdentity.programIndex,
+                parentIdentity.programGeneration, replicationError
+            );
+            if (mutationDue) {
                 uint daughterProgramGeneration = 0u;
                 uint daughterProgram = claimHeritableProgram(
                     programSlots, identityCounters, divisionSeed ^ 0x4b1d5a77u,
@@ -8130,8 +8177,12 @@ kernel void divideAndReduceOrganismCells(
                 if (daughterProgram < maxHeritableProgramCount) {
                     uint replicationGeneration =
                         heritablePrograms[parentIdentity.programIndex].generation + 1u;
+                    float evolvedStructuralRate = clamp(
+                        0.08 + inheritedDevelopment.mutation.w * 0.78,
+                        0.08, 0.22
+                    );
                     bool structuralMutation = random01(divisionSeed + 1789u) <
-                        clamp(replicationError * 0.35, 0.001, 0.08);
+                        evolvedStructuralRate;
                     childProgramAgent = mutateCellProgram(
                         developmentalGenomes, regulatoryNodes, regulatoryEdges,
                         resonanceGenomes, heritablePrograms, programSlots, identityCounters,
