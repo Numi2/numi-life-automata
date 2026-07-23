@@ -362,7 +362,7 @@ A candidate must be no lower than its four cardinal neighbors. It then claims sl
 
 All cells occupy one `9,216`-record GPU pool. A hot `32 B` identity record stores current physical component owner, inherited-program index and generation, monotonic permanent cell ID, current union-find root, an ephemeral compatible-mate nomination, the second-parent body ID, and conception timing. Parent-cell ID is retained in a separate `4 B` cold genealogy buffer because it is written only at founder creation or division and is not needed by per-frame topology, dynamics, contact, or rendering. Storage index has no biological meaning. Physical ownership and inherited-program identity are independent: component fusion can move a cell into another component frame without changing its program. Mutation occurs only during ATP-funded cell division. A physically separated propagule carries the generation-tagged programs already present in its cells, without an additional fission mutation. Each frame, atomic owner heads and links are rebuilt from live identity records. Autogenic and user-injected founders claim one arbitrary free cell; division claims any free cell in the global pool. Component size is therefore limited only by total hardware capacity and ecological dynamics, not by a per-component slot partition. Camera motion and zoom never allocate, merge, or rescale cells.
 
-Each `CellState` is a `304 B` GPU record:
+Each `CellState` is a `320 B` GPU record:
 
 ```text
 position.xy, velocity.xy
@@ -387,6 +387,7 @@ environment = (substrate forcing, barrier load, environmental frequency, frequen
 development = (persistent polarity.xy, continuous fate memory, junction morphogen transport)
 collectiveBoundary = (integument coverage, transmitted tension,
                       locomotor appendage maturity, gait phase)
+surfaceMaterial = (predatory edge, armor, sensory edge, locomotor edge)
 ```
 
 For cell `i`, `evolveOrganismCells` evaluates all occupied cells belonging to the same physical component. Its traits, sparse developmental graph, mechanochemical gains, and resonant tuning are read through the cell's own inherited-program index. Pair forces are calculated from the same previous-state positions, symmetric radii, and minimum pair adhesion. Reversing the ordered pair reverses its direction without changing magnitude, so the center-level contact force is equal and opposite. `evolveCellMembranes` then advances a separate twelve-vertex polygon for every occupied cell. This is a deformable-particle tissue model coupled to a lattice wave equation, not a continuum finite-element model.
@@ -410,9 +411,9 @@ Local membrane integrity continuously changes the edge and bending stiffness. Co
 
 Each recyclable `128 B` heritable-program payload stores three four-component trait vectors, two ligand coordinates, two receptor coordinates, four social-control coefficients, and immutable provenance for as many as two exact generation-tagged parent programs. A separate `32 B` slot record stores occupancy, a living-cell reference count, a monotonically advancing slot generation, the current lineage hash, and a Q32 mutation-hazard accumulator shared by cells copying that program. Every cell stores both slot index and generation; all dynamics, topology, metrics, and rendering reads validate that pair. The last living-cell release returns the slot to the free pool, while the compact lineage-event ring retains immutable birth, death, fusion, mutation, crossbreeding, genome-hash, topology-hash, and morphology records. Reuse therefore cannot redirect a living cell to an unrelated control law and does not require retaining dead developmental payloads indefinitely.
 
-Each live program references a separate `160 B` developmental header, sixteen `32 B` node slots, forty-eight `32 B` directed-edge slots, and one `32 B` resonance record. Founders begin with twelve active sensor-coupled nodes and twenty active edges. The header carries heritable gains for mechanics-to-Ca*, junction transmission, Ca*-to-ERK*, refractory recovery, signaling ATP cost, traction, detachment threshold, propagule investment, junction adhesion, cortical tension, viscous damping, junction permeability, toxin tolerance, detrital scavenging, shear anchoring, and starvation quiescence. It also stores independent basal production, first-order decay, receptor sensitivity, and junction diffusivity coefficients for two dimensionless morphogens. A node stores its bias, response rate, sensor weight, actuator weight, sensor index, eight-bit actuator mask, activity flag, and monotonic innovation ID. An edge stores its weight, strain-dependent plastic term, source, target, activity flag, and monotonic innovation ID. Inactive slots have zero effect but can be activated by structural mutation.
+Each live program references a separate `192 B` developmental header, sixteen `32 B` node slots, forty-eight `32 B` directed-edge slots, and one `32 B` resonance record. Founders begin with twelve active sensor-coupled nodes and twenty active edges. The header carries heritable gains for mechanics-to-Ca*, junction transmission, Ca*-to-ERK*, refractory recovery, signaling ATP cost, traction, detachment threshold, propagule investment, junction adhesion, cortical tension, viscous damping, junction permeability, toxin tolerance, detrital scavenging, shear anchoring, starvation quiescence, organizer persistence, segmentation frequency, bilateral coupling, outgrowth, developmental plasticity, canalization, material retention, and injury-driven reopening. It also stores independent basal production, first-order decay, receptor sensitivity, and junction diffusivity coefficients for two dimensionless morphogens. A node stores its bias, response rate, sensor weight, actuator weight, sensor index, twelve-bit actuator mask, activity flag plus developmental-module ID, and monotonic innovation ID. An edge stores its weight, strain-dependent plastic term, source, target, activity flag plus module ID, and monotonic innovation ID. Inactive slots have zero effect but can be activated by structural mutation.
 
-The sixteen cell-local inputs are:
+The twenty cell-local inputs are:
 
 ```text
 q = (ATP, membrane voltage, extracellular strain, contact density,
@@ -420,7 +421,9 @@ q = (ATP, membrane voltage, extracellular strain, contact density,
      resonant response, membrane damage + deformation,
      shape deviation, junction strain, toxin + waste,
      local resource contrast, program conflict, junction conductance,
-     exposed membrane fraction, developmental polarity + fate memory)
+     exposed membrane fraction, developmental polarity + fate memory,
+     body-relative axial position, body-relative lateral position,
+     inherited segmentation-wave phase, current growth/repair plasticity)
 ```
 
 For regulatory activity vector `z`, target node `k` receives generic state feedback plus enabled graph edges:

@@ -1559,6 +1559,7 @@ private struct CellState {
     var environment: SIMD4<Float>
     var development: SIMD4<Float>
     var collectiveBoundary: SIMD4<Float>
+    var surfaceMaterial: SIMD4<Float>
 }
 
 private struct CellIdentity {
@@ -1656,6 +1657,7 @@ private struct CellAggregate {
     var development: SIMD4<Float>
     var developmentCausality: SIMD4<Float>
     var embodiedMemory: SIMD4<Float>
+    var surfaceMaterial: SIMD4<Float>
 }
 
 private struct DevelopmentalGenome {
@@ -1669,6 +1671,8 @@ private struct DevelopmentalGenome {
     var morphogenTransport: SIMD4<Float>
     var junctionMaterial: SIMD4<Float>
     var ecologicalResponse: SIMD4<Float>
+    var morphogenesisA: SIMD4<Float>
+    var morphogenesisB: SIMD4<Float>
 }
 
 private struct RegulatoryNode {
@@ -2282,19 +2286,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         precondition(MemoryLayout<AgentState>.stride == 192, "AgentState Metal ABI drift")
         precondition(MemoryLayout<AgentObservationRecord>.stride == 176, "AgentObservationRecord Metal ABI drift")
         precondition(MemoryLayout<CellObservationRecord>.stride == 160, "CellObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellState>.stride == 304, "CellState Metal ABI drift")
+        precondition(MemoryLayout<CellState>.stride == 320, "CellState Metal ABI drift")
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
         precondition(MemoryLayout<CellMemoryState>.stride == 32, "CellMemoryState Metal ABI drift")
         precondition(MemoryLayout<CellCorpseState>.stride == 56, "CellCorpseState Metal ABI drift")
         precondition(MemoryLayout<HeritableProgram>.stride == 128, "HeritableProgram Metal ABI drift")
         precondition(MemoryLayout<ProgramSlotState>.stride == 32, "ProgramSlotState Metal ABI drift")
         precondition(MemoryLayout<CellJunctionState>.stride == 64, "CellJunctionState Metal ABI drift")
-        precondition(MemoryLayout<CellAggregate>.stride == 352, "CellAggregate Metal ABI drift")
-        precondition(MemoryLayout<DevelopmentalGenome>.stride == 160, "DevelopmentalGenome Metal ABI drift")
+        precondition(MemoryLayout<CellAggregate>.stride == 368, "CellAggregate Metal ABI drift")
+        precondition(MemoryLayout<DevelopmentalGenome>.stride == 192, "DevelopmentalGenome Metal ABI drift")
         precondition(MemoryLayout<RegulatoryNode>.stride == 32, "RegulatoryNode Metal ABI drift")
         precondition(MemoryLayout<RegulatoryEdge>.stride == 32, "RegulatoryEdge Metal ABI drift")
         precondition(MemoryLayout<ResonanceGenome>.stride == 32, "ResonanceGenome Metal ABI drift")
-        precondition(MemoryLayout<ProgramMetricRecord>.stride == 192, "ProgramMetricRecord Metal ABI drift")
+        precondition(MemoryLayout<ProgramMetricRecord>.stride == 224, "ProgramMetricRecord Metal ABI drift")
         precondition(MemoryLayout<MembraneVertex>.stride == 32, "MembraneVertex Metal ABI drift")
         precondition(MemoryLayout<LineageEventRecord>.stride == 80, "LineageEventRecord Metal ABI drift")
         precondition(

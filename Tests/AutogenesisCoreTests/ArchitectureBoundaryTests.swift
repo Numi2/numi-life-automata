@@ -253,14 +253,22 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func developmentalRegulationUsesSixteenLocalSensorsWithoutNamedCellTypes() throws {
+    func developmentalRegulationUsesBodyRelativeSensorsWithoutNamedCellTypes() throws {
         let shader = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
             encoding: .utf8
         )
-        #expect(shader.contains("float regulatorySensors[16]"))
-        #expect(shader.contains("node.sensorIndex < 16u"))
+        #expect(shader.contains("float regulatorySensors[20]"))
+        #expect(shader.contains("node.sensorIndex < 20u"))
+        #expect(shader.contains("float4 morphogenesisA;"))
+        #expect(shader.contains("float4 morphogenesisB;"))
+        #expect(shader.contains("float actuators[12]"))
+        #expect(shader.contains("output.c = float4(actuators[8]"))
+        #expect(shader.contains("float axialPosition ="))
+        #expect(shader.contains("float lateralPosition ="))
+        #expect(shader.contains("float segmentationWave ="))
+        #expect(shader.contains("float developmentalPlasticity ="))
         #expect(shader.contains("genome.topology = uint4(12u, 20u"))
         for forbidden in ["sensorCell", "muscleCell", "armorCell", "germCell"] {
             #expect(!shader.contains(forbidden))
