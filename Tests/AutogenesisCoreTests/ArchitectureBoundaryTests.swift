@@ -464,7 +464,7 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("compressiveContactGate"))
         #expect(shader.contains("-0.00001, 0.00036, separatingSpeed"))
         #expect(shader.contains("uint fusionJunction = findOrCreateCellJunction"))
-        #expect(shader.contains("junctionStates[fusionJunction].flags = 3u"))
+        #expect(shader.contains("registeredJunctionFlag | 3u"))
         #expect(shader.contains("identityCounters[13]"))
         #expect(shader.contains("identityCounters[14]"))
         #expect(shader.contains("identityCounters[15]"))
@@ -567,7 +567,7 @@ struct ArchitectureBoundaryTests {
         #expect(vertex.contains("if (owner >= maxAgentCount) { return output; }"))
         #expect(vertex.contains("all(isfinite(membraneStart))"))
         #expect(vertex.contains("all(isfinite(membraneEnd))"))
-        #expect(vertex.contains("membraneEdgeLength <= 0.08"))
+        #expect(vertex.contains("membraneEdgeLength <= 0.08 * float(safeRasterStep)"))
         #expect(vertex.contains("signedTriangleArea > 0.0000001"))
         #expect(vertex.contains("startRadius <= 0.30"))
         #expect(vertex.contains("endRadius <= 0.30"))
@@ -645,6 +645,9 @@ struct ArchitectureBoundaryTests {
         #expect(renderer.contains("compactJunctionRenderPipeline"))
         #expect(renderer.contains("junctionRenderPipeline"))
         #expect(renderer.contains("indirectBuffer: junctionDrawArguments"))
+        #expect(shader.contains("registeredJunctionIndices[registeredIndex] = slot"))
+        #expect(shader.contains("uint junctionIndex = registeredJunctionIndices[compactIndex]"))
+        #expect(renderer.contains("indirectBuffer: junctionCompactionDispatchArguments"))
     }
 
     @Test
@@ -752,7 +755,8 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("kernel void resetRenderDrawArguments"))
         #expect(shader.contains("kernel void finalizeRenderDrawArguments"))
         #expect(shader.contains("observationZoom >= 160.0"))
-        #expect(shader.contains("? membraneVertexCount * 6u : membraneRenderSegmentCount * 3u"))
+        #expect(shader.contains("(membraneRenderSegmentCount / 2u) * 3u"))
+        #expect(shader.contains("uint rasterStep = observationZoom < 64.0 ? 2u : 1u"))
         #expect(shader.contains("if (observationZoom < 64.0)"))
         #expect(shader.contains("atomic_store_explicit(&junctionDrawArguments[0], 6u"))
         #expect(shader.contains("if (instanceID >= maxCellCount || vertexID >="))

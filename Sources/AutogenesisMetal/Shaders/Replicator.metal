@@ -55,6 +55,8 @@ constant uint membraneContactPairCapacity = 524288u;
 constant uint componentTopologyReconciliationStride = 256u;
 constant uint cellJunctionCapacity = 32768u;
 constant uint cellJunctionMask = cellJunctionCapacity - 1u;
+constant uint registeredJunctionCountIndex = 4u;
+constant uint registeredJunctionFlag = 0x80000000u;
 constant uint cellContactEffectChannelCount = 10u;
 constant uint cellOccupancyFree = 0u;
 constant uint cellOccupancyAlive = 1u;
@@ -4794,6 +4796,8 @@ inline uint cellPairFingerprint(
 );
 inline uint findOrCreateCellJunction(
     device CellJunctionState* junctionStates,
+    device uint* registeredJunctionIndices,
+    device atomic_uint* contactWorkState,
     uint pairKey,
     uint fingerprint,
     uint step,
@@ -4809,13 +4813,14 @@ kernel void unionCellComponents(
     device const MembraneVertex* membraneVertices [[buffer(4)]],
     device const CellIdentity* cellIdentities [[buffer(5)]],
     device const uint2* contactPairs [[buffer(6)]],
-    device const atomic_uint* contactWorkState [[buffer(7)]],
+    device atomic_uint* contactWorkState [[buffer(7)]],
     device atomic_uint* componentParents [[buffer(8)]],
     constant SimulationUniforms& uniforms [[buffer(9)]],
     device const HeritableProgram* heritablePrograms [[buffer(10)]],
     device atomic_uint* identityCounters [[buffer(11)]],
     device CellJunctionState* junctionStates [[buffer(12)]],
     device const DevelopmentalGenome* developmentalGenomes [[buffer(13)]],
+    device uint* registeredJunctionIndices [[buffer(14)]],
     uint pairIndex [[thread_position_in_grid]]
 ) {
     if (atomic_load_explicit(&contactWorkState[2], memory_order_relaxed) == 0u ||
@@ -5036,6 +5041,8 @@ kernel void unionCellComponents(
                         if (!sameOwner) {
                             uint fusionJunction = findOrCreateCellJunction(
                                 junctionStates,
+                                registeredJunctionIndices,
+                                contactWorkState,
                                 cellPairKey(gid, otherIndex),
                                 cellPairFingerprint(cellIdentities, gid, otherIndex),
                                 uniforms.step,
@@ -5046,7 +5053,8 @@ kernel void unionCellComponents(
                                 )
                             );
                             if (fusionJunction < cellJunctionCapacity) {
-                                junctionStates[fusionJunction].flags = 3u;
+                                junctionStates[fusionJunction].flags =
+                                    registeredJunctionFlag | 3u;
                                 junctionStates[fusionJunction].remodeling.z = integrity;
                             }
                         }
@@ -7668,6 +7676,8 @@ inline uint cellPairFingerprint(
 
 inline uint findOrCreateCellJunction(
     device CellJunctionState* junctionStates,
+    device uint* registeredJunctionIndices,
+    device atomic_uint* contactWorkState,
     uint pairKey,
     uint fingerprint,
     uint step,
@@ -7714,8 +7724,24 @@ inline uint findOrCreateCellJunction(
                 &junctionStates[slot].pairKey, &expected, reservedCellJunctionEntry,
                 memory_order_relaxed, memory_order_relaxed
             )) {
+                uint retainedFlags = junctionStates[slot].flags & registeredJunctionFlag;
+                if (retainedFlags == 0u) {
+                    uint registeredIndex = atomic_fetch_add_explicit(
+                        &contactWorkState[registeredJunctionCountIndex], 1u,
+                        memory_order_relaxed
+                    );
+                    if (registeredIndex < cellJunctionCapacity) {
+                        registeredJunctionIndices[registeredIndex] = slot;
+                        retainedFlags = registeredJunctionFlag;
+                    } else {
+                        atomic_store_explicit(
+                            &contactWorkState[registeredJunctionCountIndex],
+                            cellJunctionCapacity, memory_order_relaxed
+                        );
+                    }
+                }
                 junctionStates[slot].persistentFingerprint = fingerprint;
-                junctionStates[slot].flags = 1u;
+                junctionStates[slot].flags = retainedFlags | 1u;
                 junctionStates[slot].restDistance = restDistance;
                 junctionStates[slot].strength = targetStrength;
                 junctionStates[slot].age = 1.0;
@@ -7837,6 +7863,7 @@ kernel void resolveMembraneContacts(
     device const DevelopmentalGenome* developmentalGenomes [[buffer(17)]],
     device const CellMemoryState* cellMemories [[buffer(18)]],
     device CellCorpseState* cellCorpses [[buffer(19)]],
+    device uint* registeredJunctionIndices [[buffer(20)]],
     uint pairIndex [[thread_position_in_grid]]
 ) {
     if (pairIndex >= atomic_load_explicit(&contactWorkState[0], memory_order_relaxed)) { return; }
@@ -8393,7 +8420,8 @@ kernel void resolveMembraneContacts(
                                 if (junction == cellJunctionCapacity && localGap < 0.038 &&
                                     pairAdhesion > 0.16) {
                                     junction = findOrCreateCellJunction(
-                                        junctionStates, pairKey, fingerprint, uniforms.step,
+                                        junctionStates, registeredJunctionIndices,
+                                        contactWorkState, pairKey, fingerprint, uniforms.step,
                                         distance / max(scale, 0.0000001), pairAdhesion
                                     );
                                 } else if (junction < cellJunctionCapacity) {
@@ -9204,6 +9232,7 @@ kernel void divideAndReduceOrganismCells(
     device CellJunctionState* cellJunctions [[buffer(23)]],
     device atomic_uint* contactWorkState [[buffer(24)]],
     device CellMemoryState* cellMemories [[buffer(25)]],
+    device uint* registeredJunctionIndices [[buffer(26)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
     if (compactIndex >= atomic_load_explicit(activeComponentCount, memory_order_relaxed)) { return; }
@@ -9711,7 +9740,8 @@ kernel void divideAndReduceOrganismCells(
                 );
             }
             uint midbodyJunction = findOrCreateCellJunction(
-                cellJunctions, cytokineticPairKey, cytokineticFingerprint,
+                cellJunctions, registeredJunctionIndices, contactWorkState,
+                cytokineticPairKey, cytokineticFingerprint,
                 uniforms.step, length(child.position - parent.position), midbodyStrength
             );
             if (midbodyJunction < cellJunctionCapacity) {
@@ -9721,7 +9751,8 @@ kernel void divideAndReduceOrganismCells(
                     float4(0.0001)
                 ));
                 float midbodyRestDistance = length(child.position - parent.position);
-                cellJunctions[midbodyJunction].flags = sexualBudConceived ? 7u : 3u;
+                cellJunctions[midbodyJunction].flags = registeredJunctionFlag |
+                    (sexualBudConceived ? 7u : 3u);
                 cellJunctions[midbodyJunction].age = mix(
                     5.0, 14.0, daughterRepair * daughterIntegrity
                 );
@@ -10268,6 +10299,8 @@ kernel void resetRenderDrawArguments(
     device atomic_uint* cellDrawArguments [[buffer(0)]],
     device atomic_uint* meshDispatchArguments [[buffer(1)]],
     device atomic_uint* junctionDrawArguments [[buffer(2)]],
+    device const atomic_uint* contactWorkState [[buffer(3)]],
+    device uint* junctionCompactionDispatchArguments [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid != 0u) { return; }
@@ -10278,6 +10311,15 @@ kernel void resetRenderDrawArguments(
     for (uint index = 0u; index < 3u; ++index) {
         atomic_store_explicit(&meshDispatchArguments[index], 0u, memory_order_relaxed);
     }
+    uint registeredCount = min(
+        atomic_load_explicit(
+            &contactWorkState[registeredJunctionCountIndex], memory_order_relaxed
+        ),
+        cellJunctionCapacity
+    );
+    junctionCompactionDispatchArguments[0] = (registeredCount + 63u) / 64u;
+    junctionCompactionDispatchArguments[1] = 1u;
+    junctionCompactionDispatchArguments[2] = 1u;
 }
 
 kernel void compactVisibleCells(
@@ -10337,8 +10379,18 @@ kernel void compactVisibleJunctions(
     constant SimulationUniforms& uniforms [[buffer(6)]],
     device uint* visibleJunctionIndices [[buffer(7)]],
     device atomic_uint* drawArguments [[buffer(8)]],
-    uint junctionIndex [[thread_position_in_grid]]
+    device const uint* registeredJunctionIndices [[buffer(9)]],
+    device const atomic_uint* contactWorkState [[buffer(10)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    uint registeredCount = min(
+        atomic_load_explicit(
+            &contactWorkState[registeredJunctionCountIndex], memory_order_relaxed
+        ),
+        cellJunctionCapacity
+    );
+    if (compactIndex >= registeredCount) { return; }
+    uint junctionIndex = registeredJunctionIndices[compactIndex];
     if (junctionIndex >= cellJunctionCapacity) { return; }
     uint pairKey = atomic_load_explicit(
         &junctionStates[junctionIndex].pairKey, memory_order_relaxed
@@ -10414,7 +10466,10 @@ kernel void finalizeRenderDrawArguments(
     );
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
     uint cellVertexCount = observationZoom >= 160.0
-        ? membraneVertexCount * 6u : membraneRenderSegmentCount * 3u;
+        ? membraneVertexCount * 6u
+        : (observationZoom < 64.0
+            ? (membraneRenderSegmentCount / 2u) * 3u
+            : membraneRenderSegmentCount * 3u);
     atomic_store_explicit(&cellDrawArguments[0], cellVertexCount, memory_order_relaxed);
     atomic_store_explicit(&cellDrawArguments[1], cellCount, memory_order_relaxed);
     atomic_store_explicit(&cellDrawArguments[2], 0u, memory_order_relaxed);
@@ -10982,12 +11037,15 @@ inline CellRasterData makeCellRasterData(
     device const HeritableProgram* heritablePrograms,
     device const float4* programInteractions,
     device const ProgramSlotState* programSlots,
+    uint rasterStep,
     uint vertexID,
     uint instanceID
 ) {
     CellRasterData output = {};
     output.position = float4(3.0, 3.0, 0.0, 1.0);
-    if (instanceID >= maxCellCount || vertexID >= membraneRenderSegmentCount * 3u) {
+    uint safeRasterStep = clamp(rasterStep, 1u, membraneRenderSubdivision);
+    uint rasterSegmentCount = membraneRenderSegmentCount / safeRasterStep;
+    if (instanceID >= maxCellCount || vertexID >= rasterSegmentCount * 3u) {
         return output;
     }
     uint cellIndex = visibleCellIndices[instanceID];
@@ -11009,9 +11067,16 @@ inline CellRasterData makeCellRasterData(
     float2 cellCenter = cellWorldPosition(agent, cell.position, uniforms);
     uint triangle = vertexID / 3u;
     uint triangleVertex = vertexID % 3u;
-    float2 membraneStart = smoothMembranePosition(membraneVertices, cellIndex, triangle);
-    float2 membraneEnd = smoothMembranePosition(membraneVertices, cellIndex, triangle + 1u);
-    uint membraneSample = triangleVertex == 2u ? triangle + 1u : triangle;
+    uint membraneStartSample = triangle * safeRasterStep;
+    uint membraneEndSample = membraneStartSample + safeRasterStep;
+    float2 membraneStart = smoothMembranePosition(
+        membraneVertices, cellIndex, membraneStartSample
+    );
+    float2 membraneEnd = smoothMembranePosition(
+        membraneVertices, cellIndex, membraneEndSample
+    );
+    uint membraneSample = triangleVertex == 2u
+        ? membraneEndSample : membraneStartSample;
     float2 membranePosition = triangleVertex == 0u
         ? float2(0.0)
         : (triangleVertex == 1u ? membraneStart : membraneEnd);
@@ -11025,7 +11090,8 @@ inline CellRasterData makeCellRasterData(
         all(cellCenter >= float2(-0.05)) && all(cellCenter <= float2(1.05)) &&
         startRadius >= 0.025 && endRadius >= 0.025 &&
         startRadius <= 0.30 && endRadius <= 0.30 &&
-        membraneEdgeLength <= 0.08 && signedTriangleArea > 0.0000001;
+        membraneEdgeLength <= 0.08 * float(safeRasterStep) &&
+        signedTriangleArea > 0.0000001;
     float2 worldPosition = cellCenter +
         heading * membranePosition.x * worldUnit +
         lateral * membranePosition.y * worldUnit;
@@ -11144,10 +11210,12 @@ vertex CellRasterData cellVertex(
     uint vertexID [[vertex_id]],
     uint instanceID [[instance_id]]
 ) {
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    uint rasterStep = observationZoom < 64.0 ? 2u : 1u;
     return makeCellRasterData(
         agents, agentOccupancy, cells, cellOccupancy, membraneVertices, uniforms,
         visibleCellIndices, cellIdentities, heritablePrograms, programInteractions,
-        programSlots, vertexID, instanceID
+        programSlots, rasterStep, vertexID, instanceID
     );
 }
 
@@ -11184,7 +11252,7 @@ void cellContourMesh(
         output.set_vertex(lane, makeCellRasterData(
             agents, agentOccupancy, cells, cellOccupancy, membraneVertices, uniforms,
             visibleCellIndices, cellIdentities, heritablePrograms, programInteractions,
-            programSlots, syntheticVertex, meshIndex
+            programSlots, 1u, syntheticVertex, meshIndex
         ));
     }
     if (lane < segmentCount) {
@@ -11207,6 +11275,115 @@ fragment float4 cellFragment(
     float aa = max(fwidth(radius) * 1.15, 0.004);
     float body = 1.0 - smoothstep(1.0 - aa * 1.8, 1.0, radius);
     if (body <= 0.001) { discard_fragment(); }
+
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    if (observationZoom >= 18.0) {
+        // Dense tissue is dominated by fragment occupancy. Preserve the causal
+        // observables that distinguish cells and bodies, but omit sub-pixel
+        // organelles, traveling rings, and construction ornament at this scale.
+        float integrity = saturate(input.localMembrane.x);
+        float localPressure = saturate(input.localMembrane.y);
+        float localStrain = saturate(input.localMembrane.z);
+        float paidRepair = saturate(input.localMembrane.w);
+        float membraneThickness = clamp(
+            0.105 + integrity * 0.095 + paidRepair * 0.025 - localStrain * 0.020,
+            0.070, 0.205
+        );
+        float membrane = body * smoothstep(1.0 - membraneThickness, 0.985, radius);
+        float cytoplasm = body * (1.0 - membrane * 0.76);
+        float exposure = saturate(input.edgeExposure);
+        float failure = saturate((1.0 - integrity) * 1.35 + localStrain * 0.30);
+        float continuity = 1.0 - failure * exposure *
+            smoothstep(0.82, 1.0, radius) * 0.84;
+        membrane *= continuity;
+
+        float atp = saturate(input.physiology.x);
+        float stress = saturate(input.signals.z);
+        float apoptosis = saturate(input.signals.w);
+        float calcium = saturate(input.signaling.x);
+        float erk = saturate(input.signaling.y);
+        float voltage = saturate(input.dynamics.x * 0.30 + 0.5);
+        float3 lineage = hsvToRGB(float3(input.lineageHue, 0.76, 0.66));
+        float roleTotal = max(
+            input.phenotype.x + input.phenotype.y +
+                input.phenotype.z + input.phenotype.w,
+            0.001
+        );
+        float3 roleColor = (
+            float3(0.02, 0.92, 0.66) * input.phenotype.x +
+            float3(0.98, 0.18, 0.08) * input.phenotype.y +
+            float3(0.08, 0.50, 1.0) * input.phenotype.z +
+            float3(0.98, 0.12, 0.68) * input.phenotype.w
+        ) / roleTotal;
+        float3 voltageColor = mix(
+            float3(0.02, 0.34, 1.0), float3(1.0, 0.08, 0.02), voltage
+        );
+
+        float2 surfaceDirection = length(p) > 0.001
+            ? normalize(p) : float2(1.0, 0.0);
+        float tractionMagnitude = saturate(length(input.tissueForce.xy) * 11000.0);
+        float2 tractionDirection = tractionMagnitude > 0.001
+            ? normalize(input.tissueForce.xy) : float2(1.0, 0.0);
+        float tractionTrack = membrane * tractionMagnitude *
+            (0.28 + 0.72 * saturate(dot(surfaceDirection, tractionDirection)));
+        float signalGradient = saturate(0.52 + dot(p, tractionDirection) * 0.42);
+        float calciumBody = cytoplasm * calcium * signalGradient;
+        float erkBody = cytoplasm * erk * (1.0 - signalGradient * 0.54);
+        float integumentBand = membrane * exposure *
+            saturate(input.collectiveBoundary.x) * continuity;
+        float woundArc = membrane * smoothstep(0.08, 0.78, failure);
+        float repairFront = membrane * paidRepair * failure;
+
+        float3 color = mix(lineage, roleColor, 0.42) * cytoplasm *
+            (0.30 + atp * 0.48);
+        color += mix(lineage, voltageColor, 0.56) * membrane *
+            (0.34 + integrity * 0.42);
+        color += float3(0.84, 1.0, 0.94) * integumentBand *
+            (0.58 + saturate(input.collectiveBoundary.y) * 0.62);
+        color += float3(0.02, 0.88, 1.0) * calciumBody * 0.72;
+        color += float3(0.98, 0.08, 0.66) * erkBody * 0.54;
+        color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.86;
+        color += float3(0.08, 1.0, 0.62) * repairFront * 0.92;
+        color += float3(1.0, 0.055, 0.018) * woundArc * 0.82;
+        color += float3(1.0, 0.30, 0.015) * membrane * localPressure * 0.62;
+
+        float contactDamage = saturate(input.tissueForce.z * 1800.0);
+        float trophicGain = saturate(max(input.tissueForce.w, 0.0) * 1800.0);
+        float trophicLoss = saturate(max(-input.tissueForce.w, 0.0) * 1800.0);
+        color += float3(1.0, 0.055, 0.012) * membrane * contactDamage *
+            (0.62 + trophicLoss);
+        color += float3(1.0, 0.74, 0.02) * cytoplasm * trophicGain * 0.64;
+
+        if (uniforms.displayMode == 4u) {
+            float morphogenA = saturate(input.signals.x);
+            float morphogenB = saturate(input.signals.y);
+            color = float3(0.006, 0.012, 0.020) * body +
+                float3(0.00, 0.92, 1.0) * cytoplasm * morphogenA * 0.86 +
+                float3(1.0, 0.06, 0.58) * cytoplasm * morphogenB * 0.86 +
+                float3(0.90, 0.98, 1.0) * tractionTrack * 0.34 +
+                float3(0.08, 1.0, 0.56) * membrane * integrity * 0.52;
+        } else if (uniforms.displayMode == 5u) {
+            float mechanicsCalciumCause = saturate(input.signalCausality.x * 48.0);
+            float calciumERKCause = saturate(input.signalCausality.y * 56.0);
+            float erkTractionCause = saturate(input.signalCausality.z * 12000.0);
+            float signalingCost = saturate(input.signalCausality.w * 18000.0);
+            color = float3(0.010, 0.018, 0.028) * body +
+                float3(0.02, 0.88, 1.0) * calciumBody * mechanicsCalciumCause * 1.40 +
+                float3(0.98, 0.08, 0.66) * erkBody * calciumERKCause * 1.26 +
+                float3(0.08, 1.0, 0.56) * tractionTrack * erkTractionCause * 1.34 +
+                float3(1.0, 0.42, 0.02) * cytoplasm * signalingCost * 0.30 +
+                float3(0.12, 0.48, 1.0) * membrane * paidRepair * 0.68;
+        }
+
+        color = mix(color, float3(0.94, 0.055, 0.018) * body, stress * 0.28);
+        color *= 1.0 - apoptosis * 0.58;
+        color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
+        color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
+        float alpha = body * input.visibility * 0.95 * (1.0 - apoptosis * 0.35);
+        color *= input.visibility;
+        if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
+        return float4(clamp(color, 0.0, 16.0), saturate(alpha));
+    }
 
     float phaseAngle = input.dynamics.z * 2.0 * M_PI_F;
     float2 polarityVector = input.development.xy;

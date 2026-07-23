@@ -1450,6 +1450,7 @@ private final class RenderSubmissionResources {
     let cellMeshDrawArguments: MTLBuffer
     let visibleJunctionIndices: MTLBuffer
     let junctionDrawArguments: MTLBuffer
+    let junctionCompactionDispatchArguments: MTLBuffer
     var renderTargets: RenderTargetSet?
 
     init(
@@ -1457,19 +1458,22 @@ private final class RenderSubmissionResources {
         cellDrawArguments: MTLBuffer,
         cellMeshDrawArguments: MTLBuffer,
         visibleJunctionIndices: MTLBuffer,
-        junctionDrawArguments: MTLBuffer
+        junctionDrawArguments: MTLBuffer,
+        junctionCompactionDispatchArguments: MTLBuffer
     ) {
         self.visibleCellIndices = visibleCellIndices
         self.cellDrawArguments = cellDrawArguments
         self.cellMeshDrawArguments = cellMeshDrawArguments
         self.visibleJunctionIndices = visibleJunctionIndices
         self.junctionDrawArguments = junctionDrawArguments
+        self.junctionCompactionDispatchArguments = junctionCompactionDispatchArguments
     }
 
     var buffers: [MTLBuffer] {
         [
             visibleCellIndices, cellDrawArguments, cellMeshDrawArguments,
-            visibleJunctionIndices, junctionDrawArguments
+            visibleJunctionIndices, junctionDrawArguments,
+            junctionCompactionDispatchArguments
         ]
     }
 }
@@ -2001,7 +2005,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let membraneRenderSubdivision = 3
     private static let cellSpatialHashBucketCount = 16_384
     private static let membraneContactPairCapacity = 524_288
-    private static let contactWorkStateCount = 4
+    private static let contactWorkStateCount = 5
     private static let cellJunctionCapacity = 32_768
     private static let worldExchangeChannelCount = 14
     private static let energyAuditChannelCount = 10
@@ -2183,6 +2187,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let cellContactEffects: MTLBuffer
     private let membraneContactEffects: MTLBuffer
     private let cellJunctions: MTLBuffer
+    private let registeredJunctionIndices: MTLBuffer
     private let cellEnergyExchange: MTLBuffer
     private let energyAudit: MTLBuffer
     private let invariantState: MTLBuffer
@@ -2563,6 +2568,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let membraneContactEffectLength = Self.maxCellCount * Self.membraneVertexCount * 3 *
             MemoryLayout<Int32>.stride
         let cellJunctionLength = Self.cellJunctionCapacity * MemoryLayout<CellJunctionState>.stride
+        let registeredJunctionIndexLength = Self.cellJunctionCapacity * MemoryLayout<UInt32>.stride
         let cellEnergyExchangeLength = Self.gridSize * Self.gridSize * Self.worldCount *
             Self.worldExchangeChannelCount * MemoryLayout<UInt32>.stride
         let energyAuditLength = Self.energyAuditChannelCount * MemoryLayout<Int32>.stride
@@ -2671,6 +2677,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               let cellJunctions = device.makeBuffer(
                 length: cellJunctionLength, options: .storageModePrivate
               ),
+              let registeredJunctionIndices = device.makeBuffer(
+                length: registeredJunctionIndexLength, options: .storageModePrivate
+              ),
               let cellEnergyExchange = device.makeBuffer(
                 length: cellEnergyExchangeLength, options: .storageModePrivate
               ),
@@ -2740,6 +2749,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 ), let junctionDrawArguments = device.makeBuffer(
                     length: drawArgumentLength,
                     options: .storageModePrivate
+                ), let junctionCompactionDispatchArguments = device.makeBuffer(
+                    length: activeCellDispatchLength,
+                    options: .storageModePrivate
                 ) else {
                     throw EvolutionRendererError.resourceAllocation(
                         "render submission resources \(slotIndex)"
@@ -2750,12 +2762,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 cellMeshDrawArguments.label = "Cell mesh arguments slot \(slotIndex)"
                 visibleJunctionIndices.label = "Visible junction indices slot \(slotIndex)"
                 junctionDrawArguments.label = "Junction draw arguments slot \(slotIndex)"
+                junctionCompactionDispatchArguments.label =
+                    "Junction compaction dispatch arguments slot \(slotIndex)"
                 return RenderSubmissionResources(
                     visibleCellIndices: visibleCellIndices,
                     cellDrawArguments: cellDrawArguments,
                     cellMeshDrawArguments: cellMeshDrawArguments,
                     visibleJunctionIndices: visibleJunctionIndices,
-                    junctionDrawArguments: junctionDrawArguments
+                    junctionDrawArguments: junctionDrawArguments,
+                    junctionCompactionDispatchArguments: junctionCompactionDispatchArguments
                 )
             }
         cellState.label = "Persistent organism cells"
@@ -2790,12 +2805,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         cellSpatialHashHeads.label = "Membrane-contact spatial hash heads"
         cellSpatialHashNext.label = "Membrane-contact spatial hash links"
         membraneContactPairs.label = "Compacted membrane-contact candidate pairs"
-        contactWorkState.label = "Contact count, overflow, and topology state"
+        contactWorkState.label = "Contact, topology, and registered-junction state"
         cellTopologySignatures.label = "Current and previous cell connectivity signatures"
         contactPairDispatchArguments.label = "Indirect membrane-contact dispatch arguments"
         cellContactEffects.label = "Accumulated cell contact effects"
         membraneContactEffects.label = "Equal-and-opposite membrane vertex forces"
         cellJunctions.label = "Persistent membrane junction hash"
+        registeredJunctionIndices.label = "Append-once persistent junction render registry"
         cellEnergyExchange.label = "Fixed-point substrate, catalyst, detox, ligand, and matrix exchange"
         energyAudit.label = "Global cellular energy conservation audit"
         invariantState.label = "Persistent fail-fast invariant audit"
@@ -2849,6 +2865,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.cellContactEffects = cellContactEffects
         self.membraneContactEffects = membraneContactEffects
         self.cellJunctions = cellJunctions
+        self.registeredJunctionIndices = registeredJunctionIndices
         self.cellEnergyExchange = cellEnergyExchange
         self.energyAudit = energyAudit
         self.invariantState = invariantState
@@ -3370,7 +3387,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             developmentalGenomes, regulatoryNodes, regulatoryEdges, regulatoryStates,
             resonanceGenomes, membraneVertices, cellSpatialHashHeads, cellSpatialHashNext,
             contactWorkState, cellTopologySignatures, cellContactEffects, membraneContactEffects,
-            cellJunctions, cellEnergyExchange,
+            cellJunctions, registeredJunctionIndices, cellEnergyExchange,
             energyAudit, invariantState, invariantScratch, identityCounters, lineageEvents,
             mechanicalForcing, qualificationTargetState, qualificationTargetMeasurement
         ]
@@ -4196,6 +4213,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(developmentalGenomes, offset: 0, index: 17)
         encoder.setBuffer(cellMemories, offset: 0, index: 18)
         encoder.setBuffer(cellCorpses, offset: 0, index: 19)
+        encoder.setBuffer(registeredJunctionIndices, offset: 0, index: 20)
         encoder.dispatchThreadgroups(
             indirectBuffer: contactPairDispatchArguments,
             indirectBufferOffset: 0,
@@ -4204,7 +4222,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.memoryBarrier(resources: [
             cellContactEffects, membraneContactEffects, cellJunctions, energyAudit,
             identityCounters, contactWorkState, cellTopologySignatures, cellIdentities,
-            cellCorpses, cellOccupancy
+            cellCorpses, cellOccupancy, registeredJunctionIndices
         ])
 
         encoder.setComputePipelineState(detectCellTopologyChangesPipeline)
@@ -4284,13 +4302,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellJunctions, offset: 0, index: 23)
         encoder.setBuffer(contactWorkState, offset: 0, index: 24)
         encoder.setBuffer(cellMemories, offset: 0, index: 25)
+        encoder.setBuffer(registeredJunctionIndices, offset: 0, index: 26)
         dispatchActiveComponents(encoder, pipeline: divideAndReduceCellPipeline)
         encoder.memoryBarrier(resources: [
             agentState, cellState, cellOccupancy, cellIdentities, cellAggregates,
             ownerCellHeads, ownerCellNext, regulatoryStates, membraneVertices,
             identityCounters, programInteractions, programSlots, developmentalGenomes,
             regulatoryNodes, regulatoryEdges, resonanceGenomes, heritablePrograms,
-            lineageEvents, cellJunctions, contactWorkState, cellMemories
+            lineageEvents, cellJunctions, contactWorkState, cellMemories,
+            registeredJunctionIndices
         ])
         encoder.writeTimestamp(ending: "division + reduction")
 
@@ -4469,13 +4489,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(identityCounters, offset: 0, index: 11)
         encoder.setBuffer(cellJunctions, offset: 0, index: 12)
         encoder.setBuffer(developmentalGenomes, offset: 0, index: 13)
+        encoder.setBuffer(registeredJunctionIndices, offset: 0, index: 14)
         encoder.dispatchThreadgroups(
             indirectBuffer: contactPairDispatchArguments,
             indirectBufferOffset: 0,
             threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
         )
         encoder.memoryBarrier(resources: [
-            cellComponentParents, identityCounters, cellJunctions
+            cellComponentParents, identityCounters, cellJunctions,
+            contactWorkState, registeredJunctionIndices
         ])
 
         encoder.setComputePipelineState(compressCellComponentsPipeline)
@@ -4863,6 +4885,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let cellMeshDrawArguments = renderResources.cellMeshDrawArguments
         let visibleJunctionIndices = renderResources.visibleJunctionIndices
         let junctionDrawArguments = renderResources.junctionDrawArguments
+        let junctionCompactionDispatchArguments =
+            renderResources.junctionCompactionDispatchArguments
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             return false
         }
@@ -4871,12 +4895,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellDrawArguments, offset: 0, index: 0)
         encoder.setBuffer(cellMeshDrawArguments, offset: 0, index: 1)
         encoder.setBuffer(junctionDrawArguments, offset: 0, index: 2)
+        encoder.setBuffer(contactWorkState, offset: 0, index: 3)
+        encoder.setBuffer(junctionCompactionDispatchArguments, offset: 0, index: 4)
         encoder.dispatchThreads(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
         )
         encoder.memoryBarrier(resources: [
-            cellDrawArguments, cellMeshDrawArguments, junctionDrawArguments
+            cellDrawArguments, cellMeshDrawArguments, junctionDrawArguments,
+            junctionCompactionDispatchArguments
         ])
         if !settings.isRunning {
             encodeActiveCellCompaction(encoder)
@@ -4905,13 +4932,12 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 6)
             encoder.setBuffer(visibleJunctionIndices, offset: 0, index: 7)
             encoder.setBuffer(junctionDrawArguments, offset: 0, index: 8)
-            let junctionThreadWidth = threadsPerThreadgroup1D(
-                pipeline: compactJunctionRenderPipeline,
-                count: Self.cellJunctionCapacity
-            )
-            encoder.dispatchThreads(
-                MTLSize(width: Self.cellJunctionCapacity, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: junctionThreadWidth, height: 1, depth: 1)
+            encoder.setBuffer(registeredJunctionIndices, offset: 0, index: 9)
+            encoder.setBuffer(contactWorkState, offset: 0, index: 10)
+            encoder.dispatchThreadgroups(
+                indirectBuffer: junctionCompactionDispatchArguments,
+                indirectBufferOffset: 0,
+                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
             )
         }
         encoder.memoryBarrier(resources: [
