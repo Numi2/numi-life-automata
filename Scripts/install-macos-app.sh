@@ -38,6 +38,10 @@ done
 app_name="Numi Automata.app"
 executable_name="NumiAutomata"
 resource_bundle_name="NumiAutomata_NumiAutomata.bundle"
+bundle_identifier="${NUMI_BUNDLE_IDENTIFIER:-com.numi.automata}"
+marketing_version="${NUMI_MARKETING_VERSION:-1.0}"
+build_number="${NUMI_BUILD_NUMBER:-2}"
+deployment_target="${NUMI_DEPLOYMENT_TARGET:-26.0}"
 installed_app="$destination/$app_name"
 temporary_root="$(mktemp -d -t numi-automata-install)"
 staged_app="$temporary_root/$app_name"
@@ -72,9 +76,27 @@ fi
 
 mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources" "$iconset"
 cp "$root/Packaging/Info.plist" "$staged_app/Contents/Info.plist"
+cp "$root/Packaging/PrivacyInfo.xcprivacy" \
+    "$staged_app/Contents/Resources/PrivacyInfo.xcprivacy"
 cp "$binary_directory/$executable_name" "$staged_app/Contents/MacOS/$executable_name"
 ditto "$binary_directory/$resource_bundle_name" \
     "$staged_app/Contents/Resources/$resource_bundle_name"
+
+# SwiftPM does not expand the Xcode build-setting placeholders in the shared
+# release plist. Resolve them before LaunchServices registers the local app.
+plutil -replace CFBundleExecutable -string "$executable_name" \
+    "$staged_app/Contents/Info.plist"
+plutil -replace CFBundleIdentifier -string "$bundle_identifier" \
+    "$staged_app/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$marketing_version" \
+    "$staged_app/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "$build_number" \
+    "$staged_app/Contents/Info.plist"
+plutil -replace LSMinimumSystemVersion -string "$deployment_target" \
+    "$staged_app/Contents/Info.plist"
+plutil -remove CFBundleIconName "$staged_app/Contents/Info.plist" 2>/dev/null || true
+plutil -insert CFBundleIconFile -string "NumiAutomata.icns" \
+    "$staged_app/Contents/Info.plist"
 
 icon_source="$root/Packaging/AppIcon-master.png"
 icon_width="$(sips -g pixelWidth "$icon_source" | awk '/pixelWidth/ { print $2 }')"
