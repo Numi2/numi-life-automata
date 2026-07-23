@@ -10355,7 +10355,7 @@ kernel void compactVisibleCells(
         ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
     float2 screenUV = 0.5 + (center - uniforms.cameraCenter) *
         max(uniforms.cameraZoom, 0.000000001) / viewScale;
-    float2 screenRadius = float2(0.30 * cellWorldScale(uniforms) * uniforms.cameraZoom) /
+    float2 screenRadius = float2(0.33 * cellWorldScale(uniforms) * uniforms.cameraZoom) /
         viewScale;
     float2 margin = screenRadius + float2(0.004);
     if (any(screenUV < -margin) || any(screenUV > 1.0 + margin)) { return; }
@@ -11082,6 +11082,29 @@ inline CellRasterData makeCellRasterData(
         : (triangleVertex == 1u ? membraneStart : membraneEnd);
     float startRadius = length(membraneStart);
     float endRadius = length(membraneEnd);
+    uint physicalEdge = (membraneSample / membraneRenderSubdivision) % membraneVertexCount;
+    MembraneVertex localVertex = membraneVertices[
+        cellIndex * membraneVertexCount + physicalEdge
+    ];
+    // measureCellMembraneExposure encodes physical union-boundary membership in
+    // the sign while retaining the strain magnitude. Only a maintained exposed
+    // arc can project the supracellular surface beyond the cellular membrane.
+    float edgeExposure = localVertex.mechanics.w > 0.0 ? 1.0 : 0.0;
+    float constructedSurface = edgeExposure *
+        saturate(cell.collectiveBoundary.x) *
+        (0.34 + saturate(cell.collectiveBoundary.y) * 0.66) *
+        mix(0.38, 1.0, saturate(localVertex.mechanics.y));
+    float surfaceExtension = constructedSurface * (
+        0.006 + saturate(cell.collectiveBoundary.x) * 0.014 +
+        saturate(cell.collectiveBoundary.y) * 0.006
+    );
+    float2 renderMembranePosition = membranePosition;
+    if (triangleVertex != 0u && surfaceExtension > 0.000001) {
+        float membraneRadius = triangleVertex == 1u ? startRadius : endRadius;
+        float2 outwardNormal = membraneRadius > 0.000001
+            ? membranePosition / membraneRadius : float2(0.0);
+        renderMembranePosition += outwardNormal * surfaceExtension;
+    }
     float membraneEdgeLength = length(membraneEnd - membraneStart);
     float signedTriangleArea = membraneStart.x * membraneEnd.y -
         membraneStart.y * membraneEnd.x;
@@ -11093,8 +11116,8 @@ inline CellRasterData makeCellRasterData(
         membraneEdgeLength <= 0.08 * float(safeRasterStep) &&
         signedTriangleArea > 0.0000001;
     float2 worldPosition = cellCenter +
-        heading * membranePosition.x * worldUnit +
-        lateral * membranePosition.y * worldUnit;
+        heading * renderMembranePosition.x * worldUnit +
+        lateral * renderMembranePosition.y * worldUnit;
     float safeAspect = max(uniforms.viewportAspect, 0.001);
     float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
     float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
@@ -11166,17 +11189,9 @@ inline CellRasterData makeCellRasterData(
     output.visibility = visibility;
     output.tracked = uniforms.trackedAgentID == owner ? 1.0 : 0.0;
     output.radialCoordinate = triangleVertex == 0u ? 0.0 : 1.0;
-    uint physicalEdge = (membraneSample / membraneRenderSubdivision) % membraneVertexCount;
-    // Exposure is encoded by the sign so the stored strain magnitude remains available.
-    float edgeExposure = membraneVertices[
-        cellIndex * membraneVertexCount + physicalEdge
-    ].mechanics.w > 0.0 ? 1.0 : 0.0;
     output.edgeExposure = triangleVertex == 0u
         ? saturate(cell.tissueGeometry.z)
         : edgeExposure;
-    MembraneVertex localVertex = membraneVertices[
-        cellIndex * membraneVertexCount + physicalEdge
-    ];
     float localIntegrity = triangleVertex == 0u
         ? saturate(cell.physiology.w) : saturate(localVertex.mechanics.y);
     float localPressure = triangleVertex == 0u
@@ -11290,12 +11305,18 @@ fragment float4 cellFragment(
             0.070, 0.205
         );
         float membrane = body * smoothstep(1.0 - membraneThickness, 0.985, radius);
-        float cytoplasm = body * (1.0 - membrane * 0.76);
         float exposure = saturate(input.edgeExposure);
         float failure = saturate((1.0 - integrity) * 1.35 + localStrain * 0.30);
         float continuity = 1.0 - failure * exposure *
             smoothstep(0.82, 1.0, radius) * 0.84;
         membrane *= continuity;
+        float surfaceCohesion = saturate(
+            input.collectiveBoundary.x * input.collectiveBoundary.y
+        );
+        float internalBoundary = (1.0 - exposure) *
+            smoothstep(0.06, 0.42, surfaceCohesion);
+        float visibleMembrane = membrane * mix(1.0, 0.24, internalBoundary);
+        float cytoplasm = body * (1.0 - visibleMembrane * 0.76);
 
         float atp = saturate(input.physiology.x);
         float stress = saturate(input.signals.z);
@@ -11324,7 +11345,7 @@ fragment float4 cellFragment(
         float tractionMagnitude = saturate(length(input.tissueForce.xy) * 11000.0);
         float2 tractionDirection = tractionMagnitude > 0.001
             ? normalize(input.tissueForce.xy) : float2(1.0, 0.0);
-        float tractionTrack = membrane * tractionMagnitude *
+        float tractionTrack = visibleMembrane * tractionMagnitude *
             (0.28 + 0.72 * saturate(dot(surfaceDirection, tractionDirection)));
         float signalGradient = saturate(0.52 + dot(p, tractionDirection) * 0.42);
         float calciumBody = cytoplasm * calcium * signalGradient;
@@ -11336,7 +11357,7 @@ fragment float4 cellFragment(
 
         float3 color = mix(lineage, roleColor, 0.42) * cytoplasm *
             (0.30 + atp * 0.48);
-        color += mix(lineage, voltageColor, 0.56) * membrane *
+        color += mix(lineage, voltageColor, 0.56) * visibleMembrane *
             (0.34 + integrity * 0.42);
         color += float3(0.84, 1.0, 0.94) * integumentBand *
             (0.58 + saturate(input.collectiveBoundary.y) * 0.62);
@@ -11361,7 +11382,7 @@ fragment float4 cellFragment(
                 float3(0.00, 0.92, 1.0) * cytoplasm * morphogenA * 0.86 +
                 float3(1.0, 0.06, 0.58) * cytoplasm * morphogenB * 0.86 +
                 float3(0.90, 0.98, 1.0) * tractionTrack * 0.34 +
-                float3(0.08, 1.0, 0.56) * membrane * integrity * 0.52;
+                float3(0.08, 1.0, 0.56) * visibleMembrane * integrity * 0.52;
         } else if (uniforms.displayMode == 5u) {
             float mechanicsCalciumCause = saturate(input.signalCausality.x * 48.0);
             float calciumERKCause = saturate(input.signalCausality.y * 56.0);
@@ -11372,13 +11393,14 @@ fragment float4 cellFragment(
                 float3(0.98, 0.08, 0.66) * erkBody * calciumERKCause * 1.26 +
                 float3(0.08, 1.0, 0.56) * tractionTrack * erkTractionCause * 1.34 +
                 float3(1.0, 0.42, 0.02) * cytoplasm * signalingCost * 0.30 +
-                float3(0.12, 0.48, 1.0) * membrane * paidRepair * 0.68;
+                float3(0.12, 0.48, 1.0) * visibleMembrane * paidRepair * 0.68;
         }
 
         color = mix(color, float3(0.94, 0.055, 0.018) * body, stress * 0.28);
         color *= 1.0 - apoptosis * 0.58;
-        color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
-        color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
+        color += float3(0.76, 0.12, 1.0) * apoptosis * visibleMembrane * 0.66;
+        color += float3(0.10, 0.92, 1.0) * input.tracked *
+            max(visibleMembrane, integumentBand * 0.72) * 0.24;
         float alpha = body * input.visibility * 0.95 * (1.0 - apoptosis * 0.35);
         color *= input.visibility;
         if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
@@ -11412,6 +11434,18 @@ fragment float4 cellFragment(
     float membraneContinuity = 1.0 - localFailure * exposure *
         smoothstep(0.82, 1.0, radius) * 0.82;
     membrane *= membraneContinuity;
+    float surfaceCohesion = saturate(
+        input.collectiveBoundary.x * input.collectiveBoundary.y
+    );
+    float internalBoundary = (1.0 - exposure) *
+        smoothstep(0.06, 0.42, surfaceCohesion);
+    float visibleMembrane = membrane * mix(1.0, 0.30, internalBoundary);
+    // A maintained collective surface makes the space behind internal contact
+    // membranes read as continuous tissue while preserving each cell's state.
+    cytoplasm = max(
+        cytoplasm,
+        body * internalBoundary * (1.0 - visibleMembrane * 0.42)
+    );
     float exposedArc = membrane * exposure;
     float integumentBand = body * smoothstep(
         1.0 - membraneThickness * (1.42 + integumentCoverage * 0.72),
@@ -11468,7 +11502,8 @@ fragment float4 cellFragment(
     )) * cytoplasm * tractionMagnitude;
 
     float3 color = mix(lineage, roleColor, 0.46) * cytoplasm * (0.24 + atp * 0.48);
-    color += mix(lineage, voltageColor, 0.58) * membrane * (0.30 + integrity * 0.36);
+    color += mix(lineage, voltageColor, 0.58) * visibleMembrane *
+        (0.30 + integrity * 0.36);
     color += mix(lineage, float3(0.84, 1.0, 0.94), 0.30 + integumentTension * 0.28) *
         integumentBand * (0.68 + integumentTension * 0.74);
     color += mix(float3(0.86, 0.06, 0.68), lineage, 0.34) * nucleus * 0.66;
@@ -11534,7 +11569,8 @@ fragment float4 cellFragment(
     color = mix(color, float3(0.94, 0.055, 0.018) * body, stress * 0.30);
     color *= 1.0 - apoptosis * 0.58;
     color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
-    color += float3(0.10, 0.92, 1.0) * input.tracked * membrane * 0.24;
+    color += float3(0.10, 0.92, 1.0) * input.tracked *
+        max(visibleMembrane, integumentBand * 0.72) * 0.24;
     float alpha = body * input.visibility * 0.92 * (1.0 - apoptosis * 0.35);
     color *= input.visibility;
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
@@ -11564,6 +11600,14 @@ fragment float4 molecularCellFragment(CellRasterData input [[stage_in]]) {
     float membraneContinuity = 1.0 - localFailure * exposure *
         smoothstep(0.82, 1.0, radius) * 0.82;
     membrane *= membraneContinuity;
+    float surfaceCohesion = saturate(
+        input.collectiveBoundary.x * input.collectiveBoundary.y
+    );
+    float internalBoundary = (1.0 - exposure) *
+        smoothstep(0.08, 0.48, surfaceCohesion);
+    // Molecular inspection retains a faint internal lipid boundary while the
+    // maintained component surface remains the dominant organism silhouette.
+    float visibleMembrane = membrane * mix(1.0, 0.42, internalBoundary);
     float integumentBand = body * smoothstep(
         1.0 - membraneThickness * (1.42 + integumentCoverage * 0.72),
         0.992, radius
@@ -11645,7 +11689,7 @@ fragment float4 molecularCellFragment(CellRasterData input [[stage_in]]) {
     color += moleculeColor * glyph * moleculeVisibility * cytoplasm *
         (0.78 + abundance * 0.88);
     color += mix(float3(0.04, 0.74, 1.0), float3(0.04, 1.0, 0.58), integrity) *
-        membrane * (0.42 + lipidHead * 0.58);
+        visibleMembrane * (0.42 + lipidHead * 0.58);
     color += mix(lineage, float3(0.88, 1.0, 0.96), 0.42) * integumentBand *
         (0.58 + integumentTension * 0.72);
     color += float3(0.08, 1.0, 0.62) * membrane * paidRepair *
@@ -11694,6 +11738,11 @@ vertex WaveCellRasterData waveCellVertex(
 
     uint membraneBase = cellIndex * membraneVertexCount;
     uint nextEdge = (edge + 1u) % membraneVertexCount;
+    // At wave scale, show the physical boundary of the individual rather than
+    // every membrane hidden inside its component.
+    if (membraneVertices[membraneBase + edge].mechanics.w <= 0.0) {
+        return output;
+    }
     float2 membraneStart = membraneVertices[membraneBase + edge].position;
     float2 membraneEnd = membraneVertices[membraneBase + nextEdge].position;
     CellState cell = cells[cellIndex];

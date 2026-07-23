@@ -1132,4 +1132,63 @@ struct ArchitectureBoundaryTests {
         #expect(cellFragment.contains("float integumentBand"))
         #expect(cellFragment.contains("float tractionTrack"))
     }
+
+    @Test
+    func organismSurfaceUsesMeasuredUnionBoundaryWithoutAnotherRenderPass() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+
+        let vertexStart = try #require(shader.range(of: "inline CellRasterData makeCellRasterData"))
+        let vertexEnd = try #require(shader.range(
+            of: "vertex CellRasterData cellVertex",
+            range: vertexStart.upperBound..<shader.endIndex
+        ))
+        let vertex = String(shader[vertexStart.lowerBound..<vertexEnd.lowerBound])
+        #expect(vertex.contains("float edgeExposure = localVertex.mechanics.w > 0.0"))
+        #expect(vertex.contains("float constructedSurface = edgeExposure"))
+        #expect(vertex.contains("float surfaceExtension = constructedSurface"))
+        #expect(vertex.contains("renderMembranePosition += outwardNormal * surfaceExtension"))
+
+        let fragmentStart = try #require(shader.range(of: "fragment float4 cellFragment"))
+        let fragmentEnd = try #require(shader.range(
+            of: "fragment float4 molecularCellFragment",
+            range: fragmentStart.upperBound..<shader.endIndex
+        ))
+        let fragment = String(shader[fragmentStart.lowerBound..<fragmentEnd.lowerBound])
+        #expect(fragment.contains("float surfaceCohesion"))
+        #expect(fragment.contains("float internalBoundary = (1.0 - exposure)"))
+        #expect(fragment.contains("float visibleMembrane = membrane * mix"))
+        #expect(fragment.contains("body * internalBoundary"))
+
+        let waveStart = try #require(shader.range(of: "vertex WaveCellRasterData waveCellVertex"))
+        let waveEnd = try #require(shader.range(
+            of: "fragment float4 waveCellFragment",
+            range: waveStart.upperBound..<shader.endIndex
+        ))
+        let wave = String(shader[waveStart.lowerBound..<waveEnd.lowerBound])
+        #expect(wave.contains("mechanics.w <= 0.0"))
+
+        let overlayStart = try #require(renderer.range(of: "if rendersTissueOverlay"))
+        let overlayEnd = try #require(renderer.range(
+            of: "encoder.writeTimestamp(ending: \"scene raster\")",
+            range: overlayStart.upperBound..<renderer.endIndex
+        ))
+        let overlay = String(renderer[overlayStart.lowerBound..<overlayEnd.lowerBound])
+        let junction = try #require(overlay.range(
+            of: "encoder.setRenderPipelineState(junctionRenderPipeline)"
+        ))
+        let cells = try #require(overlay.range(
+            of: "if tuningProfile == .m4Optimized"
+        ))
+        #expect(junction.lowerBound < cells.lowerBound)
+        #expect(!renderer.contains("organismSkinRenderPipeline"))
+    }
 }

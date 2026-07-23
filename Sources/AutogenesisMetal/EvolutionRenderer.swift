@@ -5121,6 +5121,33 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         if rendersTissueOverlay {
             encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
+            // Persistent junction material is connective tissue. Rasterize it
+            // beneath the cells so it closes small physical gaps without turning
+            // the body into a bright wiring diagram; the cells and exposed
+            // integument remain legible above it.
+            encoder.setRenderPipelineState(junctionRenderPipeline)
+            encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+            encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+            encoder.setVertexBuffer(cellState, offset: 0, index: 2)
+            encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
+            encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+            encoder.setVertexBytes(
+                &uniforms,
+                length: MemoryLayout<SimulationUniforms>.stride,
+                index: 5
+            )
+            encoder.setVertexBuffer(visibleJunctionIndices, offset: 0, index: 6)
+            encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
+            encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
+            encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
+            encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
+            encoder.setVertexBuffer(cellJunctions, offset: 0, index: 11)
+            encoder.drawPrimitives(
+                type: .triangle,
+                indirectBuffer: junctionDrawArguments,
+                indirectBufferOffset: 0
+            )
+
             if tuningProfile == .m4Optimized && Self.experimentalMeshCellRenderingEnabled {
                 encoder.setRenderPipelineState(cellMeshRenderPipeline)
                 encoder.setMeshBuffer(agentState, offset: 0, index: 0)
@@ -5166,29 +5193,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     indirectBufferOffset: 0
                 )
             }
-
-            encoder.setRenderPipelineState(junctionRenderPipeline)
-            encoder.setVertexBuffer(agentState, offset: 0, index: 0)
-            encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
-            encoder.setVertexBuffer(cellState, offset: 0, index: 2)
-            encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
-            encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
-            encoder.setVertexBytes(
-                &uniforms,
-                length: MemoryLayout<SimulationUniforms>.stride,
-                index: 5
-            )
-            encoder.setVertexBuffer(visibleJunctionIndices, offset: 0, index: 6)
-            encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
-            encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
-            encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
-            encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
-            encoder.setVertexBuffer(cellJunctions, offset: 0, index: 11)
-            encoder.drawPrimitives(
-                type: .triangle,
-                indirectBuffer: junctionDrawArguments,
-                indirectBufferOffset: 0
-            )
         }
         encoder.writeTimestamp(ending: "scene raster")
         encoder.endEncoding()
