@@ -174,8 +174,34 @@ struct ArchitectureBoundaryTests {
         #expect(division.contains("child.signals.xy += morphogenPartition"))
         #expect(division.contains("state - stateDelta"))
         #expect(division.contains("state + stateDelta"))
+        #expect(division.contains("parent.surfaceMaterial *= parentMaterialShare"))
+        #expect(division.contains("child.surfaceMaterial *= childMaterialShare"))
         #expect(!division.contains("parent.regulation ="))
         #expect(!division.contains("child.regulation ="))
+    }
+
+    @Test
+    func functionalSurfaceMorphologyIsPersistentPhysicalAndPaid() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains(
+            "float4 surfaceMaterial;"
+        ))
+        #expect(shader.contains("float4 requestedSurfaceBuild ="))
+        #expect(shader.contains("float4 surfaceErosion ="))
+        #expect(shader.contains("float surfaceConstructionWork = dot("))
+        #expect(shader.contains("cell.surfaceMaterial = updatedSurfaceMaterial"))
+        #expect(shader.contains(
+            "float attackConstructionA = cell.tissueGeometry.z"
+        ))
+        #expect(shader.contains("saturate(cell.surfaceMaterial.x)"))
+        #expect(shader.contains("saturate(cell.surfaceMaterial.y)"))
+        #expect(shader.contains(
+            "output.construction = saturate(cell.tissueGeometry.z)"
+        ))
     }
 
     @Test

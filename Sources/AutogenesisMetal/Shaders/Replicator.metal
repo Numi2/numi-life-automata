@@ -6300,6 +6300,7 @@ kernel void evolveOrganismCells(
         agents[owner], programIndex, heritablePrograms
     );
     CellState cell = cellsIn[gid];
+    float4 existingSurfaceMaterial = saturate(cell.surfaceMaterial);
     CellMemoryState embodiedMemory = cellMemories[gid];
     DevelopmentalGenome development = developmentalGenomes[programIndex];
     ResonanceGenome resonanceGenome = resonanceGenomes[programIndex];
@@ -6782,6 +6783,7 @@ kernel void evolveOrganismCells(
     float extracellularReceptorBalance =
         localDevelopmentalField.x * development.morphogenTransport.x -
         localDevelopmentalField.y * development.morphogenTransport.y;
+    extracellularReceptorBalance *= 1.0 + existingSurfaceMaterial.z * 0.65;
     CellAggregate previousAggregate = cellAggregates[owner];
     float2 bodyAxis = length(previousAggregate.geometryAxes.xy) > 0.001
         ? normalize(previousAggregate.geometryAxes.xy)
@@ -6832,7 +6834,7 @@ kernel void evolveOrganismCells(
             -1.0, 1.0
         ),
         clamp(uptakePotential * 1350.0 - externalStress - cell.signals.z * 0.35, -1.0, 1.0),
-        clamp(resonantResponse, -1.0, 1.0),
+        clamp(resonantResponse * (1.0 + existingSurfaceMaterial.z * 0.55), -1.0, 1.0),
         saturate(cell.membrane.w * 8.0 + abs(cell.membrane.z - 1.0)),
         clamp((cell.membrane.z - 1.0) * 1.8, -1.0, 1.0),
         saturate(cell.membrane.w * 6.0 + junctionStrainMemory * 2.0 + woundCue * 0.65),
@@ -6855,6 +6857,7 @@ kernel void evolveOrganismCells(
     );
     float4 regulation = regulatoryOutput.a;
     float4 regulationB = regulatoryOutput.b;
+    float4 constructionProgram = regulatoryOutput.c;
     float proliferationProgram = regulation.x;
     float adhesiveProgram = regulation.y;
     float contractileProgram = regulation.z;
@@ -6944,19 +6947,58 @@ kernel void evolveOrganismCells(
         (abs(morphogenDiffusion.x) + abs(morphogenDiffusion.y)) * 0.006;
     float junctionTransportWork = abs(atpSharingFlux) * 0.040;
     float allocationContrast = saturate(abs(receptorBalance) * 0.82 + abs(fateMemory - 0.5));
-    float predatoryConstruction = membraneExposure * secretionProgram * motilityProgram *
-        saturate((agent.geneC.w - 0.025) * 2.2) * saturate(cell.physiology.x) *
-        mix(0.62, 1.28, fateMemory) * metabolicReadiness * discretionaryActivityScale;
-    float armorConstruction = membraneExposure * adhesiveProgram * repairProgram *
-        agent.geneA.w * saturate(cell.physiology.x) * mix(1.24, 0.68, fateMemory) *
-        metabolicReadiness * mix(0.72, 1.0, discretionaryActivityScale);
-    float sensorConstruction = membraneExposure * permeabilityProgram * secretionProgram *
-        (0.35 + saturate(resonantAmplitude * 5.0) * 0.65) *
-        (0.70 + allocationContrast * 0.48) * metabolicReadiness *
-        mix(0.74, 1.0, discretionaryActivityScale);
-    float locomotorConstruction = membraneExposure * motilityProgram * erk *
-        saturate(cell.physiology.x) * mix(0.72, 1.22, fateMemory) * metabolicReadiness *
-        discretionaryActivityScale;
+    float axialPole = smoothstep(0.18, 0.92, abs(axialPosition));
+    float lateralEdge = smoothstep(0.16, 0.82, abs(lateralPosition));
+    float asymmetricSide = saturate(lateralPosition * 0.5 + 0.5);
+    float bilateralEdge = mix(
+        asymmetricSide, lateralEdge, development.morphogenesisA.z
+    );
+    float segmentedExpression = mix(
+        1.0, 0.50 + segmentationWave * 0.50,
+        saturate(development.morphogenesisA.x)
+    );
+    float4 constructionCompetence = float4(
+        secretionProgram * motilityProgram *
+            saturate((agent.geneC.w - 0.025) * 2.2),
+        adhesiveProgram * repairProgram * agent.geneA.w,
+        permeabilityProgram * secretionProgram *
+            (0.35 + saturate(resonantAmplitude * 5.0) * 0.65),
+        motilityProgram * (0.24 + erk * 0.76)
+    );
+    float4 positionalExpression = float4(
+        0.38 + axialPole * 0.62,
+        0.66 + (1.0 - axialPole) * 0.34,
+        0.42 + axialPole * 0.34 + bilateralEdge * 0.24,
+        (0.30 + bilateralEdge * 0.70) * segmentedExpression
+    );
+    float4 materialTarget = saturate(
+        constructionProgram * constructionCompetence * positionalExpression *
+        membraneExposure * (0.42 + development.morphogenesisA.w * 0.72)
+    );
+    float materialBuildRate = (
+        0.0018 + developmentalPlasticity * 0.014 +
+        injuryPlasticity * development.morphogenesisB.w * 0.004
+    ) * metabolicReadiness * discretionaryActivityScale;
+    float4 requestedSurfaceBuild =
+        max(materialTarget - existingSurfaceMaterial, float4(0.0)) *
+        materialBuildRate;
+    float materialRemodelingRate =
+        0.00018 + developmentalPlasticity * 0.0011 +
+        injuryPlasticity * development.morphogenesisB.w * 0.0015;
+    float starvationErosion =
+        (1.0 - metabolicReadiness) * 0.0012 +
+        (1.0 - smoothstep(0.05, 0.20, cell.physiology.x)) * 0.0004;
+    float4 surfaceErosion =
+        existingSurfaceMaterial * (
+            (1.0 - development.morphogenesisB.z) * 0.00016 +
+            starvationErosion + localContactDamage * 0.0017
+        ) +
+        max(existingSurfaceMaterial - materialTarget, float4(0.0)) *
+            materialRemodelingRate;
+    float predatoryConstruction = existingSurfaceMaterial.x;
+    float armorConstruction = existingSurfaceMaterial.y;
+    float sensorConstruction = existingSurfaceMaterial.z;
+    float locomotorConstruction = existingSurfaceMaterial.w;
     float integumentSynthesisDrive = multicellularExpression * membraneExposure *
         repairProgram * saturate(cell.physiology.x) * metabolicReadiness *
         (adhesiveProgram * 0.58 + secretionProgram * 0.42) *
@@ -6975,6 +7017,7 @@ kernel void evolveOrganismCells(
     float appendageGrowthDrive = multicellularExpression * membraneExposure *
         previousIntegumentCoverage * motilityProgram *
         (0.24 + erk * 0.76) * (0.44 + fateMemory * 0.56) *
+        (0.18 + materialTarget.w * 0.82) *
         metabolicReadiness * discretionaryActivityScale;
     float appendageActuationWork = multicellularExpression *
         previousAppendageMaturity * membraneExposure * motilityProgram *
@@ -7043,9 +7086,15 @@ kernel void evolveOrganismCells(
         angularFrequency * angularFrequency * resonatorDisplacement * resonatorDisplacement;
     float frequencyWork = resonatorEnergy * (0.00042 + naturalFrequency * 0.075) *
         (0.58 + resonanceGenome.mechanics.y * 0.82);
-    float constructionWork = armorConstruction * 0.000070 +
-        predatoryConstruction * 0.000060 + sensorConstruction * 0.000025 +
-        locomotorConstruction * 0.000040 +
+    float surfaceConstructionWork = dot(
+        requestedSurfaceBuild,
+        float4(0.016, 0.021, 0.011, 0.015)
+    );
+    float surfaceMaintenanceWork = dot(
+        existingSurfaceMaterial,
+        float4(0.000006, 0.000010, 0.000005, 0.000008)
+    );
+    float constructionWork = surfaceConstructionWork + surfaceMaintenanceWork +
         extracellularMatrixConstruction * 0.000052 +
         extracellularMatrixRemodeling * 0.000030 +
         integumentSynthesisDrive * 0.000082 +
@@ -7109,6 +7158,11 @@ kernel void evolveOrganismCells(
     float unclampedATP = availableATP - paidATPExpense;
     float overflowHeat = max(unclampedATP - 1.2, 0.0);
     float atp = clamp(unclampedATP, 0.0, 1.2);
+    float4 updatedSurfaceMaterial = clamp(
+        existingSurfaceMaterial + requestedSurfaceBuild * expenseScale -
+            surfaceErosion,
+        float4(0.0), float4(1.0)
+    );
     float integumentErosion = integumentDamageDrive * 0.0038 +
         (1.0 - multicellularExpression) * 0.014 +
         (1.0 - expenseScale) * previousIntegumentCoverage * 0.0018;
@@ -7311,6 +7365,7 @@ kernel void evolveOrganismCells(
         integumentCoverage, saturate(integumentTension),
         saturate(appendageMaturity), gaitPhase
     );
+    cell.surfaceMaterial = updatedSurfaceMaterial;
 
     float2 boundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
         ? normalize(cell.tissueGeometry.xy)
@@ -7321,7 +7376,8 @@ kernel void evolveOrganismCells(
         : boundaryNormal;
     float starvationDrive = 1.0 - metabolicReadiness;
     float2 tractionDirection = ecologicalGradientLocal *
-        (2.8 + permeabilityProgram * 2.2 + starvationDrive * 7.0) +
+        (2.8 + permeabilityProgram * 2.2 + starvationDrive * 7.0) *
+            (1.0 + sensorConstruction * 0.72) +
         antiWaveDirection * erk * (0.48 + motilityProgram * 0.86) *
             mix(0.34, 1.0, metabolicReadiness) +
         developmentalPolarity * (0.16 + allocationContrast * 0.18) *
@@ -7341,9 +7397,11 @@ kernel void evolveOrganismCells(
     float2 activeTraction = tractionDirection * tractionActivation * tractionGain *
         (0.000045 + cell.phenotype.y * 0.000105) *
         (0.46 + adhesiveProgram * 0.54) *
-        (1.0 + extracellularMatrixSupport * adhesiveProgram * 0.38) * structuralDrag;
+        (1.0 + extracellularMatrixSupport * adhesiveProgram * 0.38) *
+        (1.0 + locomotorConstruction * 0.32) * structuralDrag;
     float functionalAppendageMaturity =
-        multicellularExpression * appendageMaturity;
+        multicellularExpression * appendageMaturity *
+        (0.18 + updatedSurfaceMaterial.w * 0.82);
     float footSidePhase = boundaryNormal.y >= 0.0 ? 0.0 : 0.5;
     float footCycle = fract(gaitPhase + footSidePhase);
     float footStance = smoothstep(0.04, 0.24, footCycle) *
@@ -7562,14 +7620,10 @@ kernel void evolveCellMembranes(
     float2 sensorDirection = normalize(
         boundaryNormal * 0.52 + float2(cos(sensorAngle), sin(sensorAngle)) * 0.48
     );
-    float predatoryConstruction = exposure * cell.regulationB.y * cell.regulationB.w *
-        saturate((agent.geneC.w - 0.025) * 2.2) * saturate(cell.physiology.x);
-    float armorConstruction = exposure * cell.regulation.y * cell.regulation.w *
-        agent.geneA.w * saturate(cell.physiology.x);
-    float sensorConstruction = exposure * cell.regulationB.x * cell.regulationB.y *
-        (0.35 + saturate(cell.resonance.z * 5.0) * 0.65);
-    float locomotorConstruction = exposure * cell.regulationB.w * cell.signaling.y *
-        saturate(cell.physiology.x);
+    float predatoryConstruction = exposure * saturate(cell.surfaceMaterial.x);
+    float armorConstruction = exposure * saturate(cell.surfaceMaterial.y);
+    float sensorConstruction = exposure * saturate(cell.surfaceMaterial.z);
+    float locomotorConstruction = exposure * saturate(cell.surfaceMaterial.w);
     float integumentCoverage = saturate(cell.collectiveBoundary.x);
     float integumentTension = saturate(cell.collectiveBoundary.y);
     float multicellularAppendage =
@@ -8672,22 +8726,16 @@ kernel void resolveMembraneContacts(
                             float2 boundaryB = length(other.tissueGeometry.xy) > 0.0001
                                 ? normalize(other.tissueGeometry.xy) : otherLocalDirection;
                             float attackConstructionA = cell.tissueGeometry.z *
-                                cell.regulationB.y * cell.regulationB.w *
-                                saturate((agent.geneC.w - 0.025) * 2.2) *
-                                saturate(cell.physiology.x) *
+                                saturate(cell.surfaceMaterial.x) *
                                 pow(saturate(dot(localDirection, boundaryA)), 6.0);
                             float attackConstructionB = other.tissueGeometry.z *
-                                other.regulationB.y * other.regulationB.w *
-                                saturate((otherAgent.geneC.w - 0.025) * 2.2) *
-                                saturate(other.physiology.x) *
+                                saturate(other.surfaceMaterial.x) *
                                 pow(saturate(dot(otherLocalDirection, boundaryB)), 6.0);
                             float armorConstructionA = cell.tissueGeometry.z *
-                                cell.regulation.y * cell.regulation.w * agent.geneA.w *
-                                saturate(cell.physiology.x) *
+                                saturate(cell.surfaceMaterial.y) *
                                 pow(saturate(dot(localDirection, boundaryA)), 2.0);
                             float armorConstructionB = other.tissueGeometry.z *
-                                other.regulation.y * other.regulation.w * otherAgent.geneA.w *
-                                saturate(other.physiology.x) *
+                                saturate(other.surfaceMaterial.y) *
                                 pow(saturate(dot(otherLocalDirection, boundaryB)), 2.0);
                             float collectiveDefenseA = saturate(
                                 cell.collectiveBoundary.x *
@@ -9920,6 +9968,8 @@ kernel void divideAndReduceOrganismCells(
             parent.collectiveBoundary.z *= parentMaterialShare;
             child.collectiveBoundary.z *= childMaterialShare;
             child.collectiveBoundary.w = fract(parent.collectiveBoundary.w + 0.5);
+            parent.surfaceMaterial *= parentMaterialShare;
+            child.surfaceMaterial *= childMaterialShare;
             float preDivisionATP = parent.physiology.x;
             float preDivisionBiomass = parent.physiology.y;
             parent.physiology.x = preDivisionATP * parentMaterialShare;
@@ -11758,19 +11808,8 @@ inline CellRasterData makeCellRasterData(
     output.collectiveBoundary = cell.collectiveBoundary;
     output.programEcology = programInteractions[cellIndex];
     uint programIndex = cellIdentities[cellIndex].programIndex;
-    AgentState cellProgram = agentWithCellProgram(
-        agent, programIndex, heritablePrograms
-    );
-    float constructionExposure = saturate(cell.tissueGeometry.z) *
-        saturate(cell.physiology.x);
-    output.construction = constructionExposure * float4(
-        cell.regulationB.y * cell.regulationB.w *
-            saturate((cellProgram.geneC.w - 0.025) * 2.2),
-        cell.regulation.y * cell.regulation.w * cellProgram.geneA.w,
-        cell.regulationB.x * cell.regulationB.y *
-            (0.35 + saturate(cell.resonance.z * 5.0) * 0.65),
-        cell.regulationB.w * cell.signaling.y
-    );
+    output.construction = saturate(cell.tissueGeometry.z) *
+        saturate(cell.surfaceMaterial);
     output.lineageHue = programSlotMatches(
         programSlots, programIndex, cellIdentities[cellIndex].programGeneration
     ) &&
