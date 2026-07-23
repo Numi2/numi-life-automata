@@ -632,8 +632,10 @@ struct ArchitectureBoundaryTests {
         ))
         let compaction = String(shader[start.lowerBound..<end.lowerBound])
         #expect(compaction.contains("cellWorldPosition(agents[owner], cells[gid].position"))
-        #expect(compaction.contains("any(screenUV < -margin)"))
-        #expect(compaction.contains("any(screenUV > 1.0 + margin)"))
+        #expect(compaction.contains("float2 halfViewWorld = 0.5 * viewScale / cameraZoom"))
+        #expect(compaction.contains("float2 worldMargin = float2"))
+        #expect(compaction.contains("any(abs(center - uniforms.cameraCenter) >"))
+        #expect(!compaction.contains("screenRadius"))
     }
 
     @Test
@@ -691,6 +693,11 @@ struct ArchitectureBoundaryTests {
                 .appending(path: "Sources/AutogenesisMetal/ContentView.swift"),
             encoding: .utf8
         )
+        let store = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionStore.swift"),
+            encoding: .utf8
+        )
         #expect(renderer.contains("directScaleDisplayPipelines"))
         #expect(renderer.contains("if renderScale >= 3"))
         #expect(renderer.contains(
@@ -719,14 +726,23 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("float erk = saturate(input.signaling.y)"))
         #expect(renderer.contains("includeJunctions: false"))
         #expect(renderer.contains("molecularCellRenderPipeline"))
+        #expect(renderer.contains("deepBodyContextRenderPipeline"))
         #expect(renderer.contains("waveCellRenderPipeline"))
-        #expect(renderer.contains("if renderScale == 3 || renderScale == 4"))
+        #expect(renderer.contains("guard encodeVisibleCellCompaction("))
         #expect(!renderer.contains("molecularCellMeshRenderPipeline"))
         #expect(contentView.contains("Intracellular molecules in physical cells"))
         #expect(contentView.contains("Wave state coupled to physical cells and organisms"))
-        #expect(contentView.contains("if (1...4).contains(index), store.followedAgentID == nil"))
+        #expect(contentView.contains("if (0...4).contains(index), store.followedAgentID == nil"))
         #expect(contentView.contains("store.ensureLivingFocus()"))
-        #expect(renderer.contains("renderScale == 3 || renderScale == 4"))
+        #expect(store.contains("private var autoFollowInitialObservation = true"))
+        #expect(store.contains("autoFollowInitialObservation = magnification >= 6"))
+        #expect(store.contains(
+            "private func clearFollow() {\n        autoFollowInitialObservation = false"
+        ))
+        #expect(store.contains(
+            "resetCamera()\n        autoFollowInitialObservation = true"
+        ))
+        #expect(renderer.contains("encoder.setRenderPipelineState(deepBodyContextRenderPipeline)"))
         #expect(contentView.contains("VISIBLE INTRACELLULAR POOLS"))
         #expect(!contentView.contains("MEASURED REACTION PATH"))
         #expect(!contentView.contains("Reaction pools and flux"))
@@ -760,7 +776,18 @@ struct ArchitectureBoundaryTests {
         #expect(!waveCellShader.contains("programSlots"))
         #expect(!waveCellShader.contains("mapToDisplay"))
         #expect(waveCellShader.contains("uint edge = vertexID / 6u"))
-        #expect(waveCellShader.contains("screenNormal * side * 0.00145"))
+        #expect(waveCellShader.contains("float membraneHalfWidth = mix"))
+        #expect(waveCellShader.contains("output.organism = organism"))
+        #expect(waveCellShader.contains("output.collectiveSurface = collectiveSurface"))
+
+        #expect(shader.contains("struct DeepBodyContextRasterData"))
+        #expect(shader.contains("vertex DeepBodyContextRasterData deepBodyContextVertex"))
+        #expect(shader.contains("fragment float4 deepBodyContextFragment"))
+        #expect(shader.contains("float2 halfViewWorld = 0.5 * viewScale / cameraZoom"))
+        #expect(!shader.contains("observationZoom >= 512.0) { return;"))
+        #expect(shader.contains("inline float4 organismOverviewCellColor"))
+        #expect(shader.contains("float detailBlend = smoothstep(6.0, 9.0"))
+        #expect(!renderer.contains("deepBodyContextPass"))
     }
 
     @Test

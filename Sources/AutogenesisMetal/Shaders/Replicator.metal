@@ -10371,7 +10371,7 @@ kernel void compactVisibleCells(
     if (owner >= maxAgentCount ||
         atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (observationZoom <= 0.35 || observationZoom >= 512.0) { return; }
+    if (observationZoom <= 0.35) { return; }
     if (uniforms.trackedAgentID != 0xffffffffu &&
         uniforms.trackedAgentID != owner && observationZoom >= 34.0) { return; }
 
@@ -10379,12 +10379,12 @@ kernel void compactVisibleCells(
     float safeAspect = max(uniforms.viewportAspect, 0.001);
     float2 viewScale = safeAspect >= 1.0
         ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
-    float2 screenUV = 0.5 + (center - uniforms.cameraCenter) *
-        max(uniforms.cameraZoom, 0.000000001) / viewScale;
-    float2 screenRadius = float2(0.33 * cellWorldScale(uniforms) * uniforms.cameraZoom) /
-        viewScale;
-    float2 margin = screenRadius + float2(0.004);
-    if (any(screenUV < -margin) || any(screenUV > 1.0 + margin)) { return; }
+    float cameraZoom = max(uniforms.cameraZoom, 0.000000001);
+    float2 halfViewWorld = 0.5 * viewScale / cameraZoom;
+    float worldRadius = 0.33 * cellWorldScale(uniforms);
+    float2 worldMargin = float2(worldRadius + 0.004 / cameraZoom);
+    if (any(abs(center - uniforms.cameraCenter) >
+        halfViewWorld + worldMargin)) { return; }
 
     uint target = atomic_fetch_add_explicit(&drawArguments[1], 1u, memory_order_relaxed);
     if (observationZoom < 64.0) {
@@ -11068,6 +11068,53 @@ struct CellRasterData {
     float4 localMembrane;
 };
 
+inline float4 organismOverviewCellColor(
+    CellRasterData input,
+    float body,
+    float radius
+) {
+    float organism = saturate(input.organism);
+    float integrity = saturate(input.localMembrane.x);
+    float atp = saturate(input.physiology.x);
+    float exposure = saturate(input.edgeExposure);
+    float outerBand = body * smoothstep(0.62, 0.98, radius);
+    float exposedBand = outerBand * mix(0.52, 1.0, exposure);
+    float innerBody = body * (1.0 - outerBand * 0.68);
+    float3 lineage = hsvToRGB(float3(input.lineageHue, 0.72, 0.66));
+    float3 solitaryColor = mix(
+        float3(0.16, 0.035, 0.070), lineage, 0.46
+    );
+    float3 collectiveColor = mix(
+        float3(0.014, 0.115, 0.092), lineage, 0.32
+    );
+    float3 color = mix(
+        solitaryColor, collectiveColor, organism
+    ) * innerBody * (0.42 + atp * 0.44);
+    color += mix(
+        lineage, float3(0.42, 1.0, 0.76), organism * 0.72
+    ) * exposedBand * (
+        0.28 + integrity * 0.38 + organism * 0.34
+    );
+    float collectiveSurface = outerBand * organism * exposure *
+        saturate(
+            0.26 + input.collectiveBoundary.x * 0.48 +
+            input.collectiveBoundary.y * 0.26
+        );
+    color += float3(0.72, 1.0, 0.88) * collectiveSurface * 0.48;
+    float footPad = outerBand * saturate(input.footState.x);
+    float footSole = footPad * saturate(input.footState.y);
+    color = mix(color, float3(0.006, 0.050, 0.038), footPad * 0.82);
+    color += float3(0.06, 1.0, 0.50) * footSole * 0.92;
+    color += float3(0.10, 0.92, 1.0) * input.tracked *
+        exposedBand * 0.42;
+    float alpha = body * input.visibility * mix(0.60, 0.96, organism);
+    color *= input.visibility;
+    if (!all(isfinite(color)) || !isfinite(alpha)) {
+        return float4(0.0);
+    }
+    return float4(clamp(color, 0.0, 16.0), saturate(alpha));
+}
+
 inline float2 smoothMembranePosition(
     device const MembraneVertex* membraneVertices,
     uint cellIndex,
@@ -11412,47 +11459,9 @@ fragment float4 cellFragment(
 
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
     if (observationZoom < 6.0) {
-        float organism = saturate(input.organism);
-        float integrity = saturate(input.localMembrane.x);
-        float atp = saturate(input.physiology.x);
-        float exposure = saturate(input.edgeExposure);
-        float outerBand = body * smoothstep(0.62, 0.98, radius);
-        float exposedBand = outerBand * mix(0.52, 1.0, exposure);
-        float innerBody = body * (1.0 - outerBand * 0.68);
-        float3 lineage = hsvToRGB(float3(input.lineageHue, 0.72, 0.66));
-        float3 solitaryColor = mix(
-            float3(0.16, 0.035, 0.070), lineage, 0.46
-        );
-        float3 collectiveColor = mix(
-            float3(0.014, 0.115, 0.092), lineage, 0.32
-        );
-        float3 color = mix(
-            solitaryColor, collectiveColor, organism
-        ) * innerBody * (0.42 + atp * 0.44);
-        color += mix(
-            lineage, float3(0.42, 1.0, 0.76), organism * 0.72
-        ) * exposedBand * (
-            0.28 + integrity * 0.38 + organism * 0.34
-        );
-        float collectiveSurface = outerBand * organism * exposure *
-            saturate(
-                0.26 + input.collectiveBoundary.x * 0.48 +
-                input.collectiveBoundary.y * 0.26
-            );
-        color += float3(0.72, 1.0, 0.88) * collectiveSurface * 0.48;
-        float footPad = outerBand * saturate(input.footState.x);
-        float footSole = footPad * saturate(input.footState.y);
-        color = mix(color, float3(0.006, 0.050, 0.038), footPad * 0.82);
-        color += float3(0.06, 1.0, 0.50) * footSole * 0.92;
-        color += float3(0.10, 0.92, 1.0) * input.tracked *
-            exposedBand * 0.42;
-        float alpha = body * input.visibility *
-            mix(0.60, 0.96, organism);
-        color *= input.visibility;
-        if (!all(isfinite(color)) || !isfinite(alpha)) {
-            discard_fragment();
-        }
-        return float4(clamp(color, 0.0, 16.0), saturate(alpha));
+        float4 overview = organismOverviewCellColor(input, body, radius);
+        if (overview.a <= 0.001) { discard_fragment(); }
+        return overview;
     }
     if (observationZoom >= 18.0) {
         // Dense tissue is dominated by fragment occupancy. Preserve the causal
@@ -11753,6 +11762,12 @@ fragment float4 cellFragment(
         max(visibleMembrane, integumentBand * 0.72) * 0.24;
     float alpha = body * input.visibility * 0.92 * (1.0 - apoptosis * 0.35);
     color *= input.visibility;
+    float detailBlend = smoothstep(6.0, 9.0, observationZoom);
+    if (detailBlend < 0.999) {
+        float4 overview = organismOverviewCellColor(input, body, radius);
+        color = mix(overview.rgb, color, detailBlend);
+        alpha = mix(overview.a, alpha, detailBlend);
+    }
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
     return float4(clamp(color, 0.0, 16.0), saturate(alpha));
 }
@@ -11890,12 +11905,154 @@ fragment float4 molecularCellFragment(CellRasterData input [[stage_in]]) {
     return float4(clamp(color, 0.0, 16.0), saturate(alpha));
 }
 
+struct DeepBodyContextRasterData {
+    float4 position [[position]];
+    float radialCoordinate;
+    float edgeExposure;
+    float organism;
+    float integrity;
+    float collectiveSurface;
+    float lineageHue;
+    float visibility;
+};
+
+vertex DeepBodyContextRasterData deepBodyContextVertex(
+    device const AgentState* agents [[buffer(0)]],
+    device const uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const uint* cellOccupancy [[buffer(3)]],
+    device const MembraneVertex* membraneVertices [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device const uint* visibleCellIndices [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]]
+) {
+    DeepBodyContextRasterData output = {};
+    output.position = float4(3.0, 3.0, 0.0, 1.0);
+    if (instanceID >= maxCellCount || vertexID >= membraneVertexCount * 6u) {
+        return output;
+    }
+    uint corner = vertexID % 6u;
+    if (corner >= 3u) { return output; }
+
+    uint edge = vertexID / 6u;
+    uint cellIndex = visibleCellIndices[instanceID];
+    if (edge >= membraneVertexCount || cellIndex >= maxCellCount) {
+        return output;
+    }
+    uint owner = cellIdentities[cellIndex].owner;
+    if (owner >= maxAgentCount || agentOccupancy[owner] == 0u ||
+        cellOccupancy[cellIndex] != cellOccupancyAlive) {
+        return output;
+    }
+
+    uint membraneBase = cellIndex * membraneVertexCount;
+    uint nextEdge = (edge + 1u) % membraneVertexCount;
+    float2 membraneStart = membraneVertices[membraneBase + edge].position;
+    float2 membraneEnd = membraneVertices[membraneBase + nextEdge].position;
+    float startRadius = length(membraneStart);
+    float endRadius = length(membraneEnd);
+    float edgeLength = length(membraneEnd - membraneStart);
+    float signedArea = membraneStart.x * membraneEnd.y -
+        membraneStart.y * membraneEnd.x;
+    if (!all(isfinite(membraneStart)) || !all(isfinite(membraneEnd)) ||
+        startRadius < 0.025 || endRadius < 0.025 ||
+        startRadius > 0.30 || endRadius > 0.30 ||
+        edgeLength > 0.16 || signedArea <= 0.0000001) {
+        return output;
+    }
+
+    AgentState agent = agents[owner];
+    CellState cell = cells[cellIndex];
+    float2 center = cellWorldPosition(agent, cell.position, uniforms);
+    float2 localPosition = corner == 0u
+        ? float2(0.0) : (corner == 1u ? membraneStart : membraneEnd);
+    float2 worldPosition = center +
+        rotateTissueToWorld(localPosition, agent) * cellWorldScale(uniforms);
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0
+        ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    if (!all(isfinite(center)) || !all(isfinite(worldPosition)) ||
+        !all(isfinite(screenUV))) {
+        return output;
+    }
+
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    float trackingVisibility = uniforms.trackedAgentID == 0xffffffffu ||
+        uniforms.trackedAgentID == owner
+        ? 1.0 : 1.0 - smoothstep(16.0, 34.0, observationZoom);
+    output.position = float4(
+        screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0
+    );
+    output.radialCoordinate = corner == 0u ? 0.0 : 1.0;
+    output.edgeExposure = corner == 0u
+        ? saturate(cell.tissueGeometry.z)
+        : (membraneVertices[
+            membraneBase + (corner == 1u ? edge : nextEdge)
+        ].mechanics.w > 0.0 ? 1.0 : 0.0);
+    output.organism =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    output.integrity = corner == 0u
+        ? saturate(cell.physiology.w)
+        : saturate(membraneVertices[
+            membraneBase + (corner == 1u ? edge : nextEdge)
+        ].mechanics.y);
+    output.collectiveSurface = saturate(
+        cell.collectiveBoundary.x * cell.collectiveBoundary.y
+    );
+    output.lineageHue = agent.geneB.w;
+    output.visibility = smoothstep(128.0, 160.0, observationZoom) *
+        trackingVisibility;
+    return output;
+}
+
+fragment float4 deepBodyContextFragment(
+    DeepBodyContextRasterData input [[stage_in]]
+) {
+    if (input.visibility <= 0.001) { discard_fragment(); }
+    float radius = saturate(input.radialCoordinate);
+    float aa = max(fwidth(radius) * 1.25, 0.004);
+    float body = 1.0 - smoothstep(1.0 - aa * 1.8, 1.0, radius);
+    if (body <= 0.001) { discard_fragment(); }
+
+    float organism = saturate(input.organism);
+    float exposure = saturate(input.edgeExposure);
+    float collectiveSurface = saturate(input.collectiveSurface);
+    float3 lineage = hsvToRGB(float3(input.lineageHue, 0.68, 0.58));
+    float3 solitaryColor = mix(
+        float3(0.14, 0.025, 0.060), lineage, 0.40
+    );
+    float3 organismColor = mix(
+        float3(0.010, 0.095, 0.076), lineage, 0.26
+    );
+    float3 color = mix(solitaryColor, organismColor, organism);
+    color = mix(
+        color, float3(0.32, 0.92, 0.68),
+        organism * collectiveSurface * exposure * 0.24
+    );
+    color *= 0.44 + saturate(input.integrity) * 0.36;
+    float boundaryContext = smoothstep(0.82, 0.99, radius) * exposure;
+    color += float3(0.48, 1.0, 0.78) * boundaryContext *
+        organism * (0.16 + collectiveSurface * 0.22);
+    float alpha = body * input.visibility * (
+        mix(0.022, 0.070, organism) +
+        boundaryContext * organism * (0.018 + collectiveSurface * 0.032)
+    );
+    if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
+    return float4(clamp(color, 0.0, 1.0), saturate(alpha));
+}
+
 struct WaveCellRasterData {
     float4 position [[position]];
     float across;
     float lineageHue;
     float integrity;
     float activity;
+    float organism;
+    float collectiveSurface;
     float visibility;
 };
 
@@ -11973,8 +12130,15 @@ vertex WaveCellRasterData waveCellVertex(
     bool usesEnd = corner == 1u || corner == 4u || corner == 5u;
     float side = (corner == 0u || corner == 1u || corner == 4u) ? -1.0 : 1.0;
     float2 screenNormal = float2(-screenEdge.y, screenEdge.x) / screenLength;
+    float organism =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    float collectiveSurface = saturate(
+        cell.collectiveBoundary.x * cell.collectiveBoundary.y
+    );
+    float membraneHalfWidth = mix(0.00115, 0.00190, organism) *
+        (1.0 + collectiveSurface * 0.18);
     float2 screenUV = (usesEnd ? screenEnd : screenStart) +
-        screenNormal * side * 0.00145;
+        screenNormal * side * membraneHalfWidth;
     output.position = float4(
         screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0
     );
@@ -11987,8 +12151,9 @@ vertex WaveCellRasterData waveCellVertex(
         cell.physiology.x * 0.55 + cell.signaling.x * 0.24 +
         cell.signaling.y * 0.21
     );
-    output.visibility = smoothstep(145.0, 175.0, observationZoom) *
-        (1.0 - smoothstep(450.0, 512.0, observationZoom));
+    output.organism = organism;
+    output.collectiveSurface = collectiveSurface;
+    output.visibility = smoothstep(128.0, 160.0, observationZoom);
     return output;
 }
 
@@ -12001,9 +12166,16 @@ fragment float4 waveCellFragment(WaveCellRasterData input [[stage_in]]) {
     float3 membraneColor = mix(
         float3(1.0, 0.10, 0.025), float3(0.05, 1.0, 0.66), integrity
     );
-    float3 color = mix(lineage, membraneColor, 0.74) *
+    float organism = saturate(input.organism);
+    float collectiveSurface = saturate(input.collectiveSurface);
+    float3 color = mix(lineage, membraneColor, 0.62 + organism * 0.18) *
         (0.36 + input.activity * 0.24);
-    float alpha = input.visibility * coverage * (0.26 + input.activity * 0.14);
+    color += float3(0.58, 1.0, 0.82) * organism * collectiveSurface *
+        coverage * 0.28;
+    float alpha = input.visibility * coverage * (
+        0.22 + input.activity * 0.12 + organism * 0.16 +
+        collectiveSurface * organism * 0.10
+    );
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
     return float4(color, saturate(alpha));
 }

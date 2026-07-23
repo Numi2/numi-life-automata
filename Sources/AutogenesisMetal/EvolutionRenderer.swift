@@ -2117,6 +2117,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let cellRenderPipeline: MTLRenderPipelineState
     private let cellMeshRenderPipeline: MTLRenderPipelineState
     private let molecularCellRenderPipeline: MTLRenderPipelineState
+    private let deepBodyContextRenderPipeline: MTLRenderPipelineState
     private let waveCellRenderPipeline: MTLRenderPipelineState
     private let junctionRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
@@ -2443,6 +2444,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             label: "Cell molecular-state renderer",
             vertex: "cellVertex",
             fragment: "molecularCellFragment",
+            pixelFormat: .bgra8Unorm_srgb,
+            blending: true
+        )
+        deepBodyContextRenderPipeline = try pipelineFactory.makeRenderPipeline(
+            label: "Deep-scale physical body context",
+            vertex: "deepBodyContextVertex",
+            fragment: "deepBodyContextFragment",
             pixelFormat: .bgra8Unorm_srgb,
             blending: true
         )
@@ -3429,7 +3437,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             resetRenderDrawArgumentsPipeline, compactCellRenderPipeline,
             compactJunctionRenderPipeline, finalizeRenderDrawArgumentsPipeline,
             cellRenderPipeline, cellMeshRenderPipeline,
-            molecularCellRenderPipeline,
+            molecularCellRenderPipeline, deepBodyContextRenderPipeline,
             waveCellRenderPipeline,
             junctionRenderPipeline,
             bloomPrefilterPipeline,
@@ -4994,17 +5002,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             frameIndex: UInt32(truncatingIfNeeded: frameSerial)
         )
 
-        // Deep instruments present directly. Molecular and wave scales compact only
-        // visible cells for physical context; both skip junctions. All three avoid HDR
-        // store/reload, bloom, and a second render pass.
+        // Deep instruments present directly. All three compact only visible physical
+        // cells; molecular scale renders their contents, while wave and spinor scales
+        // retain a faint body interior plus the measured exposed membrane. They skip
+        // junctions and avoid HDR store/reload, bloom, and a second render pass.
         if renderScale >= 3 {
-            if renderScale == 3 || renderScale == 4 {
-                guard encodeVisibleCellCompaction(
-                    into: commandBuffer,
-                    settings: settings,
-                    includeJunctions: false
-                ) else { return }
-            }
+            guard encodeVisibleCellCompaction(
+                into: commandBuffer,
+                settings: settings,
+                includeJunctions: false
+            ) else { return }
             let descriptor = MTL4RenderPassDescriptor()
             let attachment = descriptor.colorAttachments[0]!
             attachment.texture = drawableTexture
@@ -5052,7 +5059,26 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     indirectBuffer: cellDrawArguments,
                     indirectBufferOffset: 0
                 )
-            } else if renderScale == 4 {
+            } else {
+                encoder.setRenderPipelineState(deepBodyContextRenderPipeline)
+                encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+                encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+                encoder.setVertexBuffer(cellState, offset: 0, index: 2)
+                encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
+                encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+                encoder.setVertexBytes(
+                    &uniforms,
+                    length: MemoryLayout<SimulationUniforms>.stride,
+                    index: 5
+                )
+                encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
+                encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
+                encoder.drawPrimitives(
+                    type: .triangle,
+                    indirectBuffer: cellDrawArguments,
+                    indirectBufferOffset: 0
+                )
+
                 encoder.setRenderPipelineState(waveCellRenderPipeline)
                 encoder.setVertexBuffer(agentState, offset: 0, index: 0)
                 encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)

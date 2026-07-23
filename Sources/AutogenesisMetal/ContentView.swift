@@ -1056,7 +1056,7 @@ struct ContentView: View {
         HStack(spacing: 1) {
             ForEach(Array(observationStops.enumerated()), id: \.element.id) { index, stop in
                 Button {
-                    if (1...4).contains(index), store.followedAgentID == nil {
+                    if (0...4).contains(index), store.followedAgentID == nil {
                         store.ensureLivingFocus()
                     }
                     store.displayMode = stop.displayMode

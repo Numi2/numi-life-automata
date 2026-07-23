@@ -536,7 +536,7 @@ final class EvolutionStore: ObservableObject {
     )
     private var lineageTracker = LineageDivergenceTracker()
     private var hasObservedFirstBiologicalUnit = false
-    private var autoFollowInitialObservation = false
+    private var autoFollowInitialObservation = true
     private var pendingMechanosensoryIntervention: (baseline: EvolutionSnapshot, blocked: Bool)?
 
     init() {
@@ -548,7 +548,7 @@ final class EvolutionStore: ObservableObject {
             "NUMI_INITIAL_MAGNIFICATION"
         ], let magnification = Double(rawMagnification), magnification.isFinite else { return }
         cameraZoom = min(max(magnification, 0.000_001), 1.0e24)
-        autoFollowInitialObservation = magnification >= 6 && magnification < 512
+        autoFollowInitialObservation = magnification >= 6
         displayMode = magnification >= 64 && magnification < 160 ? .energy :
             (magnification >= 18 && magnification < 64 ? .development :
                 (magnification >= 6 && magnification < 18 ? .genome : .ecology))
@@ -629,6 +629,7 @@ final class EvolutionStore: ObservableObject {
         mechanosensingBlocked = false
         pendingMechanosensoryIntervention = nil
         resetCamera()
+        autoFollowInitialObservation = true
     }
 
     func toggleMechanosensingIntervention() {
@@ -852,6 +853,7 @@ final class EvolutionStore: ObservableObject {
     }
 
     private func clearFollow() {
+        autoFollowInitialObservation = false
         followedAgentID = nil
         followedBirthID = nil
         followedEnergeticIndependence = 0
