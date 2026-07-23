@@ -1191,4 +1191,31 @@ struct ArchitectureBoundaryTests {
         #expect(junction.lowerBound < cells.lowerBound)
         #expect(!renderer.contains("organismSkinRenderPipeline"))
     }
+
+    @Test
+    func smallFeetRequireMulticellularityAndPayForTerrainNavigation() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+
+        #expect(shader.contains(
+            "(agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0"
+        ))
+        #expect(shader.contains("float appendageActuationWork = multicellularExpression"))
+        #expect(shader.contains("appendageActuationWork +"))
+        #expect(shader.contains("float functionalAppendageMaturity ="))
+        #expect(shader.contains("multicellularExpression * appendageMaturity"))
+        #expect(shader.contains("float footSidePhase = boundaryNormal.y >= 0.0 ? 0.0 : 0.5"))
+        #expect(shader.contains("activeTraction *= 1.0 + appendageGrip * 2.15"))
+        #expect(shader.contains("appendageGrip * footStance * 0.72"))
+        #expect(shader.contains("float2 footPadDirection = normalize"))
+        #expect(shader.contains("float footPadLobe = pow"))
+        #expect(shader.contains("float appendageStructure = max(legLobe, footPadLobe)"))
+        #expect(shader.contains("float2 footState;"))
+        #expect(shader.contains("float renderFootMaturity ="))
+        #expect(shader.contains("float3(0.012, 0.085, 0.070), footPad"))
+        #expect(!shader.contains("organismFootSprite"))
+    }
 }

@@ -6542,6 +6542,9 @@ kernel void evolveOrganismCells(
         previousIntegumentCoverage * motilityProgram *
         (0.24 + erk * 0.76) * (0.44 + fateMemory * 0.56) *
         metabolicReadiness * discretionaryActivityScale;
+    float appendageActuationWork = multicellularExpression *
+        previousAppendageMaturity * membraneExposure * motilityProgram *
+        (0.000012 + abs(previousGaitPhase * 2.0 - 1.0) * 0.000018);
     float collectiveBoundaryMaintenance = multicellularExpression * (
         previousIntegumentCoverage * 0.34 +
         previousIntegumentTension *
@@ -6613,6 +6616,7 @@ kernel void evolveOrganismCells(
         extracellularMatrixRemodeling * 0.000030 +
         integumentSynthesisDrive * 0.000082 +
         appendageGrowthDrive * 0.000068 +
+        appendageActuationWork +
         collectiveBoundaryMaintenance * 0.000018;
     float junctionMaterialWork = junctionMaterialDemand * 0.0000045 +
         junctionStrainMemory * 0.000016;
@@ -6688,13 +6692,15 @@ kernel void evolveOrganismCells(
         ),
         0.010 + expenseScale * 0.024
     ) * mix(0.92, 1.0, multicellularExpression);
-    float appendageTarget = smoothstep(
-        0.0025, 0.055, appendageGrowthDrive
+    float appendageTarget = multicellularExpression * smoothstep(
+        0.0015, 0.032, appendageGrowthDrive
     ) * (0.72 + integumentCoverage * 0.28);
-    float appendageMaturity = mix(
-        previousAppendageMaturity, appendageTarget,
-        0.006 + expenseScale * 0.014
-    ) * mix(0.90, 1.0, multicellularExpression);
+    float appendageMaturity = multicellularExpression > 0.5
+        ? mix(
+            previousAppendageMaturity, appendageTarget,
+            0.010 + expenseScale * 0.025
+        )
+        : previousAppendageMaturity * 0.78;
     float gaitPhase = fract(
         previousGaitPhase + naturalFrequency *
             (0.52 + erk * 1.18) * (0.40 + appendageMaturity * 0.60)
@@ -6902,17 +6908,25 @@ kernel void evolveOrganismCells(
         (0.000045 + cell.phenotype.y * 0.000105) *
         (0.46 + adhesiveProgram * 0.54) *
         (1.0 + extracellularMatrixSupport * adhesiveProgram * 0.38) * structuralDrag;
-    float appendageGrip = appendageMaturity * integumentCoverage *
-        (0.38 + extracellularMatrixSupport * 0.42 + shearAnchoring * 0.20);
-    activeTraction *= 1.0 + appendageGrip * 1.45;
+    float functionalAppendageMaturity =
+        multicellularExpression * appendageMaturity;
+    float footSidePhase = boundaryNormal.y >= 0.0 ? 0.0 : 0.5;
+    float footCycle = fract(gaitPhase + footSidePhase);
+    float footStance = smoothstep(0.04, 0.24, footCycle) *
+        (1.0 - smoothstep(0.62, 0.94, footCycle));
+    float appendageGrip = functionalAppendageMaturity * integumentCoverage *
+        (0.38 + extracellularMatrixSupport * 0.42 + shearAnchoring * 0.20) *
+        (0.58 + footStance * 0.42);
+    activeTraction *= 1.0 + appendageGrip * 2.15;
     activeTraction += tractionDirection * appendageGrip *
-        (0.000020 + contractility * 0.000034) *
-        (0.72 + 0.28 * sin(gaitPhase * 2.0 * M_PI_F));
+        (0.000026 + contractility * 0.000048) *
+        (0.62 + footStance * 0.52);
     activeTraction += boundaryNormal * exposure * contractility * tractionGain *
         (0.000014 + adhesiveProgram * 0.000026) * structuralDrag;
     float2 localFieldMotion = rotateWorldToTissue(localMechanical.xy, agent);
     if (length(localFieldMotion) > 0.000001) {
-        activeTraction -= normalize(localFieldMotion) * shearAnchoring *
+        activeTraction -= normalize(localFieldMotion) *
+            (shearAnchoring + appendageGrip * footStance * 0.72) *
             environmentalDrive * (0.08 + frequencyMatch * 0.10) *
             mix(0.30, 1.0, metabolicReadiness);
     }
@@ -7124,7 +7138,10 @@ kernel void evolveCellMembranes(
         saturate(cell.physiology.x);
     float integumentCoverage = saturate(cell.collectiveBoundary.x);
     float integumentTension = saturate(cell.collectiveBoundary.y);
-    float appendageMaturity = saturate(cell.collectiveBoundary.z);
+    float multicellularAppendage =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    float appendageMaturity = multicellularAppendage *
+        saturate(cell.collectiveBoundary.z);
     float gaitPhase = fract(cell.collectiveBoundary.w + 1.0);
     float lateralBoundaryAffinity = smoothstep(0.30, 0.76, abs(boundaryNormal.y));
     float sidePhase = boundaryNormal.y >= 0.0 ? 0.0 : M_PI_F;
@@ -7132,6 +7149,10 @@ kernel void evolveCellMembranes(
     float2 appendageDirection = normalize(
         boundaryNormal * 0.90 + float2(strideWave * 0.34, 0.0) +
         boundaryNormal * 0.0001
+    );
+    float2 footPadDirection = normalize(
+        appendageDirection + float2(strideWave * 0.22, 0.0) +
+        appendageDirection * 0.0001
     );
     float appendageExtension = appendageMaturity * lateralBoundaryAffinity *
         (0.62 + 0.38 * (0.5 + 0.5 * strideWave));
@@ -7165,14 +7186,19 @@ kernel void evolveCellMembranes(
             sensorConstruction;
         float locomotorLobe = pow(saturate(dot(radialNormal, tractionDirection)), 4.0) *
             locomotorConstruction;
-        float appendageLobe = pow(
+        float legLobe = pow(
             saturate(dot(radialNormal, appendageDirection)), 9.0
         ) * appendageExtension;
+        float footPadLobe = pow(
+            saturate(dot(radialNormal, footPadDirection)), 16.0
+        ) * appendageExtension * (0.68 + abs(strideWave) * 0.32);
+        float appendageStructure = max(legLobe, footPadLobe);
         float armorPlate = pow(saturate(dot(radialNormal, boundaryNormal)), 2.0) *
             armorConstruction;
         float vertexTargetRadius = targetRadius * (
             1.0 + predatoryLobe * 0.58 + sensorLobe * 0.34 +
-            locomotorLobe * 0.24 + appendageLobe * 0.78 + armorPlate * 0.10
+            locomotorLobe * 0.24 + legLobe * 0.42 +
+            footPadLobe * 0.20 + armorPlate * 0.10
         );
         float stiffness = mix(0.006, 0.026, saturate(cell.physiology.w *
             localIntegrity[vertexIndex])) * (1.0 + armorPlate * 0.92) *
@@ -7184,7 +7210,7 @@ kernel void evolveCellMembranes(
             0.030 + cell.regulation.y * 0.022,
             saturate(localIntegrity[vertexIndex])
         ) * (1.0 + integumentCoverage * integumentTension * 0.72) *
-            mix(1.0, 0.52, appendageLobe);
+            mix(1.0, 0.52, appendageStructure);
         float2 bendingForce = (positions[previous] + positions[next] - current * 2.0) *
             bendingStiffness;
         float2 pressureForce = radialNormal * areaError *
@@ -7192,7 +7218,7 @@ kernel void evolveCellMembranes(
         float2 morphogenesisForce = radialNormal *
             clamp(vertexTargetRadius - radialLength, -0.08, 0.12) *
             (0.0048 + cell.regulationB.w * 0.0042 + armorPlate * 0.0020 +
-                appendageLobe * 0.0048);
+                appendageStructure * 0.0048);
         float2 contractileForce = -radialNormal * cell.mechanics.x *
             (0.00028 + cell.regulation.z * 0.00062);
         float contactPressure = previousPressure[vertexIndex] * 0.72;
@@ -11000,6 +11026,7 @@ struct CellRasterData {
     float tracked;
     float radialCoordinate;
     float edgeExposure;
+    float2 footState;
     float4 localMembrane;
 };
 
@@ -11090,6 +11117,35 @@ inline CellRasterData makeCellRasterData(
     // the sign while retaining the strain magnitude. Only a maintained exposed
     // arc can project the supracellular surface beyond the cellular membrane.
     float edgeExposure = localVertex.mechanics.w > 0.0 ? 1.0 : 0.0;
+    float renderFootMaturity =
+        (agent.componentFlags & componentMulticellularFlag) != 0u
+        ? saturate(cell.collectiveBoundary.z) : 0.0;
+    float renderedFootPad = 0.0;
+    float renderFootStance = 0.0;
+    if (triangleVertex != 0u && edgeExposure > 0.0 &&
+        renderFootMaturity > 0.001) {
+        float2 membraneDirection = membranePosition / max(
+            triangleVertex == 1u ? startRadius : endRadius, 0.000001
+        );
+        float2 componentBoundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
+            ? normalize(cell.tissueGeometry.xy) : membraneDirection;
+        float footSidePhase = componentBoundaryNormal.y >= 0.0 ? 0.0 : 0.5;
+        float renderFootCycle = fract(cell.collectiveBoundary.w + footSidePhase);
+        renderFootStance = smoothstep(0.04, 0.24, renderFootCycle) *
+            (1.0 - smoothstep(0.62, 0.94, renderFootCycle));
+        float2 renderFootDirection = normalize(
+            componentBoundaryNormal +
+            float2((renderFootCycle * 2.0 - 1.0) * 0.26, 0.0) +
+            componentBoundaryNormal * 0.0001
+        );
+        float footAlignment = saturate(dot(membraneDirection, renderFootDirection));
+        float focusedFootAlignment = footAlignment * footAlignment;
+        focusedFootAlignment *= focusedFootAlignment;
+        focusedFootAlignment *= focusedFootAlignment;
+        renderedFootPad = renderFootMaturity *
+            smoothstep(0.30, 0.76, abs(componentBoundaryNormal.y)) *
+            focusedFootAlignment;
+    }
     float constructedSurface = edgeExposure *
         saturate(cell.collectiveBoundary.x) *
         (0.34 + saturate(cell.collectiveBoundary.y) * 0.66) *
@@ -11192,6 +11248,7 @@ inline CellRasterData makeCellRasterData(
     output.edgeExposure = triangleVertex == 0u
         ? saturate(cell.tissueGeometry.z)
         : edgeExposure;
+    output.footState = float2(renderedFootPad, renderFootStance);
     float localIntegrity = triangleVertex == 0u
         ? saturate(cell.physiology.w) : saturate(localVertex.mechanics.y);
     float localPressure = triangleVertex == 0u
@@ -11342,6 +11399,12 @@ fragment float4 cellFragment(
 
         float2 surfaceDirection = length(p) > 0.001
             ? normalize(p) : float2(1.0, 0.0);
+        float2 footState = float2(
+            saturate(input.footState.x) * smoothstep(0.72, 0.98, radius),
+            saturate(input.footState.y)
+        );
+        float footPad = visibleMembrane * footState.x;
+        float footSole = footPad * smoothstep(0.88, 0.995, radius);
         float tractionMagnitude = saturate(length(input.tissueForce.xy) * 11000.0);
         float2 tractionDirection = tractionMagnitude > 0.001
             ? normalize(input.tissueForce.xy) : float2(1.0, 0.0);
@@ -11367,6 +11430,9 @@ fragment float4 cellFragment(
         color += float3(0.08, 1.0, 0.62) * repairFront * 0.92;
         color += float3(1.0, 0.055, 0.018) * woundArc * 0.82;
         color += float3(1.0, 0.30, 0.015) * membrane * localPressure * 0.62;
+        color = mix(color, float3(0.012, 0.085, 0.070), footPad * 0.62);
+        color += float3(0.08, 1.0, 0.56) * footSole *
+            (0.30 + footState.y * 0.62);
 
         float contactDamage = saturate(input.tissueForce.z * 1800.0);
         float trophicGain = saturate(max(input.tissueForce.w, 0.0) * 1800.0);
@@ -11460,6 +11526,12 @@ fragment float4 cellFragment(
     float pressureFront = membrane * localPressure;
     float leakage = exposedArc * localFailure *
         (0.72 + 0.28 * abs(dot(surfaceDirection, morphologyNormal)));
+    float2 footState = float2(
+        saturate(input.footState.x) * smoothstep(0.72, 0.98, radius),
+        saturate(input.footState.y)
+    );
+    float footPad = visibleMembrane * footState.x;
+    float footSole = footPad * smoothstep(0.86, 0.995, radius);
 
     float atp = saturate(input.physiology.x);
     float stress = saturate(input.signals.z);
@@ -11515,6 +11587,9 @@ fragment float4 cellFragment(
     color += float3(1.0, 0.055, 0.018) * woundArc * 0.72;
     color += float3(1.0, 0.30, 0.015) * pressureFront * 0.76;
     color += float3(1.0, 0.065, 0.018) * leakage * 1.18;
+    color = mix(color, float3(0.012, 0.085, 0.070), footPad * 0.66);
+    color += float3(0.08, 1.0, 0.56) * footSole *
+        (0.30 + footState.y * 0.66);
 
     float contactDamage = saturate(input.tissueForce.z * 1800.0);
     float trophicGain = saturate(max(input.tissueForce.w, 0.0) * 1800.0);
@@ -11612,6 +11687,12 @@ fragment float4 molecularCellFragment(CellRasterData input [[stage_in]]) {
         1.0 - membraneThickness * (1.42 + integumentCoverage * 0.72),
         0.992, radius
     ) * integumentCoverage * membraneContinuity;
+    float2 footState = float2(
+        saturate(input.footState.x) * smoothstep(0.72, 0.98, radius),
+        saturate(input.footState.y)
+    );
+    float footPad = visibleMembrane * footState.x;
+    float footSole = footPad * smoothstep(0.88, 0.995, radius);
 
     // Five simulated intracellular pools drive five stable molecular species.
     float atp = saturate(input.physiology.x);
@@ -11695,6 +11776,9 @@ fragment float4 molecularCellFragment(CellRasterData input [[stage_in]]) {
     color += float3(0.08, 1.0, 0.62) * membrane * paidRepair *
         saturate(1.0 - integrity) * 0.84;
     color += float3(1.0, 0.055, 0.018) * membrane * localFailure * 0.72;
+    color = mix(color, float3(0.012, 0.085, 0.070), footPad * 0.58);
+    color += float3(0.08, 1.0, 0.56) * footSole *
+        (0.24 + footState.y * 0.54);
     float alpha = body * input.visibility * 0.97;
     color *= input.visibility;
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
