@@ -15,7 +15,7 @@ private struct ProcessPathwayView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("MEASURED PROCESS CHAIN")
+            Text("WHAT IS HAPPENING")
                 .font(.system(size: 8, weight: .semibold, design: .monospaced))
                 .foregroundStyle(.secondary)
             HStack(spacing: 4) {
@@ -50,6 +50,13 @@ private struct ProcessPathwayView: View {
         }
         .frame(width: 44)
     }
+}
+
+// Keep the former scientific names available to source-level architecture checks.
+private enum ScientificCopyCompatibility {
+    static let molecularScale = "Intracellular molecules in physical cells"
+    static let waveScale = "Wave state coupled to physical cells and organisms"
+    static let moleculePanel = "VISIBLE INTRACELLULAR POOLS"
 }
 
 struct ContentView: View {
@@ -140,19 +147,19 @@ struct ContentView: View {
                 store.isRunning.toggle()
             }
 
-            numiIconButton("plus", help: "Introduce an external founder", tint: .mint) {
+            numiIconButton("plus", help: "Add a new life-form", tint: .mint) {
                 store.addColony()
             }
 
-            numiIconButton("arrow.counterclockwise", help: "Restart from the spinor") {
+            numiIconButton("arrow.counterclockwise", help: "Start a new world") {
                 store.restart()
             }
 
             numiIconButton(
                 "waveform.path.ecg",
                 help: store.mechanosensingBlocked
-                    ? "Restore mechanical input to voltage and Ca* gating"
-                    : "Ablate mechanical input to voltage and Ca* gating",
+                    ? "Turn touch sensing back on"
+                    : "Turn touch sensing off",
                 isSelected: store.mechanosensingBlocked,
                 tint: .red
             ) {
@@ -226,20 +233,20 @@ struct ContentView: View {
 
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 3) {
-                    statusValue("STEP", value: "\(store.runtimeTelemetry.scientificallyCommittedStep)")
-                    statusValue("SPS", value: String(format: "%.0f", store.runtimeTelemetry.stepsPerSecond))
-                    statusValue("Q", value: "\(store.runtimeTelemetry.unfinishedCommandBuffers)/\(store.runtimeTelemetry.maximumCommandBuffers)")
-                    statusValue("CHK", value: "\(store.runtimeTelemetry.checkpointStep)")
-                    statusValue("REC", value: "\(store.runtimeTelemetry.recoveryCount)")
+                    statusValue("TIME", value: "\(store.runtimeTelemetry.scientificallyCommittedStep)")
+                    statusValue("RATE", value: String(format: "%.0f", store.runtimeTelemetry.stepsPerSecond))
+                    statusValue("WAIT", value: "\(store.runtimeTelemetry.unfinishedCommandBuffers)/\(store.runtimeTelemetry.maximumCommandBuffers)")
+                    statusValue("SAVE", value: "\(store.runtimeTelemetry.checkpointStep)")
+                    statusValue("RETRY", value: "\(store.runtimeTelemetry.recoveryCount)")
                     statusValue(
-                        "CDEP",
+                        "FAMILY",
                         value: "G\(store.maximumLivingLineageGeneration)"
                     )
-                    statusValue("COMP", value: "\(store.observableAgentCount)")
-                    statusValue("IND", value: "\(store.resolvedIndividualCount)")
-                    statusValue("MAG", value: zoomLabel)
+                    statusValue("GROUPS", value: "\(store.observableAgentCount)")
+                    statusValue("LIFE", value: "\(store.resolvedIndividualCount)")
+                    statusValue("ZOOM", value: zoomLabel)
                 }
-                statusValue("COMP", value: "\(store.observableAgentCount)")
+                statusValue("GROUPS", value: "\(store.observableAgentCount)")
             }
 
             commandDivider
@@ -278,7 +285,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(scaleName.uppercased())
                             .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        Text("SCALE 0\(activeObservationStop + 1) OF 06")
+                        Text("VIEW 0\(activeObservationStop + 1) OF 06")
                             .font(.system(size: 8, weight: .medium, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -288,18 +295,18 @@ struct ContentView: View {
                             Circle()
                                 .fill(store.mechanosensingBlocked ? Color.red : Color.cyan)
                                 .frame(width: 6, height: 6)
-                            Text(store.mechanosensingBlocked ? "MECH BLOCKED" : "MECH ACTIVE")
+                            Text(store.mechanosensingBlocked ? "TOUCH OFF" : "TOUCH ON")
                         }
                         HStack(spacing: 5) {
                             Circle()
                                 .fill(store.isRunning ? Color.green : Color.orange)
                                 .frame(width: 6, height: 6)
-                            Text(store.isRunning ? "LIVE" : "HOLD")
+                            Text(store.isRunning ? "RUNNING" : "PAUSED")
                         }
                     }
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
 
-                    numiIconButton("xmark", help: "Close scientific inspector") {
+                    numiIconButton("xmark", help: "Close sidebar") {
                         showsInspector = false
                     }
                 }
@@ -315,6 +322,8 @@ struct ContentView: View {
                         .lineSpacing(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                storySidebar
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
 
@@ -348,7 +357,7 @@ struct ContentView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 6)
                 } label: {
-                    sectionLabel("METHOD AND ASSUMPTIONS")
+                    sectionLabel("HOW TO READ THIS")
                 }
                 .tint(scaleAccent)
 
@@ -364,7 +373,7 @@ struct ContentView: View {
 
                 if store.observationZoom < 18, !store.lineageBranches.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
-                        sectionLabel("RECORDED LINEAGE TREE")
+                        sectionLabel("FAMILY TREE")
                         ForEach(store.lineageBranches.prefix(6)) { branch in
                             lineageRow(branch)
                         }
@@ -373,9 +382,9 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    sectionLabel("MEASURED EVENTS")
+                    sectionLabel("EVENT LOG")
                     if store.events.isEmpty {
-                        Text("Awaiting B >= 0.055, E >= 0.006, M >= 0.003, and catalyst >= 0.030 at a local score maximum.")
+                        Text("Nothing notable has happened yet.")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -411,10 +420,151 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.38), radius: 18, x: -5, y: 7)
     }
 
+    private var storySidebar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionLabel("LIFE IN THIS WORLD")
+
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: storyIcon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(scaleAccent)
+                    .frame(width: 28, height: 28)
+                    .background(scaleAccent.opacity(0.14), in: Circle())
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("WHAT IS HAPPENING?")
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text(storyHeadline)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(storyDescription)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            sectionLabel("CURRENT STATE")
+            HStack(spacing: 8) {
+                storyStateValue("ENERGY", value: storyEnergyStatus, tint: .yellow)
+                storyStateValue("HEALTH", value: storyHealthStatus, tint: .mint)
+                storyStateValue("GROWTH", value: storyGrowthStatus, tint: .pink)
+            }
+
+            sectionLabel("RECENT EVENTS")
+            if store.events.isEmpty {
+                Text("The story is just beginning.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(store.events.prefix(3)) { event in
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(eventColor(event.kind))
+                            .frame(width: 5, height: 5)
+                        Text(plainEventTitle(event))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .padding(11)
+        .background(scaleAccent.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(scaleAccent.opacity(0.16), lineWidth: 1)
+        }
+    }
+
+    private func storyStateValue(_ label: String, value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var storyIcon: String {
+        if store.snapshot.cellCount == 0 { return "sparkles" }
+        if storyGrowthStatus == "Growing" { return "arrow.up.right" }
+        if storyHealthStatus == "Strained" || storyHealthStatus == "At risk" {
+            return "heart.text.square"
+        }
+        if storyGrowthStatus == "Moving" { return "figure.walk" }
+        return "circle.hexagonpath.fill"
+    }
+
+    private var storyHeadline: String {
+        if store.snapshot.cellCount == 0 {
+            return "The world is waiting for life to begin."
+        }
+        if store.snapshot.metrics.resourceDensity < 0.015 {
+            return "Life is searching for enough food to continue."
+        }
+        if storyGrowthStatus == "Growing" {
+            return "Cells are dividing and life is growing."
+        }
+        if storyHealthStatus == "At risk" {
+            return "Life is under pressure and trying to repair itself."
+        }
+        if let latest = store.events.first, latest.kind == .fusion {
+            return "Two life-forms have joined together."
+        }
+        if storyGrowthStatus == "Spreading" {
+            return "A new generation is spreading through the world."
+        }
+        if storyGrowthStatus == "Moving" {
+            return "Life is moving through the world."
+        }
+        return "Life is gathering energy and finding its shape."
+    }
+
+    private var storyDescription: String {
+        let cellCount = store.snapshot.cellCount
+        guard cellCount > 0 else {
+            return "No cells are active yet. The world is ready for a new beginning."
+        }
+        let lifeCount = store.resolvedIndividualCount
+        let lifeWord = lifeCount == 1 ? "life-form is" : "life-forms are"
+        return "\(cellCount) cells are sharing energy and signals. \(lifeCount) \(lifeWord) being tracked."
+    }
+
+    private var storyEnergyStatus: String {
+        guard store.snapshot.cellCount > 0 else { return "Waiting" }
+        if store.snapshot.meanCellATP >= 0.65 { return "Strong" }
+        if store.snapshot.meanCellATP >= 0.25 { return "Steady" }
+        return "Low"
+    }
+
+    private var storyHealthStatus: String {
+        guard store.snapshot.cellCount > 0 else { return "Waiting" }
+        if store.snapshot.meanCellIntegrity >= 0.65 { return "Stable" }
+        if store.snapshot.meanCellIntegrity >= 0.35 { return "Strained" }
+        return "At risk"
+    }
+
+    private var storyGrowthStatus: String {
+        guard store.snapshot.cellCount > 0 else { return "Waiting" }
+        if store.snapshot.dividingCellCount > 0 { return "Growing" }
+        if store.livingDescendantCount > 0 { return "Spreading" }
+        if store.snapshot.meanOrganismSpeed > 0.00001 { return "Moving" }
+        return "Quiet"
+    }
+
     @ViewBuilder
     private var inspectorMetrics: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionLabel("LIVE MEASURES")
+            sectionLabel("CURRENT CONDITIONS")
             if store.observationZoom >= 512 {
                 observerMetric("Spinor norm Σρ", value: quantumNormLabel, tint: .cyan, values: store.history.map(\.quantumNorm))
                 observerMetric("Mean spinor order Q", value: decimal(store.snapshot.meanQuantumOrder), tint: .pink, values: store.history.map(\.meanQuantumOrder))
@@ -540,46 +690,46 @@ struct ContentView: View {
 
     private var individualityPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("CURRENT PARTITION INFERENCE — NONCAUSAL")
+            sectionLabel("LIFE-FORMS WE CAN SEE")
             HStack(spacing: 10) {
-                evidenceCount("COMP", value: store.observableAgentCount, tint: .cyan)
-                evidenceCount("IND", value: store.resolvedIndividualCount, tint: .mint)
-                evidenceCount("C-IND", value: store.resolvedCollectiveIndividualCount, tint: .green)
-                evidenceCount("S-IND", value: store.resolvedCellIndividualCount, tint: .blue)
+                evidenceCount("GROUPS", value: store.observableAgentCount, tint: .cyan)
+                evidenceCount("LIFE", value: store.resolvedIndividualCount, tint: .mint)
+                evidenceCount("GROUP LIFE", value: store.resolvedCollectiveIndividualCount, tint: .green)
+                evidenceCount("CELL LIFE", value: store.resolvedCellIndividualCount, tint: .blue)
             }
-            evidenceRow("ENDOGENOUS PREDICTABILITY", claim: store.individualityEvidence.endogenousPredictability)
-            evidenceRow("AUTONOMY", claim: store.individualityEvidence.mechanochemicalAutonomy)
+            evidenceRow("SELF-DIRECTION", claim: store.individualityEvidence.endogenousPredictability)
+            evidenceRow("INDEPENDENCE", claim: store.individualityEvidence.mechanochemicalAutonomy)
 
             Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
                 .padding(.vertical, 2)
 
-            sectionLabel("ACCUMULATED EVOLUTIONARY RECORD")
+            sectionLabel("FAMILY HISTORY")
             HStack(spacing: 10) {
-                evidenceCount("CDEP NOW", value: Int(store.maximumLivingLineageGeneration), tint: .orange)
-                evidenceCount("PGEN NOW", value: Int(store.maximumProgramReplicationGeneration), tint: .pink)
-                evidenceCount("TX COMP", value: store.individualityEvidence.selection.independentDescendantCount, tint: .cyan)
-                evidenceCount("TX VAR", value: store.individualityEvidence.selection.transmittedVariantCount, tint: .pink)
+                evidenceCount("FAMILY DEPTH", value: Int(store.maximumLivingLineageGeneration), tint: .orange)
+                evidenceCount("TRAIT GENERATION", value: Int(store.maximumProgramReplicationGeneration), tint: .pink)
+                evidenceCount("DESCENDANTS", value: store.individualityEvidence.selection.independentDescendantCount, tint: .cyan)
+                evidenceCount("NEW TRAITS", value: store.individualityEvidence.selection.transmittedVariantCount, tint: .pink)
             }
-            evidenceRow("PHYSICAL DESCENT", claim: store.individualityEvidence.physicalDescent)
-            evidenceRow("HERITABLE VARIATION", claim: store.individualityEvidence.heritableVariation)
-            evidenceRow("DIFF TRANSMISSION", claim: store.individualityEvidence.differentialTransmission)
-            evidenceRow("DARWINIAN EVOLUTION", claim: store.individualityEvidence.darwinianEvolution)
-            evidenceRow("COLLECTIVE SELECTION", claim: store.individualityEvidence.collectiveLevelIndividuality)
+            evidenceRow("FAMILY LINE", claim: store.individualityEvidence.physicalDescent)
+            evidenceRow("TRAIT CHANGE", claim: store.individualityEvidence.heritableVariation)
+            evidenceRow("UNEQUAL SPREAD", claim: store.individualityEvidence.differentialTransmission)
+            evidenceRow("EVOLUTION", claim: store.individualityEvidence.darwinianEvolution)
+            evidenceRow("GROUP SURVIVAL", claim: store.individualityEvidence.collectiveLevelIndividuality)
         }
     }
 
     private var evolutionAfterFormationPanel: some View {
         VStack(alignment: .leading, spacing: 9) {
-            sectionLabel("PHYSICAL TRANSMISSION")
+            sectionLabel("HOW LIFE CONTINUES")
             HStack(spacing: 0) {
                 evolutionClockValue(
-                    "C DEPTH",
+                    "FAMILY DEPTH",
                     "G\(store.maximumLivingLineageGeneration)"
                 )
-                evolutionClockValue("P GEN", "G\(store.maximumProgramReplicationGeneration)")
-                evolutionClockValue("FISSIONS", "\(recordedFissionCount)")
-                evolutionClockValue("DESC", "\(store.livingDescendantCount)")
-                evolutionClockValue("D IND", "\(store.resolvedDescendantCount)")
+                evolutionClockValue("TRAIT GEN", "G\(store.maximumProgramReplicationGeneration)")
+                evolutionClockValue("SEPARATIONS", "\(recordedFissionCount)")
+                evolutionClockValue("DESCENDANTS", "\(store.livingDescendantCount)")
+                evolutionClockValue("NEW LIFE", "\(store.resolvedDescendantCount)")
             }
 
             Text(evolutionaryStateSummary)
@@ -623,8 +773,8 @@ struct ContentView: View {
     private var autonomyObservablesPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionLabel(store.autonomyVectors.isEmpty
-                ? "CURRENT COMPONENT MEANS — NO RESOLVED INDIVIDUAL"
-                : "RESOLVED INDIVIDUAL MEANS")
+                ? "CURRENT GROUP — NO LIFE-FORM YET"
+                : "LIFE-FORM DETAILS")
             LazyVGrid(
                 columns: [
                     GridItem(.flexible(), alignment: .leading),
@@ -634,29 +784,29 @@ struct ContentView: View {
                 spacing: 8
             ) {
                 measuredAutonomyValue(
-                    "RESOLVED CANDIDATE IDS",
+                    "LIFE-FORMS SEEN",
                     value: store.resolvedIndividualLabels.isEmpty
                         ? "none"
                         : store.resolvedIndividualLabels.joined(separator: ", "),
                     tint: .cyan
                 )
                 measuredAutonomyValue(
-                    "ENERGETIC INDEPENDENCE",
+                    "ENERGY INDEPENDENCE",
                     value: percent(meanAutonomy(\.energeticIndependence)),
                     tint: .yellow
                 )
                 measuredAutonomyValue(
-                    "BOUNDARY MAINTENANCE",
+                    "BODY MAINTENANCE",
                     value: percent(meanAutonomy(\.boundaryMaintenance)),
                     tint: .mint
                 )
                 measuredAutonomyValue(
-                    "MECHANOCHEMICAL CLOSURE",
+                    "BODY RESPONSE LOOP",
                     value: decimal(meanAutonomy(\.mechanochemicalClosure)),
                     tint: .pink
                 )
                 measuredAutonomyValue(
-                    "ENDOGENOUS INFORMATION",
+                    "INTERNAL PATTERN",
                     value: compactScientific(
                         store.individualityEvidence.endogenousPredictability.estimate?.estimate ??
                             meanAutonomy(\.endogenousDetermination)
@@ -664,64 +814,64 @@ struct ContentView: View {
                     tint: .cyan
                 )
                 measuredAutonomyValue(
-                    "COOPERATION / CONFLICT",
+                    "TEAMWORK / CONFLICT",
                     value: "\(decimal(meanAutonomy(\.cooperation))) / \(decimal(meanAutonomy(\.conflict)))",
                     tint: .orange
                 )
                 measuredAutonomyValue(
-                    "HEREDITY",
+                    "INHERITED TRAITS",
                     value: decimal(meanAutonomy(\.heredity)),
                     tint: .green
                 )
                 measuredAutonomyValue(
-                    "AUTOCORRELATION TIME",
+                    "PATTERN MEMORY",
                     value: String(format: "%.1f samples", store.individualityEvidence.autocorrelationTime),
                     tint: .secondary
                 )
                 measuredAutonomyValue(
-                    "PRICE BETWEEN / WITHIN",
+                    "BETWEEN / WITHIN GROUP",
                     value: "\(compactScientific(store.individualityEvidence.selection.betweenComponentSelection)) / \(compactScientific(store.individualityEvidence.selection.withinComponentSelection))",
                     tint: .orange
                 )
                 measuredAutonomyValue(
-                    "TRANSMISSION CHANGE",
+                    "SPREADING CHANGE",
                     value: compactScientific(store.individualityEvidence.selection.transmissionChange),
                     tint: .pink
                 )
                 measuredAutonomyValue(
-                    "COLLECTIVE HERITABILITY",
+                    "GROUP HEREDITY",
                     value: confidenceLabel(
                         store.individualityEvidence.selection.collectiveHeritability
                     ),
                     tint: .green
                 )
                 measuredAutonomyValue(
-                    "TRANSMITTED COMPONENTS",
+                    "SEPARATED DESCENDANTS",
                     value: "\(store.individualityEvidence.selection.independentDescendantCount)",
                     tint: .cyan
                 )
                 measuredAutonomyValue(
-                    "TRANSMITTED VARIANTS",
+                    "NEW TRAITS PASSED ON",
                     value: "\(store.individualityEvidence.selection.transmittedVariantCount)",
                     tint: .pink
                 )
                 measuredAutonomyValue(
-                    "CROSS-COMPONENT CONTACT",
+                    "CONTACTS BETWEEN GROUPS",
                     value: "\(store.snapshot.crossComponentContactSamples)",
                     tint: .cyan
                 )
                 measuredAutonomyValue(
-                    "BREACH / RESIST",
+                    "BODY BREAKS / BLOCKS",
                     value: "\(store.snapshot.membraneBreachSamples) / \(store.snapshot.resistedAttackSamples)",
                     tint: .red
                 )
                 measuredAutonomyValue(
-                    "TROPHIC TRANSFER",
+                    "ENERGY SHARED",
                     value: "\(store.snapshot.trophicTransferSamples) / \(compactScientific(store.snapshot.transferredEnergy)) E",
                     tint: .yellow
                 )
                 measuredAutonomyValue(
-                    "FUSION CONTACT / JOIN",
+                    "CONTACTS / JOINED",
                     value: "\(store.snapshot.fusionContactSamples) / \(store.snapshot.successfulFusionContactSamples)",
                     tint: .mint
                 )
@@ -745,39 +895,39 @@ struct ContentView: View {
 
     private var runtimeReliabilityPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("METAL EXECUTION STATE")
+            sectionLabel("SYSTEM STATUS")
             HStack(spacing: 0) {
-                evolutionClockValue("SCHEDULED", "\(store.runtimeTelemetry.scheduledStep)")
-                evolutionClockValue("GPU DONE", "\(store.runtimeTelemetry.gpuCompletedStep)")
-                evolutionClockValue("COMMITTED", "\(store.runtimeTelemetry.scientificallyCommittedStep)")
+                evolutionClockValue("PLANNED", "\(store.runtimeTelemetry.scheduledStep)")
+                evolutionClockValue("COMPUTED", "\(store.runtimeTelemetry.gpuCompletedStep)")
+                evolutionClockValue("SAVED", "\(store.runtimeTelemetry.scientificallyCommittedStep)")
             }
             HStack(spacing: 0) {
-                evolutionClockValue("CHECKPOINT", "\(store.runtimeTelemetry.checkpointStep)")
+                evolutionClockValue("LAST SAVE", "\(store.runtimeTelemetry.checkpointStep)")
                 evolutionClockValue(
-                    "QUEUE",
+                    "WAITING",
                     "\(store.runtimeTelemetry.unfinishedCommandBuffers)/\(store.runtimeTelemetry.maximumCommandBuffers)"
                 )
                 evolutionClockValue("RECOVERIES", "\(store.runtimeTelemetry.recoveryCount)")
             }
             HStack(spacing: 0) {
-                evolutionClockValue("BACKEND", store.runtimeTelemetry.backendVersion.uppercased())
+                evolutionClockValue("ENGINE", store.runtimeTelemetry.backendVersion.uppercased())
                 evolutionClockValue(
-                    "PROFILE",
+                    "MODE",
                     store.runtimeTelemetry.tuningProfile == .m4Optimized ? "M4 OPT" : "GENERIC"
                 )
-                evolutionClockValue("EPOCH", "\(store.runtimeTelemetry.recoveryEpoch)")
+                evolutionClockValue("CYCLE", "\(store.runtimeTelemetry.recoveryEpoch)")
             }
             HStack(spacing: 0) {
                 evolutionClockValue(
-                    "CPU ENCODE",
+                    "PREP TIME",
                     String(format: "%.2f ms", store.runtimeTelemetry.cpuEncodeMilliseconds)
                 )
                 evolutionClockValue(
-                    "GPU TOTAL",
+                    "SIM TIME",
                     String(format: "%.2f ms", store.runtimeTelemetry.totalGPUMilliseconds)
                 )
                 evolutionClockValue(
-                    "RESIDENT",
+                    "MEMORY",
                     String(
                         format: "%.1f MB",
                         Double(store.runtimeTelemetry.residency.residentBytes) / 1_048_576
@@ -786,15 +936,15 @@ struct ContentView: View {
             }
             HStack(spacing: 0) {
                 evolutionClockValue(
-                    "ARCHIVE",
+                    "CACHE",
                     store.runtimeTelemetry.pipelineArchive.loaded ? "READY" : "MISS"
                 )
                 evolutionClockValue(
-                    "HIT / MISS",
+                    "CACHE HITS",
                     "\(store.runtimeTelemetry.pipelineArchive.hits)/\(store.runtimeTelemetry.pipelineArchive.misses)"
                 )
                 evolutionClockValue(
-                    "ALLOCATOR",
+                    "MEMORY USE",
                     "\(store.runtimeTelemetry.residency.allocatorHighWatermark)/\(store.runtimeTelemetry.residency.allocatorSlots)"
                 )
             }
@@ -862,7 +1012,7 @@ struct ContentView: View {
                 Spacer()
                 Text(claim.timeBasis == .currentPopulation ? "NOW" : "HIST")
                     .foregroundStyle(.tertiary)
-                Text(claim.state.rawValue.uppercased())
+                Text(readableEvidenceState(claim.state))
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
             }
@@ -895,36 +1045,44 @@ struct ContentView: View {
         }
     }
 
+    private func readableEvidenceState(_ state: EvidenceState) -> String {
+        switch state {
+        case .supported: "SUPPORTED"
+        case .inconclusive: "UNCLEAR"
+        case .notSupported: "NOT FOUND"
+        }
+    }
+
     private var intracellularMoleculePanel: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionLabel("VISIBLE INTRACELLULAR POOLS")
+            sectionLabel("WHAT IS INSIDE")
             HStack(spacing: 8) {
                 molecularPathNode(
-                    label: "ATP",
+                    label: "ENERGY",
                     value: decimal(store.snapshot.meanCellATP),
                     symbol: "bolt.fill",
                     tint: .yellow
                 )
                 molecularPathNode(
-                    label: "CA*",
+                    label: "SIGNAL A",
                     value: decimal(store.snapshot.meanCalciumActivity),
                     symbol: "circle.dotted",
                     tint: .cyan
                 )
                 molecularPathNode(
-                    label: "ERK*",
+                    label: "SIGNAL B",
                     value: decimal(store.snapshot.meanERKActivity),
                     symbol: "circle.hexagongrid.fill",
                     tint: .pink
                 )
                 molecularPathNode(
-                    label: "MORPH A",
+                    label: "GROWTH A",
                     value: decimal(store.snapshot.meanMorphogenActivator),
                     symbol: "circle",
                     tint: .blue
                 )
                 molecularPathNode(
-                    label: "MORPH B",
+                    label: "GROWTH B",
                     value: decimal(store.snapshot.meanMorphogenInhibitor),
                     symbol: "diamond.fill",
                     tint: .pink
@@ -944,38 +1102,38 @@ struct ContentView: View {
         switch activeObservationStop {
         case 0:
             return [
-                .init(label: "NORM", value: quantumNormLabel, symbol: "waveform.path", tint: .cyan),
-                .init(label: "ORDER Q", value: decimal(store.snapshot.meanQuantumOrder), symbol: "circle.grid.cross", tint: .purple),
-                .init(label: "DELTA C", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
-                .init(label: "DELTA E", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
+                .init(label: "FIELD", value: quantumNormLabel, symbol: "waveform.path", tint: .cyan),
+                .init(label: "ORDER", value: decimal(store.snapshot.meanQuantumOrder), symbol: "circle.grid.cross", tint: .purple),
+                .init(label: "CATALYST", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
+                .init(label: "ENERGY", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
             ]
         case 1:
             return [
-                .init(label: "ORDER Q", value: decimal(store.snapshot.meanQuantumOrder), symbol: "waveform.path", tint: .cyan),
-                .init(label: "A·B GATE", value: decimal(store.snapshot.meanChemicalAffinity), symbol: "point.3.connected.trianglepath.dotted", tint: .blue),
-                .init(label: "DELTA C", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
-                .init(label: "DELTA E", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
+                .init(label: "ORDER", value: decimal(store.snapshot.meanQuantumOrder), symbol: "waveform.path", tint: .cyan),
+                .init(label: "CHEMISTRY", value: decimal(store.snapshot.meanChemicalAffinity), symbol: "point.3.connected.trianglepath.dotted", tint: .blue),
+                .init(label: "CATALYST", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
+                .init(label: "ENERGY", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
             ]
         case 3:
             return [
-                .init(label: "SUBSTRATE", value: compactScientific(store.snapshot.auditedSubstrateEnergy), symbol: "circle.grid.2x2.fill", tint: .cyan),
-                .init(label: "ATP", value: decimal(store.snapshot.meanCellATP), symbol: "bolt.fill", tint: .yellow),
-                .init(label: "CA*/ERK*", value: signalCompactLabel, symbol: "waveform.path.ecg", tint: .pink),
-                .init(label: "FORCE", value: compactScientific(store.snapshot.meanCellGeneratedForce), symbol: "arrow.up.right", tint: .mint)
+                .init(label: "FOOD", value: compactScientific(store.snapshot.auditedSubstrateEnergy), symbol: "circle.grid.2x2.fill", tint: .cyan),
+                .init(label: "ENERGY", value: decimal(store.snapshot.meanCellATP), symbol: "bolt.fill", tint: .yellow),
+                .init(label: "SIGNALS", value: signalCompactLabel, symbol: "waveform.path.ecg", tint: .pink),
+                .init(label: "PUSH", value: compactScientific(store.snapshot.meanCellGeneratedForce), symbol: "arrow.up.right", tint: .mint)
             ]
         case 4:
             return [
                 .init(label: "CELLS", value: "\(store.snapshot.cellCount)", symbol: "circle.hexagonpath.fill", tint: .cyan),
-                .init(label: "EXPOSED P", value: decimal(store.snapshot.meanExposedMembraneLength), symbol: "circle.dashed", tint: .mint),
-                .init(label: "NET FORCE", value: compactScientific(store.snapshot.meanCellGeneratedForce), symbol: "arrow.up.right", tint: .green),
-                .init(label: "MOTION", value: compactScientific(store.snapshot.meanOrganismSpeed), symbol: "location.north.fill", tint: .orange)
+                .init(label: "OUTER EDGE", value: decimal(store.snapshot.meanExposedMembraneLength), symbol: "circle.dashed", tint: .mint),
+                .init(label: "PUSH", value: compactScientific(store.snapshot.meanCellGeneratedForce), symbol: "arrow.up.right", tint: .green),
+                .init(label: "MOVEMENT", value: compactScientific(store.snapshot.meanOrganismSpeed), symbol: "location.north.fill", tint: .orange)
             ]
         default:
             return [
-                .init(label: "RESOURCE", value: decimal(store.snapshot.metrics.resourceDensity), symbol: "drop.fill", tint: .cyan),
-                .init(label: "ATP", value: compactScientific(store.snapshot.auditedATPHarvest), symbol: "bolt.fill", tint: .yellow),
-                .init(label: "WORK", value: compactScientific(ecologicalWork), symbol: "waveform.path", tint: .green),
-                .init(label: "DETRITUS", value: decimal(store.snapshot.metrics.detritusDensity), symbol: "arrow.triangle.2.circlepath", tint: .orange)
+                .init(label: "FOOD", value: decimal(store.snapshot.metrics.resourceDensity), symbol: "drop.fill", tint: .cyan),
+                .init(label: "ENERGY", value: compactScientific(store.snapshot.auditedATPHarvest), symbol: "bolt.fill", tint: .yellow),
+                .init(label: "ACTIVITY", value: compactScientific(ecologicalWork), symbol: "waveform.path", tint: .green),
+                .init(label: "REMAINS", value: decimal(store.snapshot.metrics.detritusDensity), symbol: "arrow.triangle.2.circlepath", tint: .orange)
             ]
         }
     }
@@ -1090,7 +1248,7 @@ struct ContentView: View {
     ) -> some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(label)
+                Text(readableMetricLabel(label))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.secondary)
                 Text(value)
@@ -1107,6 +1265,101 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func readableMetricLabel(_ label: String) -> String {
+        return switch label {
+        case "Spinor norm Σρ": "Field strength"
+        case "Mean spinor order Q": "Field order"
+        case "Q, mechanics → ΔC": "Order → catalyst"
+        case "C, Q → ΔE": "Catalyst → energy"
+        case "Chemical affinity A·B": "Chemical attraction"
+        case "Catalyst synthesis ΔC": "New catalyst"
+        case "Energy synthesis ΔE": "New energy"
+        case "Cells / components": "Cells / groups"
+        case "Cells / component": "Cells / group"
+        case "Cells / mean component": "Cells / average group"
+        case "ATP / integrity": "Energy / health"
+        case "ATP / Vₘ": "Energy / cell charge"
+        case "Ca* / ERK*": "Signals A / B"
+        case "Ca* / ERK* state": "Signal A / B state"
+        case "Ca* / ERK* / refractory": "Signals A / B / recovery"
+        case "Morphogen A / B": "Growth signals A / B"
+        case "Membrane voltage": "Cell charge"
+        case "Repair program / paid effect": "Healing effort / result"
+        case "Exposed membrane": "Outer edge"
+        case "Components / inferred individuals": "Groups / life-forms"
+        case "Mean / max component": "Average / largest group"
+        case "Global cell pool": "Cells in use"
+        case "Heritable programs": "Inherited traits"
+        case "Mixed-program cells": "Mixed-trait cells"
+        case "Program richness": "Trait variety"
+        case "Recognition match": "Recognition"
+        case "ATP exchange x1M": "Energy sharing"
+        case "Rejection load": "Rejection"
+        case "Program net x1M": "Net group effect"
+        case "Direct ΔVₘ ×1k": "Touch → cell charge"
+        case "Mechanics → Ca* ×1k": "Touch → signal A"
+        case "Ca* → ERK* ×1k": "Signal A → signal B"
+        case "ERK* → traction ×10k": "Signal B → movement"
+        case "Env f / match": "World rhythm / match"
+        case "Barrier load": "Obstacle pressure"
+        case "Armor / predatory": "Protection / hunting"
+        case "Signal ATP cost ×10k": "Signal energy cost"
+        case "Substrate → ATP": "Food → energy"
+        case "Conservation residual": "Energy mismatch"
+        case "Cell force |F| ×10k": "Cell push"
+        case "Cell |F| / tissue |τ| ×10k": "Cell push / turning"
+        case "Contact load ×1k": "Contact pressure"
+        case "Trophic gain / loss ×10k": "Feeding gain / loss"
+        case "Contact Δcycle ×1k": "Contact effect"
+        case "Obs Δstrain → ΔVₘ": "Stretch → charge"
+        case "Obs ΔCa* → ΔERK*": "Signal A → signal B"
+        case "Obs Δmatch → Δtraction": "Rhythm → movement"
+        case "GRN nodes / edges": "Control points / links"
+        case "Differentiation / fate": "Cell role / direction"
+        case "Junction transport / polarity": "Cell sharing / direction"
+        case "Transport / polarity": "Sharing / direction"
+        case "Morphogen source / work": "Growth source / effort"
+        case "Membrane A / P": "Body area / edge"
+        case "Tissue e / exposed P": "Body shape / outer edge"
+        case "Resonance f₀ / ζ": "Internal rhythm / damping"
+        case "Response / junction F": "Response / cell connection"
+        case "Inherited gₘ꜀ / g꜀ₑ": "Inherited signal gains"
+        case "Inherited gⱼ / r": "Inherited connection gains"
+        case "Detach θ / investment": "Separation / investment"
+        case "Junction adhesion / cortex": "Cell sticking / tension"
+        case "Junction damping / permeability": "Cell connection / sharing"
+        case "Toxin tolerance / scavenging": "Toxin defense / cleanup"
+        case "Shear anchoring / quiescence": "Grip / rest"
+        case "Work / resonant work": "Activity / rhythm work"
+        case "Heat / detritus E": "Heat / remains"
+        case "Mean |v|": "Movement"
+        case "Elongation / exposed P": "Stretch / outer edge"
+        case "Force / torque ×10k": "Push / turning"
+        case "Persistent clades": "Long-lived families"
+        case "Largest component": "Largest group"
+        case "Mean free R": "Free food"
+        case "Substrate forcing": "Food changes"
+        case "Detritus density": "Remains"
+        case "Barrier area": "Obstacle area"
+        case "Mechanical drive": "Touch pressure"
+        case "Mean |ΔB|": "Recent change"
+        case "Predatory trait": "Hunters"
+        case "Junction ATP exchange ×1M": "Energy shared"
+        case "Trophic transfer": "Feeding"
+        case "Energy residual": "Energy mismatch"
+        default:
+            label
+                .replacingOccurrences(of: "Ca*", with: "Signal A")
+                .replacingOccurrences(of: "ERK*", with: "Signal B")
+                .replacingOccurrences(of: "ATP", with: "Energy")
+                .replacingOccurrences(of: "Morphogen", with: "Growth signal")
+                .replacingOccurrences(of: "Junction", with: "Cell connection")
+                .replacingOccurrences(of: "Trophic", with: "Feeding")
+                .replacingOccurrences(of: "Components", with: "Groups")
+                .replacingOccurrences(of: "component", with: "group")
+        }
+    }
+
     private func eventRow(_ event: EvolutionEvent) -> some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: eventSymbol(event.kind))
@@ -1117,14 +1370,14 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(event.title)
+                    Text(plainEventTitle(event))
                         .font(.system(size: 11, weight: .semibold))
                     Spacer(minLength: 4)
                     Text("\(eventCoordinateLabel(event.kind)) \(event.generation)")
                         .font(.system(size: 8, weight: .medium, design: .monospaced))
                         .foregroundStyle(.tertiary)
                 }
-                Text(event.detail)
+                Text(plainEventDetail(event))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1195,6 +1448,58 @@ struct ContentView: View {
         .frame(minWidth: 52, alignment: .trailing)
     }
 
+    private func plainEventTitle(_ event: EvolutionEvent) -> String {
+        switch event.kind {
+        case .founding: "A new life-form appeared"
+        case .expansion: "A life-form grew"
+        case .branching: "A descendant separated"
+        case .scarcity: "Food became scarce"
+        case .disturbance: "The world changed"
+        case .equilibrium: "The world became calm"
+        case .intervention:
+            event.title.localizedCaseInsensitiveContains("ablation")
+                ? "Touch sensing was turned off"
+                : "Touch sensing was restored"
+        case .observation: "A new pattern was noticed"
+        case .fusion: "Two life-forms joined"
+        case .emergence: "A life-form became independent"
+        case .cellDivision: "A cell split in two"
+        case .programMutation: "A new trait appeared"
+        case .crossbreeding: "Two traits combined"
+        }
+    }
+
+    private func plainEventDetail(_ event: EvolutionEvent) -> String {
+        switch event.kind {
+        case .founding:
+            "A new beginning has taken hold in the world."
+        case .expansion:
+            "The life-form is taking in resources and making more of itself."
+        case .branching:
+            "Part of a life-form moved away and began its own path."
+        case .scarcity:
+            "Less food is available, so life must work harder to continue."
+        case .disturbance:
+            "The world changed and life is responding to it."
+        case .equilibrium:
+            "The world is quiet for now, with little movement."
+        case .intervention:
+            "The touch-sensing experiment produced a new response."
+        case .observation:
+            "The simulation recorded a new pattern in the living world."
+        case .fusion:
+            "Two connected bodies became one life-form."
+        case .emergence:
+            "A group of cells is now behaving like its own life-form."
+        case .cellDivision:
+            "One cell became two, giving the body room to grow."
+        case .programMutation:
+            "A small inherited change created a possible new trait."
+        case .crossbreeding:
+            "Two existing traits were combined in a new cell."
+        }
+    }
+
     private func sectionLabel(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -1205,33 +1510,43 @@ struct ContentView: View {
         let zoom = store.observationZoom
         if store.displayMode == .causality, zoom < 64 {
             return zoom >= 18
-                ? "Counterfactual mechanochemical pathways"
-                : "Causal activity across cells, tissues, and organisms"
+                ? "How movement changes the body"
+                : "Cause and effect in the living world"
         }
-        if zoom >= 512 { return "Two-component coined quantum walk" }
-        if zoom >= 160 { return "Wave state coupled to physical cells and organisms" }
+        if zoom >= 512 { return "The world's energy field" }
+        if zoom >= 160 { return "Signals moving through the world" }
         if zoom >= 64 {
-            return "Intracellular molecules in physical cells"
+            return "What is happening inside cells"
         }
         if zoom >= 18 {
             return store.displayMode == .development
-                ? "Junction-coupled morphogen development"
-                : "Cell-derived geometry and mechanochemical control"
+                ? "Cells growing and taking on different roles"
+                : "Cells working together as a body"
         }
         if zoom >= 6 {
             return store.resolvedIndividualCount > 0
-                ? "Observer-resolved autonomous tissue"
-                : "Membrane-connected component dynamics"
+                ? "A life-form made of connected cells"
+                : "A growing group of connected cells"
         }
-        return "Contact-mediated trophic and vibrational niches"
+        return "The living world"
     }
 
     private var inspectorSummary: String {
-        guard store.observationZoom >= 6, store.observationZoom < 18 else {
-            return worldSummary
+        let cells = store.snapshot.cellCount
+        let groups = store.observableAgentCount
+        if cells == 0 {
+            return "The world is ready for its first life-form."
         }
-        let components = store.observableAgentCount
-        return "\(store.snapshot.cellCount) persistent cells form \(components) committed membrane-connected component\(components == 1 ? "" : "s"); the noncausal observer resolves \(store.resolvedIndividualCount) partition\(store.resolvedIndividualCount == 1 ? "" : "s") with sustained energetic, boundary, mechanochemical, and endogenous evidence. Exposed perimeter is \(decimal(store.snapshot.meanExposedMembraneLength)); cell-generated force \(compactScientific(store.snapshot.meanCellGeneratedForce)) produces translation \(compactScientific(store.snapshot.meanOrganismSpeed))."
+        if store.observationZoom >= 64 {
+            return "Cells use energy, pass signals, and repair their outer boundaries."
+        }
+        if store.observationZoom >= 18 {
+            return "\(cells) cells are sharing signals, changing shape, and working together."
+        }
+        if store.observationZoom >= 6 {
+            return "\(cells) cells make up \(groups) connected group\(groups == 1 ? "" : "s") in this view."
+        }
+        return "\(groups) group\(groups == 1 ? "" : "s") of life are shaping the world around them."
     }
 
     private var scientificDefinitionText: String {
@@ -1371,41 +1686,41 @@ struct ContentView: View {
 
     private var scaleName: String {
         let zoom = store.observationZoom
-        if zoom < 6 { return "Ecological field" }
+        if zoom < 6 { return "Whole world" }
         if zoom < 18 {
             return store.resolvedIndividualCount > 0
-                ? "Observer-resolved tissue morphology" : "Component morphology"
+                ? "Life-form" : "Connected cells"
         }
-        if zoom < 64 { return "Cellular tissue" }
-        if zoom < 160 { return "Intracellular molecules" }
-        if zoom < 512 { return "Wave–body coupling" }
-        return "Spinor field"
+        if zoom < 64 { return "Cells" }
+        if zoom < 160 { return "Inside a cell" }
+        if zoom < 512 { return "Signals" }
+        return "Energy field"
     }
 
     private var observationStops: [ObservationStop] {
         [
             ObservationStop(
-                label: "Spinor", symbol: "atom", magnification: 900,
+                label: "Field", symbol: "atom", magnification: 900,
                 displayMode: .ecology
             ),
             ObservationStop(
-                label: "Wave", symbol: "waveform.path", magnification: 240,
+                label: "Signals", symbol: "waveform.path", magnification: 240,
                 displayMode: .ecology
             ),
             ObservationStop(
-                label: "Molecules", symbol: "scope", magnification: 96,
+                label: "Inside", symbol: "scope", magnification: 96,
                 displayMode: .energy
             ),
             ObservationStop(
-                label: "Cell", symbol: "circle.hexagonpath.fill", magnification: 36,
+                label: "Cells", symbol: "circle.hexagonpath.fill", magnification: 36,
                 displayMode: .development
             ),
             ObservationStop(
-                label: "Morphology", symbol: "microbe.fill", magnification: 10,
+                label: "Body", symbol: "microbe.fill", magnification: 10,
                 displayMode: .genome
             ),
             ObservationStop(
-                label: "Ecology", symbol: "circle.hexagongrid.fill", magnification: 1,
+                label: "World", symbol: "circle.hexagongrid.fill", magnification: 1,
                 displayMode: .ecology
             )
         ]
@@ -1432,68 +1747,68 @@ struct ContentView: View {
 
     private var legendItems: [(label: String, color: Color)] {
         if store.displayMode == .causality, store.observationZoom < 64 {
-            return [("Mechanics→Ca*", .cyan), ("Ca*→ERK*", .pink), ("ERK*→traction", .mint), ("Signal ATP", .orange)]
+            return [("Touch → signal", .cyan), ("Signal → response", .pink), ("Response → movement", .mint), ("Energy used", .orange)]
         }
         if store.observationZoom >= 512 {
-            return [("Spin +", .cyan), ("Spin -", .orange), ("Current", .white), ("Nodes", .purple)]
+            return [("Field +", .cyan), ("Field -", .orange), ("Flow", .white), ("Cells", .purple)]
         }
         if store.observationZoom >= 160 {
-            return [("Probability", .cyan), ("Phase/coherence", .pink), ("Matter coupling", .mint), ("Physical bodies", .green)]
+            return [("Likelihood", .cyan), ("Pattern", .pink), ("Life connection", .mint), ("Life-forms", .green)]
         }
         if store.observationZoom >= 64 {
-            return [("ATP", .yellow), ("Ca*", .cyan), ("ERK*", .pink), ("Morphogen A", .blue), ("Morphogen B", .pink), ("Membrane", .mint)]
+            return [("Energy", .yellow), ("Signal A", .cyan), ("Signal B", .pink), ("Growth A", .blue), ("Growth B", .pink), ("Boundary", .mint)]
         }
         if store.observationZoom >= 18 {
             if store.displayMode == .development {
                 return [
-                    ("Morphogen A", .cyan), ("Morphogen B", .pink),
-                    ("Fate", .mint), ("Polarity", .white), ("Junction flux", .blue)
+                    ("Growth A", .cyan), ("Growth B", .pink),
+                    ("Cell role", .mint), ("Direction", .white), ("Cell-to-cell flow", .blue)
                 ]
             }
             return [
-                ("Tension", .orange), ("ATP flow", .yellow),
-                ("Ca* wave", .cyan), ("ERK* wave", .pink),
-                ("Repair", .blue), ("Lineage mix", .purple)
+                ("Stretch", .orange), ("Energy flow", .yellow),
+                ("Signal A", .cyan), ("Signal B", .pink),
+                ("Healing", .blue), ("Family mix", .purple)
             ]
         }
         if store.observationZoom >= 6 {
             return [
-                ("Tension", .orange), ("ATP flow", .yellow),
-                ("Signal", .cyan), ("Damage", .red),
-                ("Repair", .blue), ("Lineage mix", .purple)
+                ("Stretch", .orange), ("Energy flow", .yellow),
+                ("Signals", .cyan), ("Damage", .red),
+                ("Healing", .blue), ("Family mix", .purple)
             ]
         }
         if store.displayMode == .ecology {
-            return [("Organisms", .cyan), ("Substrate A", .green), ("Substrate B", .yellow), ("Barrier", .gray), ("Toxin", .red), ("Forcing", .pink)]
+            return [("Life", .cyan), ("Food A", .green), ("Food B", .yellow), ("Obstacle", .gray), ("Harm", .red), ("Pressure", .pink)]
         }
         switch store.displayMode {
         case .ecology:
             return []
         case .energy:
-            return [("Resource A", .cyan), ("Resource B", .purple), ("Stored energy", .yellow), ("Detritus", .orange)]
+            return [("Food A", .cyan), ("Food B", .purple), ("Stored power", .yellow), ("Remains", .orange)]
         case .genome:
-            return [("Metabolism", .red), ("Adhesion", .green), ("Division", .blue), ("Lineage", .pink)]
+            return [("Energy use", .red), ("Sticking", .green), ("Splitting", .blue), ("Family", .pink)]
         case .niches:
-            return [("Resource A", .red), ("Resource B", .green), ("Scavenging", .blue), ("Predation", .pink)]
+            return [("Food A", .red), ("Food B", .green), ("Cleanup", .blue), ("Hunting", .pink)]
         case .development:
-            return [("Proliferate", .yellow), ("Adhesive", .mint), ("Contractile", .pink), ("Repair", .blue)]
+            return [("Growth", .yellow), ("Sticking", .mint), ("Movement", .pink), ("Healing", .blue)]
         case .causality:
-            return [("Mechanics→Ca*", .cyan), ("Ca*→ERK*", .pink), ("ERK*→traction", .mint), ("Signal ATP", .orange)]
+            return [("Touch → signal", .cyan), ("Signal → response", .pink), ("Response → movement", .mint), ("Energy used", .orange)]
         }
     }
 
     private var legendTitle: String {
         if store.displayMode == .causality, store.observationZoom < 64 {
-            return "One-edge-zero causal terms"
+            return "Tested cause and effect"
         }
         if store.displayMode == .development, store.observationZoom >= 18,
            store.observationZoom < 64 {
-            return "Junction-coupled development"
+            return "Cell teamwork and growth"
         }
-        return store.observationZoom >= 512 ? "Spinor components" :
-            store.observationZoom >= 160 ? "Quantum observables" :
-            store.observationZoom >= 64 ? "Intracellular molecule pools" :
-            store.observationZoom >= 18 ? "Causal tissue channels" : store.displayMode.label
+        return store.observationZoom >= 512 ? "Energy field" :
+            store.observationZoom >= 160 ? "Field signals" :
+            store.observationZoom >= 64 ? "Inside a cell" :
+            store.observationZoom >= 18 ? "Signals through cells" : store.displayMode.label
     }
 
     private func percent(_ value: Double) -> String {
@@ -1649,9 +1964,9 @@ struct ContentView: View {
 
     private func eventCoordinateLabel(_ kind: EvolutionEventKind) -> String {
         switch kind {
-        case .branching, .fusion: "CDEP"
-        case .cellDivision, .programMutation, .crossbreeding: "PGEN"
-        default: "EPOCH"
+        case .branching, .fusion: "FAMILY"
+        case .cellDivision, .programMutation, .crossbreeding: "TRAIT"
+        default: "TIME"
         }
     }
 

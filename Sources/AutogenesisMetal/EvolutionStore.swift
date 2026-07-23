@@ -15,12 +15,12 @@ enum FieldDisplayMode: UInt32, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .ecology: "State fields"
-        case .energy: "Resource / energy"
-        case .genome: "Trait vectors"
-        case .niches: "Resource-use traits"
-        case .development: "Morphogen development"
-        case .causality: "Causal terms"
+        case .ecology: "World"
+        case .energy: "Energy"
+        case .genome: "Traits"
+        case .niches: "Needs"
+        case .development: "Growth"
+        case .causality: "Cause and effect"
         }
     }
 
