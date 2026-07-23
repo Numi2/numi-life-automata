@@ -595,6 +595,30 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func denseCellularSurfaceUsesFourSamplesAndQuadDerivedGradients() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(of: "fragment float4 cellularSurfaceFragment"))
+        let end = try #require(shader.range(
+            of: "fragment float4 worldFragment",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let fragment = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(fragment.components(separatedBy: ".sample(").count - 1 == 4)
+        #expect(fragment.contains("dfdx(localMechanical.xy)"))
+        #expect(fragment.contains("dfdy(localMechanical.xy)"))
+        #expect(fragment.contains("dfdx(localState.y)"))
+        #expect(fragment.contains("dfdy(localState.y)"))
+        #expect(fragment.contains("localMechanical.zw / waveMagnitude"))
+        #expect(!fragment.contains("mechanicalRight"))
+        #expect(!fragment.contains("biomassRight"))
+        #expect(!fragment.contains("float2(cos(waveAngle), sin(waveAngle))"))
+    }
+
+    @Test
     func renderPathCullsOffscreenCellsBeforeRasterization() throws {
         let shader = try String(
             contentsOf: repositoryRoot

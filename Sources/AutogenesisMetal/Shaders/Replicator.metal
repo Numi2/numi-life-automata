@@ -12082,32 +12082,43 @@ fragment float4 cellularSurfaceFragment(
     constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
     float safeAspect = max(uniforms.viewportAspect, 0.001);
     float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
-    float2 uv = clamp(
-        uniforms.cameraCenter + (input.uv - 0.5) * viewScale /
-            max(uniforms.cameraZoom, 0.000000001),
-        0.0, 1.0
-    );
+    float2 rawUV = uniforms.cameraCenter + (input.uv - 0.5) * viewScale /
+        max(uniforms.cameraZoom, 0.000000001);
+    float2 uv = clamp(rawUV, 0.0, 1.0);
     float2 texel = 1.0 / float2(uniforms.width, uniforms.height);
     float4 localState = state.sample(fieldSampler, uv, 0);
     float4 localEcology = ecology.sample(fieldSampler, uv, 0);
     float4 localEnvironment = environment.sample(fieldSampler, uv, 0);
     float4 localMechanical = mechanicalField.sample(fieldSampler, uv, 0);
-    float4 mechanicalRight = mechanicalField.sample(fieldSampler, uv + float2(texel.x, 0.0), 0);
-    float4 mechanicalUp = mechanicalField.sample(fieldSampler, uv + float2(0.0, texel.y), 0);
+    // Linear texture sampling makes the local field slope available from the
+    // fragment quad. Scale that slope to one simulation texel so the diagnostic
+    // retains its original units without four additional texture reads.
+    float2 quadUVStep = float2(
+        max(length(dfdx(rawUV)), 0.000000001),
+        max(length(dfdy(rawUV)), 0.000000001)
+    );
+    float2 texelDerivativeScale = min(texel / quadUVStep, float2(4096.0));
+    float2 mechanicalTexelXDelta =
+        dfdx(localMechanical.xy) * texelDerivativeScale.x;
+    float2 mechanicalTexelYDelta =
+        dfdy(localMechanical.xy) * texelDerivativeScale.y;
     float2 displacementGradient = float2(
-        length(mechanicalRight.xy - localMechanical.xy),
-        length(mechanicalUp.xy - localMechanical.xy)
+        length(mechanicalTexelXDelta),
+        length(mechanicalTexelYDelta)
     );
     float mechanicalStrain = saturate(length(displacementGradient) * 28.0);
-    float waveSpeed = saturate(length(localMechanical.zw) * 92.0);
+    float waveMagnitude = length(localMechanical.zw);
+    float waveSpeed = saturate(waveMagnitude * 92.0);
     float waveAngle = atan2(localMechanical.w, localMechanical.z);
-    float2 waveDirection = float2(cos(waveAngle), sin(waveAngle));
+    float2 waveDirection = waveMagnitude > 0.0000001
+        ? localMechanical.zw / waveMagnitude : float2(1.0, 0.0);
     float waveCoordinate = dot(uv * float2(uniforms.width, uniforms.height), waveDirection) * 0.18 -
         float(uniforms.step) * 0.020;
     float waveFront = 1.0 - smoothstep(0.035, 0.14, abs(fract(waveCoordinate) - 0.5));
-    float biomassRight = state.sample(fieldSampler, uv + float2(texel.x, 0.0), 0).y;
-    float biomassUp = state.sample(fieldSampler, uv + float2(0.0, texel.y), 0).y;
-    float2 biomassGradient = float2(biomassRight - localState.y, biomassUp - localState.y);
+    float2 biomassGradient = float2(
+        dfdx(localState.y) * texelDerivativeScale.x,
+        dfdy(localState.y) * texelDerivativeScale.y
+    );
     float matrixStrain = saturate(length(biomassGradient) * 9.0);
     float potential = saturate((localState.x + localEcology.x * 0.8 + localState.y * 2.2 +
         localState.w * 3.0 + localEcology.z * 1.4) * 0.42);
