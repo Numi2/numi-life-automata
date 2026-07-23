@@ -548,7 +548,7 @@ final class EvolutionStore: ObservableObject {
             "NUMI_INITIAL_MAGNIFICATION"
         ], let magnification = Double(rawMagnification), magnification.isFinite else { return }
         cameraZoom = min(max(magnification, 0.000_001), 1.0e24)
-        autoFollowInitialObservation = magnification >= 6 && magnification < 64
+        autoFollowInitialObservation = magnification >= 6 && magnification < 512
         displayMode = magnification >= 64 && magnification < 160 ? .energy :
             (magnification >= 18 && magnification < 64 ? .development :
                 (magnification >= 6 && magnification < 18 ? .genome : .ecology))
@@ -704,6 +704,19 @@ final class EvolutionStore: ObservableObject {
     func followRandomOrganism() {
         guard let agent = observedAgents.randomElement() else { return }
         follow(agent)
+    }
+
+    func ensureLivingFocus() {
+        guard followedAgentID == nil else { return }
+        guard let nearest = observedAgents.min(by: {
+            simd_distance_squared($0.position, cameraCenter) <
+                simd_distance_squared($1.position, cameraCenter)
+        }) else {
+            autoFollowInitialObservation = true
+            return
+        }
+        autoFollowInitialObservation = false
+        follow(nearest)
     }
 
     func followAdjacentOrganism(direction: Int) {

@@ -10303,7 +10303,7 @@ kernel void compactVisibleCells(
     if (owner >= maxAgentCount ||
         atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (observationZoom <= 0.35 || observationZoom >= 160.0) { return; }
+    if (observationZoom <= 0.35 || observationZoom >= 512.0) { return; }
     if (uniforms.trackedAgentID != 0xffffffffu &&
         uniforms.trackedAgentID != owner && observationZoom >= 34.0) { return; }
 
@@ -10319,7 +10319,9 @@ kernel void compactVisibleCells(
     if (any(screenUV < -margin) || any(screenUV > 1.0 + margin)) { return; }
 
     uint target = atomic_fetch_add_explicit(&drawArguments[1], 1u, memory_order_relaxed);
-    atomic_fetch_add_explicit(&meshDispatchArguments[0], 1u, memory_order_relaxed);
+    if (observationZoom < 64.0) {
+        atomic_fetch_add_explicit(&meshDispatchArguments[0], 1u, memory_order_relaxed);
+    }
     if (target < maxCellCount) {
         visibleCellIndices[target] = gid;
     }
@@ -10394,6 +10396,7 @@ kernel void finalizeRenderDrawArguments(
     device atomic_uint* cellDrawArguments [[buffer(0)]],
     device atomic_uint* meshDispatchArguments [[buffer(1)]],
     device atomic_uint* junctionDrawArguments [[buffer(2)]],
+    constant SimulationUniforms& uniforms [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid != 0u) { return; }
@@ -10409,9 +10412,10 @@ kernel void finalizeRenderDrawArguments(
         atomic_load_explicit(&junctionDrawArguments[1], memory_order_relaxed),
         cellJunctionCapacity
     );
-    atomic_store_explicit(
-        &cellDrawArguments[0], membraneRenderSegmentCount * 3u, memory_order_relaxed
-    );
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    uint cellVertexCount = observationZoom >= 160.0
+        ? membraneVertexCount * 6u : membraneRenderSegmentCount * 3u;
+    atomic_store_explicit(&cellDrawArguments[0], cellVertexCount, memory_order_relaxed);
     atomic_store_explicit(&cellDrawArguments[1], cellCount, memory_order_relaxed);
     atomic_store_explicit(&cellDrawArguments[2], 0u, memory_order_relaxed);
     atomic_store_explicit(&cellDrawArguments[3], 0u, memory_order_relaxed);
@@ -11476,6 +11480,119 @@ fragment float4 molecularCellFragment(CellRasterData input [[stage_in]]) {
     return float4(clamp(color, 0.0, 16.0), saturate(alpha));
 }
 
+struct WaveCellRasterData {
+    float4 position [[position]];
+    float across;
+    float lineageHue;
+    float integrity;
+    float activity;
+    float visibility;
+};
+
+vertex WaveCellRasterData waveCellVertex(
+    device const AgentState* agents [[buffer(0)]],
+    device const uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const uint* cellOccupancy [[buffer(3)]],
+    device const MembraneVertex* membraneVertices [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device const uint* visibleCellIndices [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]]
+) {
+    WaveCellRasterData output = {};
+    output.position = float4(3.0, 3.0, 0.0, 1.0);
+    if (instanceID >= maxCellCount || vertexID >= membraneVertexCount * 6u) {
+        return output;
+    }
+
+    uint edge = vertexID / 6u;
+    if (edge >= membraneVertexCount) { return output; }
+    uint cellIndex = visibleCellIndices[instanceID];
+    if (cellIndex >= maxCellCount) { return output; }
+    uint owner = cellIdentities[cellIndex].owner;
+    if (owner >= maxAgentCount || agentOccupancy[owner] == 0u ||
+        cellOccupancy[cellIndex] != cellOccupancyAlive) { return output; }
+
+    uint membraneBase = cellIndex * membraneVertexCount;
+    uint nextEdge = (edge + 1u) % membraneVertexCount;
+    float2 membraneStart = membraneVertices[membraneBase + edge].position;
+    float2 membraneEnd = membraneVertices[membraneBase + nextEdge].position;
+    CellState cell = cells[cellIndex];
+    AgentState agent = agents[owner];
+    float2 center = cellWorldPosition(agent, cell.position, uniforms);
+    float edgeLength = length(membraneEnd - membraneStart);
+    float signedArea = membraneStart.x * membraneEnd.y -
+        membraneStart.y * membraneEnd.x;
+    bool finiteGeometry = all(isfinite(center)) &&
+        all(isfinite(membraneStart)) && all(isfinite(membraneEnd)) &&
+        all(center >= float2(-0.05)) && all(center <= float2(1.05)) &&
+        length(membraneStart) >= 0.025 && length(membraneEnd) >= 0.025 &&
+        length(membraneStart) <= 0.30 && length(membraneEnd) <= 0.30 &&
+        edgeLength <= 0.16 && signedArea > 0.0000001;
+    if (!finiteGeometry) { return output; }
+
+    float2 heading = tissueHeading(agent);
+    float2 lateral = float2(-heading.y, heading.x);
+    float worldScale = cellWorldScale(uniforms);
+    float2 worldStart = center + worldScale *
+        (heading * membraneStart.x + lateral * membraneStart.y);
+    float2 worldEnd = center + worldScale *
+        (heading * membraneEnd.x + lateral * membraneEnd.y);
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0
+        ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float cameraZoom = max(uniforms.cameraZoom, 0.000000001);
+    float2 screenStart = 0.5 + (worldStart - uniforms.cameraCenter) *
+        cameraZoom / viewScale;
+    float2 screenEnd = 0.5 + (worldEnd - uniforms.cameraCenter) *
+        cameraZoom / viewScale;
+    float2 screenEdge = screenEnd - screenStart;
+    float screenLength = length(screenEdge);
+    if (!all(isfinite(heading)) || !all(isfinite(screenStart)) ||
+        !all(isfinite(screenEnd)) || screenLength <= 0.000001) { return output; }
+
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    uint corner = vertexID % 6u;
+    bool usesEnd = corner == 1u || corner == 4u || corner == 5u;
+    float side = (corner == 0u || corner == 1u || corner == 4u) ? -1.0 : 1.0;
+    float2 screenNormal = float2(-screenEdge.y, screenEdge.x) / screenLength;
+    float2 screenUV = (usesEnd ? screenEnd : screenStart) +
+        screenNormal * side * 0.00145;
+    output.position = float4(
+        screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0
+    );
+    output.across = side;
+    output.lineageHue = agent.geneB.w;
+    output.integrity = saturate(membraneVertices[
+        membraneBase + (usesEnd ? nextEdge : edge)
+    ].mechanics.y);
+    output.activity = saturate(
+        cell.physiology.x * 0.55 + cell.signaling.x * 0.24 +
+        cell.signaling.y * 0.21
+    );
+    output.visibility = smoothstep(145.0, 175.0, observationZoom) *
+        (1.0 - smoothstep(450.0, 512.0, observationZoom));
+    return output;
+}
+
+fragment float4 waveCellFragment(WaveCellRasterData input [[stage_in]]) {
+    if (input.visibility <= 0.001) { discard_fragment(); }
+    float aa = max(fwidth(input.across) * 1.2, 0.015);
+    float coverage = 1.0 - smoothstep(0.70 - aa, 1.0, abs(input.across));
+    float integrity = saturate(input.integrity);
+    float3 lineage = hsvToRGB(float3(input.lineageHue, 0.62, 0.48));
+    float3 membraneColor = mix(
+        float3(1.0, 0.10, 0.025), float3(0.05, 1.0, 0.66), integrity
+    );
+    float3 color = mix(lineage, membraneColor, 0.74) *
+        (0.36 + input.activity * 0.24);
+    float alpha = input.visibility * coverage * (0.26 + input.activity * 0.14);
+    if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
+    return float4(color, saturate(alpha));
+}
+
 inline float2 scientificViewUV(
     RasterData input,
     constant SimulationUniforms& uniforms
@@ -11500,57 +11617,58 @@ inline float3 waveSurfaceColor(
     constexpr sampler quantumSampler(coord::normalized, address::repeat, filter::linear);
     constexpr sampler fieldSampler(coord::normalized, address::clamp_to_edge, filter::linear);
     float2 uv = scientificViewUV(input, uniforms);
-    float2 texel = 1.0 / float(quantumGridSize);
     float4 wave = quantum.sample(quantumSampler, uv);
-    float4 waveRight = quantum.sample(quantumSampler, uv + float2(texel.x, 0.0));
-    float4 waveUp = quantum.sample(quantumSampler, uv + float2(0.0, texel.y));
-    float4 waveDiagonal = quantum.sample(quantumSampler, uv + texel);
     float probabilityA = dot(wave.xy, wave.xy);
     float probabilityB = dot(wave.zw, wave.zw);
     float probability = probabilityA + probabilityB;
-    float density = 1.0 - exp(-probability * 285000.0);
+    float scaledProbability = probability * 285000.0;
+    float density = scaledProbability / (1.0 + scaledProbability);
     float polarization = (probabilityA - probabilityB) /
         max(probability, 0.0000000001);
-    float2 current = float2(
-        complexCurrent(wave.xy, waveRight.xy) + complexCurrent(wave.zw, waveRight.zw),
-        complexCurrent(wave.xy, waveUp.xy) + complexCurrent(wave.zw, waveUp.zw)
-    );
-    float currentStrength = saturate(length(current) * 950000.0);
-    float phase = spinorPhase(wave);
-    float phaseRight = spinorPhase(waveRight);
-    float phaseUp = spinorPhase(waveUp);
-    float phaseDiagonal = spinorPhase(waveDiagonal);
-    float phaseWinding = abs(
-        wrappedPhaseDelta(phase, phaseRight) +
-        wrappedPhaseDelta(phaseRight, phaseDiagonal) +
-        wrappedPhaseDelta(phaseDiagonal, phaseUp) +
-        wrappedPhaseDelta(phaseUp, phase)
+    float2 combinedAmplitude = wave.xy + wave.zw;
+    float inverseAmplitude = rsqrt(max(dot(combinedAmplitude, combinedAmplitude), 0.0000000001));
+    float2 phaseDirection = combinedAmplitude * inverseAmplitude;
+    float3 phaseCycle = saturate(0.5 + 0.5 * float3(
+        phaseDirection.x,
+        -0.5 * phaseDirection.x + 0.8660254 * phaseDirection.y,
+        -0.5 * phaseDirection.x - 0.8660254 * phaseDirection.y
+    ));
+    float3 phaseColor = mix(float3(0.025, 0.075, 0.14), phaseCycle, 0.82);
+    float overlapSquared = 4.0 * probabilityA * probabilityB /
+        max(probability * probability, 0.0000000001);
+    float phaseAlignment = saturate(0.5 + 0.5 * dot(wave.xy, wave.zw) *
+        rsqrt(max(probabilityA * probabilityB, 0.0000000001)));
+    float coherence = saturate(overlapSquared * phaseAlignment);
+    float densityEdge = saturate(length(float2(dfdx(density), dfdy(density))) * 18.0);
+    float phaseShear = saturate(
+        length(dfdx(phaseDirection)) + length(dfdy(phaseDirection))
     );
     float3 spinColor = mix(
         float3(1.0, 0.22, 0.025), float3(0.02, 0.82, 1.0),
         polarization * 0.5 + 0.5
     );
-    float3 color = mix(quantumPhaseColor(phase), spinColor, 0.38) *
-        density * (0.58 + currentStrength * 0.42);
-    float vortexCore = smoothstep(0.55, 0.92, phaseWinding) *
-        (1.0 - smoothstep(0.025, 0.28, density));
-    color += float3(0.82, 0.97, 1.0) * currentStrength * density * 0.26;
-    color += float3(0.72, 0.88, 1.0) * vortexCore * 1.32;
+    float3 color = float3(0.0015, 0.0030, 0.0065);
+    color += mix(phaseColor, spinColor, 0.34) * density *
+        (0.42 + coherence * 0.58);
+    color += float3(0.72, 0.94, 1.0) * density *
+        (densityEdge * 0.28 + phaseShear * coherence * 0.12);
 
-    // This is the exact prepared coupling consumed by the spinor update. One sample
-    // replaces three biological-field reads and duplicate potential/coin equations.
+    // This is the exact prepared coupling consumed by the spinor update. The display
+    // samples it directly instead of reconstructing biological terms per pixel.
     float4 preparedCoupling = coupling.sample(fieldSampler, uv);
     float potentialRadiance = saturate(abs(preparedCoupling.w) * 46.0);
     float coinPerturbation = saturate((preparedCoupling.y - 0.1790) * 4.8);
     float couplingEdge = saturate(length(float2(
         dfdx(preparedCoupling.w), dfdy(preparedCoupling.w)
-    )) * 160.0);
+    )) * 120.0);
     float3 couplingColor = mix(
         float3(0.08, 1.0, 0.62), float3(1.0, 0.42, 0.025), coinPerturbation
     );
-    color *= 1.0 - potentialRadiance * 0.10;
-    color += couplingColor * potentialRadiance * (0.16 + couplingEdge * 0.34);
-    return max(color * 1.16, 0.0);
+    color *= 1.0 - potentialRadiance * 0.08;
+    color += couplingColor * (
+        potentialRadiance * (0.12 + coherence * 0.08) + couplingEdge * 0.24
+    );
+    return max(color * 1.10, 0.0);
 }
 
 inline float3 spinorSurfaceColor(

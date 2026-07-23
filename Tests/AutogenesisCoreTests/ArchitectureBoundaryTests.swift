@@ -648,7 +648,7 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func deepScalesBypassHDRAndMolecularUsesCellOnlyOverlay() throws {
+    func deepScalesBypassHDRAndPreserveSparsePhysicalContext() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
@@ -679,6 +679,8 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("fragment float4 molecularDisplayFragment"))
         #expect(shader.contains("fragment float4 molecularCellFragment"))
         #expect(shader.contains("fragment float4 waveDisplayFragment"))
+        #expect(shader.contains("vertex WaveCellRasterData waveCellVertex"))
+        #expect(shader.contains("fragment float4 waveCellFragment"))
         #expect(shader.contains("fragment float4 spinorDisplayFragment"))
         #expect(!shader.contains("molecularSurfaceFragment"))
         #expect(!shader.contains("waveSurfaceFragment"))
@@ -690,8 +692,14 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("float erk = saturate(input.signaling.y)"))
         #expect(renderer.contains("includeJunctions: false"))
         #expect(renderer.contains("molecularCellRenderPipeline"))
+        #expect(renderer.contains("waveCellRenderPipeline"))
+        #expect(renderer.contains("if renderScale == 3 || renderScale == 4"))
         #expect(!renderer.contains("molecularCellMeshRenderPipeline"))
         #expect(contentView.contains("Intracellular molecules in physical cells"))
+        #expect(contentView.contains("Wave state coupled to physical cells and organisms"))
+        #expect(contentView.contains("if (1...4).contains(index), store.followedAgentID == nil"))
+        #expect(contentView.contains("store.ensureLivingFocus()"))
+        #expect(renderer.contains("renderScale == 3 || renderScale == 4"))
         #expect(contentView.contains("VISIBLE INTRACELLULAR POOLS"))
         #expect(!contentView.contains("MEASURED REACTION PATH"))
         #expect(!contentView.contains("Reaction pools and flux"))
@@ -699,6 +707,33 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("return finiteHDRColor(color, 1.08);"))
         #expect(shader.contains("return finiteHDRColor(color, contextExposure);"))
         #expect(!shader.contains("kernel void blurBloom"))
+
+        let waveStart = try #require(shader.range(of: "inline float3 waveSurfaceColor"))
+        let spinorStart = try #require(shader.range(
+            of: "inline float3 spinorSurfaceColor",
+            range: waveStart.upperBound..<shader.endIndex
+        ))
+        let waveShader = String(shader[waveStart.lowerBound..<spinorStart.lowerBound])
+        #expect(waveShader.components(separatedBy: "quantum.sample").count - 1 == 1)
+        #expect(waveShader.components(separatedBy: "coupling.sample").count - 1 == 1)
+        #expect(!waveShader.contains("waveRight"))
+        #expect(!waveShader.contains("waveUp"))
+        #expect(!waveShader.contains("waveDiagonal"))
+        #expect(!waveShader.contains("phaseWinding"))
+        #expect(!waveShader.contains("wrappedPhaseDelta"))
+
+        let waveCellStart = try #require(shader.range(of: "vertex WaveCellRasterData waveCellVertex"))
+        let waveCellEnd = try #require(shader.range(
+            of: "inline float2 scientificViewUV",
+            range: waveCellStart.upperBound..<shader.endIndex
+        ))
+        let waveCellShader = String(shader[waveCellStart.lowerBound..<waveCellEnd.lowerBound])
+        #expect(!waveCellShader.contains("heritablePrograms"))
+        #expect(!waveCellShader.contains("programInteractions"))
+        #expect(!waveCellShader.contains("programSlots"))
+        #expect(!waveCellShader.contains("mapToDisplay"))
+        #expect(waveCellShader.contains("uint edge = vertexID / 6u"))
+        #expect(waveCellShader.contains("screenNormal * side * 0.00145"))
     }
 
     @Test
@@ -716,12 +751,15 @@ struct ArchitectureBoundaryTests {
 
         #expect(shader.contains("kernel void resetRenderDrawArguments"))
         #expect(shader.contains("kernel void finalizeRenderDrawArguments"))
-        #expect(shader.contains("&cellDrawArguments[0], membraneRenderSegmentCount * 3u"))
+        #expect(shader.contains("observationZoom >= 160.0"))
+        #expect(shader.contains("? membraneVertexCount * 6u : membraneRenderSegmentCount * 3u"))
+        #expect(shader.contains("if (observationZoom < 64.0)"))
         #expect(shader.contains("atomic_store_explicit(&junctionDrawArguments[0], 6u"))
         #expect(shader.contains("if (instanceID >= maxCellCount || vertexID >="))
         #expect(shader.contains("if (instanceID >= cellJunctionCapacity || vertexID >= 6u)"))
         #expect(renderer.contains("resetRenderDrawArgumentsPipeline"))
         #expect(renderer.contains("finalizeRenderDrawArgumentsPipeline"))
+        #expect(renderer.contains("&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 3"))
         #expect(renderer.contains("private final class RenderSubmissionResources"))
         #expect(renderer.contains("0..<Metal4ExecutionContext.maximumInFlightSubmissions"))
         #expect(renderer.contains("commandBuffer.submissionSlotIndex"))

@@ -2113,6 +2113,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let cellRenderPipeline: MTLRenderPipelineState
     private let cellMeshRenderPipeline: MTLRenderPipelineState
     private let molecularCellRenderPipeline: MTLRenderPipelineState
+    private let waveCellRenderPipeline: MTLRenderPipelineState
     private let junctionRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
@@ -2437,6 +2438,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             label: "Cell molecular-state renderer",
             vertex: "cellVertex",
             fragment: "molecularCellFragment",
+            pixelFormat: .bgra8Unorm_srgb,
+            blending: true
+        )
+        waveCellRenderPipeline = try pipelineFactory.makeRenderPipeline(
+            label: "Wave-scale physical body context",
+            vertex: "waveCellVertex",
+            fragment: "waveCellFragment",
             pixelFormat: .bgra8Unorm_srgb,
             blending: true
         )
@@ -3405,6 +3413,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             compactJunctionRenderPipeline, finalizeRenderDrawArgumentsPipeline,
             cellRenderPipeline, cellMeshRenderPipeline,
             molecularCellRenderPipeline,
+            waveCellRenderPipeline,
             junctionRenderPipeline,
             bloomPrefilterPipeline,
             compositePipeline
@@ -4912,6 +4921,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellDrawArguments, offset: 0, index: 0)
         encoder.setBuffer(cellMeshDrawArguments, offset: 0, index: 1)
         encoder.setBuffer(junctionDrawArguments, offset: 0, index: 2)
+        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 3)
         encoder.dispatchThreads(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
@@ -4958,11 +4968,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             frameIndex: UInt32(truncatingIfNeeded: frameSerial)
         )
 
-        // Deep instruments present directly. Molecular scale compacts only visible cells
-        // for its causal intracellular overlay; wave and spinor need no biological draw.
-        // All three skip junctions, HDR store/reload, bloom, and a second render pass.
+        // Deep instruments present directly. Molecular and wave scales compact only
+        // visible cells for physical context; both skip junctions. All three avoid HDR
+        // store/reload, bloom, and a second render pass.
         if renderScale >= 3 {
-            if renderScale == 3 {
+            if renderScale == 3 || renderScale == 4 {
                 guard encodeVisibleCellCompaction(
                     into: commandBuffer,
                     settings: settings,
@@ -5011,6 +5021,25 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 encoder.setVertexBuffer(heritablePrograms, offset: 0, index: 8)
                 encoder.setVertexBuffer(programInteractions, offset: 0, index: 9)
                 encoder.setVertexBuffer(programSlots, offset: 0, index: 10)
+                encoder.drawPrimitives(
+                    type: .triangle,
+                    indirectBuffer: cellDrawArguments,
+                    indirectBufferOffset: 0
+                )
+            } else if renderScale == 4 {
+                encoder.setRenderPipelineState(waveCellRenderPipeline)
+                encoder.setVertexBuffer(agentState, offset: 0, index: 0)
+                encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)
+                encoder.setVertexBuffer(cellState, offset: 0, index: 2)
+                encoder.setVertexBuffer(cellOccupancy, offset: 0, index: 3)
+                encoder.setVertexBuffer(membraneVertices, offset: 0, index: 4)
+                encoder.setVertexBytes(
+                    &uniforms,
+                    length: MemoryLayout<SimulationUniforms>.stride,
+                    index: 5
+                )
+                encoder.setVertexBuffer(visibleCellIndices, offset: 0, index: 6)
+                encoder.setVertexBuffer(cellIdentities, offset: 0, index: 7)
                 encoder.drawPrimitives(
                     type: .triangle,
                     indirectBuffer: cellDrawArguments,

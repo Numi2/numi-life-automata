@@ -79,8 +79,8 @@ Interactive `1x`, `3x`, `6x`, and `24x` speeds execute that many unchanged biolo
 <table>
   <tr>
     <td width="50%">
-      <img src="Docs/Media/numi-automata-wave.png" alt="Wave observables at 160x" />
-      <br /><strong>Wave observables, 160x.</strong> Probability density, phase contours, current, and matter-dependent potential.
+      <img src="Docs/Media/numi-automata-wave.png" alt="Wave–body coupling at 160x" />
+      <br /><strong>Wave–body coupling, 160x.</strong> Probability, phase/coherence, the exact prepared matter coupling, and persistent physical cell membranes.
     </td>
     <td width="50%">
       <img src="Docs/Media/numi-automata-reaction.png" alt="Intracellular molecules at 96x" />
@@ -108,7 +108,7 @@ Interactive `1x`, `3x`, `6x`, and `24x` speeds execute that many unchanged biolo
 | Scale | Magnification | Rendered quantities | State remains persistent |
 |---|---:|---|---|
 | Spinor field | `900x` | Real and imaginary parts of `psi_0`, `psi_1`; component phasors | Yes |
-| Wave observables | `160x` | `rho`, relative phase, probability-current proxy, local potential | Yes |
+| Wave–body coupling | `160x` | `rho`, phase direction, component coherence, prepared matter coupling, physical cell membranes | Yes |
 | Intracellular molecules | `96x` | Per-cell ATP, Ca*, ERK*, morphogen A/B, membrane integrity, paid repair, wounds, and integument | Yes |
 | Cellular tissue | `36x` | Cell position, local membrane wounds, ATP-funded repair, junction load/strain, directional ATP exchange, Ca*/ERK* propagation, generation-tagged lineage mixing, voltage, refractory state, phase, frequency, regulation, fate, contractility, morphogens, stress, and apoptosis | Yes |
 | Organism morphology | `10x` | Position, velocity, developed tissue geometry, regulatory state, energy, biomass, sensors, defense, predation morphology | Yes |
@@ -268,7 +268,7 @@ The bridge between components is modulated by the local coherence proxy
 \frac{1+\cos(\phi_0-\phi_1)}{2}.
 ```
 
-At `160x`, phase color, a finite-difference probability-current proxy, and phase-winding cores replace the component-cell instrument. Mint-to-amber coupling edges sample the prepared coin and potential coefficients already consumed by `evolveQuantumField`; the renderer does not reread three biological fields or duplicate those equations. These marks are visual measurements of the simulated spinor and its explicit coupling coefficients; they are not independent particles, forces, or additional state variables.
+At `160x`, one spinor sample directly encodes bounded probability, phase direction, spin balance, and component coherence. One prepared-coupling sample adds the coin and potential coefficients already consumed by `evolveQuantumField`; the renderer does not reread biological fields or reconstruct spatial current from neighboring quantum samples. Sparse translucent contours reuse the same persistent cell membranes shown at lower scales, anchoring the field to the bodies that shape it. These marks are visual measurements of simulated state, not independent particles, forces, or additional variables.
 
 ### Spinor-to-reaction coupling
 
@@ -1075,7 +1075,7 @@ flowchart LR
 | Causal-junction rendering | One indirect six-vertex ribbon per visible persistent junction | `junctionVertex`, then `junctionFragment` |
 | Bloom downsample and filtering | One thirteen-tap dispatch at quarter drawable dimensions | `bloomPrefilter` |
 | Display composition | One full-screen triangle | `compositeFragment` |
-| Direct scientific display | One direct-to-drawable full-screen triangle, plus molecular cells only at `64-160x` | `molecularDisplayFragment`, `waveDisplayFragment`, or `spinorDisplayFragment` |
+| Direct scientific display | One direct-to-drawable full-screen triangle; molecular cells at `64-160x`, sparse physical body contours at `160-512x` | `molecularDisplayFragment`, `waveDisplayFragment`, or `spinorDisplayFragment` |
 
 Threadgroup dimensions are selected from each compute pipeline's `threadExecutionWidth` and `maxTotalThreadsPerThreadgroup`. Two-dimensional kernels use one execution width across `x` and up to eight rows; one-dimensional kernels use execution-width-aligned groups up to `256` threads.
 
@@ -1100,8 +1100,8 @@ Threadgroup dimensions are selected from each compute pipeline's `threadExecutio
 - **Hot/cold cell identity split.** Owner, program index, permanent ID, and component root occupy one `16 B` record used by the cell kernels. Parent-cell IDs occupy a separate `4 B` buffer touched only when lineage is created, halving identity traffic in the hot passes and reducing combined identity storage by `37.5%`.
 - **Dominant-program cache.** Homogeneous cells use the inherited trait and recognition vectors already cached in their component's `AgentState`. Only a mixed-program cell whose program index differs from the component's dominant index reads the independent `96 B` program record.
 - **Linear HDR tissue scene.** Ecology, organism, and cell fragments write unclamped values into a drawable-sized `RG11B10Float` target only while translucent membranes require layering. Deeper scientific scales write directly to the drawable.
-- **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; intermediate scales expose phase winding, density isolines, reaction channels, trait-dependent morphology, resource flux, and geological gradients.
-- **Static deep-scale fragments.** Molecule, wave, and spinor views use independent MSL 4.0 entry points. Molecular scale has a constant-cost dark background plus compacted physical cells; it samples no world or quantum textures. Wave rendering uses four quantum samples and one prepared-coupling sample.
+- **Scale-dependent scientific encodings.** The spinor view exposes component probability, phase, coherence, current, and lattice support; wave scale exposes probability, phase direction, spin balance, coherence, exact matter coupling, and persistent physical membranes; lower scales expose reaction channels, trait-dependent morphology, resource flux, and geological gradients.
+- **Static deep-scale fragments.** Molecule, wave, and spinor views use independent MSL 4.0 entry points. Molecular scale has a constant-cost dark background plus compacted physical cells; it samples no world or quantum textures. Wave rendering uses one quantum sample and one prepared-coupling sample, plus a twelve-edge physical contour per visible cell with no junction or heritable-program reads.
 - **Metal 4 counter heaps.** Sampled submissions timestamp chemistry, component mechanics, cell physiology, contact, topology, division, field mechanics, quantum evolution, rendering, and postprocessing without feeding timing data into causal kernels.
 - **Measured process chains.** Every observation scale exposes four compact observer nodes linking its measured input, state transition, and downstream output. These SwiftUI summaries read asynchronous reductions and never write simulation state.
 - **Exact deep-lattice sampling.** At `420x` and above, the spinor instrument uses nearest-cell `RGBA32Float` samples instead of blending adjacent lattice states. Wave-scale views retain linear filtering.

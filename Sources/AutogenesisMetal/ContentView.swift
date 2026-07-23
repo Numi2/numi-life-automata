@@ -1056,8 +1056,8 @@ struct ContentView: View {
         HStack(spacing: 1) {
             ForEach(Array(observationStops.enumerated()), id: \.element.id) { index, stop in
                 Button {
-                    if (index == 3 || index == 4), store.followedAgentID == nil {
-                        store.followRandomOrganism()
+                    if (1...4).contains(index), store.followedAgentID == nil {
+                        store.ensureLivingFocus()
                     }
                     store.displayMode = stop.displayMode
                     store.zoom(to: stop.magnification, aspect: 1)
@@ -1209,7 +1209,7 @@ struct ContentView: View {
                 : "Causal activity across cells, tissues, and organisms"
         }
         if zoom >= 512 { return "Two-component coined quantum walk" }
-        if zoom >= 160 { return "Probability density, phase, and probability current" }
+        if zoom >= 160 { return "Wave state coupled to physical cells and organisms" }
         if zoom >= 64 {
             return "Intracellular molecules in physical cells"
         }
@@ -1252,7 +1252,7 @@ struct ContentView: View {
             return "ψ = (ψ₀, ψ₁) is stored as four real components on a 1024² periodic lattice. Each update applies a local coin rotation and alternates conditional shifts along x and y. Measured Σρ = \(quantumNormValue)."
         }
         if zoom >= 160 {
-            return "ρ = |ψ₀|² + |ψ₁|². Component overlap contributes to the catalyst source term. Mint-to-amber feedback contours evaluate the same local resource, biomass, membrane, toxin, and inherited-trait terms that modify phase potential and coin angle in the quantum update; they are diagnostics, not additional forces."
+            return "ρ = |ψ₀|² + |ψ₁|². Color encodes local phase direction and spin balance; brightness includes component coherence. Mint-to-amber structure samples the exact prepared matter coupling consumed by the quantum update. Faint membranes are the same persistent physical cells shown at lower scales, not field glyphs or additional forces."
         }
         if zoom >= 64 {
             return "The molecular instrument draws only physical cells and organisms. Amber, cyan, magenta, blue, and pink glyphs are driven by each cell's ATP, Ca*, ERK*, morphogen A, and morphogen B state; abundance controls glyph occupancy. Membrane lipids, integrity, ATP-paid repair, wounds, and the shared integument remain attached to the same cell geometry. The extracellular reaction field and junction ribbons are intentionally absent at this scale."
@@ -1278,7 +1278,7 @@ struct ContentView: View {
         }
         return switch activeObservationStop {
         case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
-        case 1: "Matter changes coin angle θ and local phase V; spinor density and overlap change catalyst and stored-energy production."
+        case 1: "Physical cells shape the prepared coin angle θ and local phase V shown beneath their membranes; spinor density and component overlap feed back into catalyst and stored-energy production."
         case 2: "Each glyph reads the state of the cell that contains it: ATP from physiology, Ca* and ERK* from the excitable signaling state, and morphogens A and B from development. Membrane condition, paid repair, local failure, and supracellular integument are rendered on the physical boundary. Glyph density is a monotonic abundance cue, not a separate particle simulation."
         case 3: "A bounded sparse graph maps sixteen local mechanochemical and ecological inputs into proliferation, adhesion, contraction, repair, permeability, secretion, apoptosis suppression, and motility. Cell-cycle and biomass dynamics use measured substrate harvest relative to maintenance, work, and dissipation together with ATP reserve, exposed membrane, crowding, stress, and inherited regulation. Persistent junction ribbons read physical load and strain directly; amber packets show signed ATP sharing, cyan and magenta lanes show conductance-gated Ca*/ERK* propagation, and blue-green wound boundaries show ATP-funded repair. These render diagnostics never feed the cell update."
         case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Lineage-colored junction rails identify contact between different generation-tagged programs. Fission transmits programs already present in cells without mutation; ATP-funded cell division can mutate one program or crossbreed two compatible junction-linked programs."
@@ -1378,7 +1378,7 @@ struct ContentView: View {
         }
         if zoom < 64 { return "Cellular tissue" }
         if zoom < 160 { return "Intracellular molecules" }
-        if zoom < 512 { return "Wave observables" }
+        if zoom < 512 { return "Wave–body coupling" }
         return "Spinor field"
     }
 
@@ -1438,7 +1438,7 @@ struct ContentView: View {
             return [("Spin +", .cyan), ("Spin -", .orange), ("Current", .white), ("Nodes", .purple)]
         }
         if store.observationZoom >= 160 {
-            return [("Probability", .cyan), ("Phase", .pink), ("Current", .white), ("Matter feedback", .mint)]
+            return [("Probability", .cyan), ("Phase/coherence", .pink), ("Matter coupling", .mint), ("Physical bodies", .green)]
         }
         if store.observationZoom >= 64 {
             return [("ATP", .yellow), ("Ca*", .cyan), ("ERK*", .pink), ("Morphogen A", .blue), ("Morphogen B", .pink), ("Membrane", .mint)]

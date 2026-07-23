@@ -367,6 +367,16 @@
         "label": "480FA14864105736164BCB26B1E2E3567B7ABD95CD4074AB187D35B5E46D5EA6",
         "name": "evolveQuantumField",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "350BCD4D2B99821A5D96E4F63FAD09A0942DFFAD4E56297CEC006712382596B2",
+        "name": "waveCellVertex",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "D9C81D58FD40589C8B4127FA8B9D288D43BF20E8159C7C32221EA7E838B232DD",
+        "name": "waveCellFragment",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       }
     ]
   },
@@ -928,6 +938,19 @@
         "color_attachments": [
           {
             "pixel_format": "BGRA8Unorm_sRGB"
+          }
+        ]
+      },
+      {
+        "vertex_function_descriptor": "fnd:350BCD4D2B99821A5D96E4F63FAD09A0942DFFAD4E56297CEC006712382596B2",
+        "fragment_function_descriptor": "fnd:D9C81D58FD40589C8B4127FA8B9D288D43BF20E8159C7C32221EA7E838B232DD",
+        "color_attachments": [
+          {
+            "pixel_format": "BGRA8Unorm_sRGB",
+            "blending_state": "Enabled",
+            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
+            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
+            "source_rgb_blend_factor": "SourceAlpha"
           }
         ]
       }
