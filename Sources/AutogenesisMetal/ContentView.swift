@@ -59,8 +59,30 @@ private enum ScientificCopyCompatibility {
     static let moleculePanel = "VISIBLE INTRACELLULAR POOLS"
 }
 
+private enum InterfaceMode: String, CaseIterable, Identifiable {
+    case simple
+    case classic
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .simple: "Simple / Story"
+        case .classic: "Classic / Research"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .simple: "Plain-language controls and a story sidebar"
+        case .classic: "Full controls and scientific measurements"
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var store = EvolutionStore()
+    @AppStorage("numi.interfaceMode") private var interfaceModeRaw = InterfaceMode.simple.rawValue
     @State private var showsInspector = ProcessInfo.processInfo.environment[
         "NUMI_SHOW_INSPECTOR"
     ] == "1"
@@ -75,16 +97,30 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                commandBar
+                if interfaceMode == .simple {
+                    simpleCommandBar
+                } else {
+                    commandBar
+                }
                 Spacer()
-                compactContextHUD
+                if interfaceMode == .simple {
+                    simpleContextHUD
+                } else {
+                    compactContextHUD
+                }
             }
             .padding(12)
 
             HStack(spacing: 0) {
                 Spacer()
                 if showsInspector {
-                    inspectorPanel
+                    Group {
+                        if interfaceMode == .simple {
+                            simpleInspectorPanel
+                        } else {
+                            inspectorPanel
+                        }
+                    }
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
@@ -107,9 +143,372 @@ struct ContentView: View {
         .frame(minWidth: 900, minHeight: 620)
         .preferredColorScheme(.dark)
         .animation(.snappy(duration: 0.22), value: showsInspector)
+        .animation(.snappy(duration: 0.22), value: interfaceModeRaw)
+        .onAppear {
+            if interfaceMode == .simple {
+                showsInspector = true
+            }
+        }
+        .onChange(of: interfaceModeRaw) { _, rawValue in
+            showsInspector = InterfaceMode(rawValue: rawValue) == .simple
+        }
         .onChange(of: activeObservationStop) { _, index in
             store.displayMode = observationStops[index].displayMode
         }
+    }
+
+    private var interfaceMode: InterfaceMode {
+        InterfaceMode(rawValue: interfaceModeRaw) ?? .simple
+    }
+
+    private var simpleCommandBar: some View {
+        HStack(spacing: 7) {
+            brandLockup
+
+            commandDivider
+
+            simpleCommandButton(
+                store.isRunning ? "Pause" : "Play",
+                systemImage: store.isRunning ? "pause.fill" : "play.fill",
+                tint: .cyan
+            ) {
+                store.isRunning.toggle()
+            }
+
+            simpleCommandButton("Add life", systemImage: "plus", tint: .mint) {
+                store.addColony()
+            }
+
+            simpleCommandButton("New world", systemImage: "arrow.counterclockwise") {
+                store.restart()
+            }
+
+            Spacer(minLength: 4)
+
+            Menu {
+                Section("Look at") {
+                    ForEach(Array(observationStops.enumerated()), id: \.element.id) { index, stop in
+                        Button {
+                            selectObservationStop(index)
+                        } label: {
+                            Label(stop.label, systemImage: stop.symbol)
+                        }
+                    }
+                }
+            } label: {
+                Label("View: \(scaleName)", systemImage: observationStops[activeObservationStop].symbol)
+            }
+            .simpleMenuStyle()
+
+            Menu {
+                Section("Simulation speed") {
+                    ForEach([1, 3, 6, 24], id: \.self) { speed in
+                        Button {
+                            store.stepsPerFrame = speed
+                        } label: {
+                            HStack {
+                                Text(speedTitle(for: speed))
+                                Spacer()
+                                if store.stepsPerFrame == speed {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label(speedTitle(for: store.stepsPerFrame), systemImage: "gauge.with.dots.needle.67percent")
+            }
+            .simpleMenuStyle()
+
+            Menu {
+                Section("Move around") {
+                    Button("Zoom out", systemImage: "minus.magnifyingglass") {
+                        store.zoom(by: 1 / 1.8, around: .init(repeating: 0.5), aspect: 1)
+                    }
+                    Button("Reset view", systemImage: "viewfinder") {
+                        store.resetCamera()
+                    }
+                    Button("Zoom in", systemImage: "plus.magnifyingglass") {
+                        store.zoom(by: 1.8, around: .init(repeating: 0.5), aspect: 1)
+                    }
+                }
+                Section("Follow life") {
+                    Button("Follow a life-form", systemImage: "scope") {
+                        store.followRandomOrganism()
+                    }
+                    Button("Previous life-form", systemImage: "chevron.left") {
+                        store.followAdjacentOrganism(direction: -1)
+                    }
+                    .disabled(store.observableAgentCount < 2)
+                    Button("Next life-form", systemImage: "chevron.right") {
+                        store.followAdjacentOrganism(direction: 1)
+                    }
+                    .disabled(store.observableAgentCount < 2)
+                }
+                Section("Experiment") {
+                    Button(
+                        store.mechanosensingBlocked ? "Turn touch sensing on" : "Turn touch sensing off",
+                        systemImage: "waveform.path.ecg"
+                    ) {
+                        store.toggleMechanosensingIntervention()
+                    }
+                }
+            } label: {
+                Label("Explore", systemImage: "scope")
+            }
+            .simpleMenuStyle()
+
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Text(simplePopulationLabel)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+
+            settingsMenu(showLabel: true)
+
+            simpleCommandButton(
+                showsInspector ? "Hide story" : "Story",
+                systemImage: "sidebar.right",
+                tint: scaleAccent
+            ) {
+                showsInspector.toggle()
+            }
+        }
+        .padding(.horizontal, 9)
+        .frame(height: 52)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9))
+        .background(Color.black.opacity(0.70), in: RoundedRectangle(cornerRadius: 9))
+        .overlay {
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.34), radius: 16, y: 6)
+    }
+
+    private var simpleInspectorPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 15) {
+                HStack(spacing: 10) {
+                    Image(systemName: observationStops[activeObservationStop].symbol)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(scaleAccent)
+                        .frame(width: 32, height: 32)
+                        .background(scaleAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("SIMPLE VIEW")
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        Text(scaleName)
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    numiIconButton("xmark", help: "Hide story sidebar") {
+                        showsInspector = false
+                    }
+                }
+                .id("simple-inspector-top")
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(worldHeadline)
+                        .font(.system(size: 21, weight: .semibold, design: .rounded))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(inspectorSummary)
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                storySidebar
+
+                VStack(alignment: .leading, spacing: 7) {
+                    sectionLabel("TRY THIS")
+                    Text("Click a life-form to follow it, or use View to look closer at its body and signals.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(1.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(11)
+                .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+
+                Button {
+                    interfaceModeRaw = InterfaceMode.classic.rawValue
+                } label: {
+                    Label("Switch to Classic / Research view", systemImage: "flask")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(scaleAccent)
+                .padding(.vertical, 3)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+        }
+        .scrollIndicators(.hidden)
+        .frame(width: inspectorWidth)
+        .frame(maxHeight: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.black.opacity(0.76), in: RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.38), radius: 18, x: -5, y: 7)
+    }
+
+    private var simpleContextHUD: some View {
+        HStack(spacing: 10) {
+            Image(systemName: observationStops[activeObservationStop].symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(scaleAccent)
+                .frame(width: 28, height: 28)
+                .background(scaleAccent.opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Looking at: \(scaleName)")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                Text("Use View to look closer or step back.")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text(simplePopulationLabel)
+                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.black.opacity(0.66), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.30), radius: 12, y: 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var brandLockup: some View {
+        HStack(spacing: 7) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(Color.cyan.opacity(0.16))
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.cyan.opacity(0.52), lineWidth: 1)
+                Text("N")
+                    .font(.system(size: 14, weight: .black, design: .rounded))
+                    .foregroundStyle(.cyan)
+            }
+            .frame(width: 30, height: 30)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("NUMI")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                Text("LIFE")
+                    .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 78, alignment: .leading)
+    }
+
+    private func simpleCommandButton(
+        _ title: String,
+        systemImage: String,
+        tint: Color = .white,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 9)
+                .frame(height: 34)
+                .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func settingsMenu(showLabel: Bool) -> some View {
+        Menu {
+            Section("Interface") {
+                ForEach(InterfaceMode.allCases) { mode in
+                    Button {
+                        interfaceModeRaw = mode.rawValue
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(mode.title)
+                                Text(mode.description)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if interfaceMode == mode {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button(
+                showsInspector ? "Hide story sidebar" : "Show story sidebar",
+                systemImage: "sidebar.right"
+            ) {
+                showsInspector.toggle()
+            }
+        } label: {
+            if showLabel {
+                Label("Settings", systemImage: "gearshape")
+            } else {
+                Image(systemName: "gearshape")
+            }
+        }
+        .simpleMenuStyle()
+        .help("Settings")
+    }
+
+    private func selectObservationStop(_ index: Int) {
+        guard observationStops.indices.contains(index) else { return }
+        if (0...4).contains(index), store.followedAgentID == nil {
+            store.ensureLivingFocus()
+        }
+        store.displayMode = observationStops[index].displayMode
+        store.zoom(to: observationStops[index].magnification, aspect: 1)
+    }
+
+    private func speedTitle(for speed: Int) -> String {
+        switch speed {
+        case 1: "Slow"
+        case 3: "Normal"
+        case 6: "Fast"
+        default: "Very fast"
+        }
+    }
+
+    private var simplePopulationLabel: String {
+        if store.resolvedIndividualCount > 0 {
+            return "\(store.resolvedIndividualCount) life-form\(store.resolvedIndividualCount == 1 ? "" : "s")"
+        }
+        if store.observableAgentCount > 0 {
+            return "\(store.observableAgentCount) growing group\(store.observableAgentCount == 1 ? "" : "s")"
+        }
+        return "Waiting for life"
     }
 
     private var commandBar: some View {
@@ -251,9 +650,11 @@ struct ContentView: View {
 
             commandDivider
 
+            settingsMenu(showLabel: false)
+
             numiIconButton(
                 "sidebar.right",
-                help: showsInspector ? "Close scientific inspector" : "Open scientific inspector",
+                help: showsInspector ? "Close sidebar" : "Open sidebar",
                 isSelected: showsInspector,
                 tint: scaleAccent
             ) {
@@ -1972,6 +2373,17 @@ struct ContentView: View {
 
     private var individualityCountLabel: String {
         "\(store.observableAgentCount) / C\(store.resolvedCollectiveIndividualCount) + S\(store.resolvedCellIndividualCount)"
+    }
+}
+
+private extension View {
+    func simpleMenuStyle() -> some View {
+        self
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .foregroundStyle(Color.primary)
+            .padding(.horizontal, 9)
+            .frame(height: 34)
+            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
     }
 }
 
