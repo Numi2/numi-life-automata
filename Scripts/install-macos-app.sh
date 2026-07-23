@@ -76,7 +76,7 @@ cp "$binary_directory/$executable_name" "$staged_app/Contents/MacOS/$executable_
 ditto "$binary_directory/$resource_bundle_name" \
     "$staged_app/Contents/Resources/$resource_bundle_name"
 
-icon_source="$root/Docs/Media/numi-automata-overview.png"
+icon_source="$root/Packaging/AppIcon-master.png"
 icon_width="$(sips -g pixelWidth "$icon_source" | awk '/pixelWidth/ { print $2 }')"
 icon_height="$(sips -g pixelHeight "$icon_source" | awk '/pixelHeight/ { print $2 }')"
 if (( icon_width < icon_height )); then

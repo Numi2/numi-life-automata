@@ -6444,29 +6444,47 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let packagedResourceBundle = Bundle.main.resourceURL
             .map { $0.appendingPathComponent("NumiAutomata_NumiAutomata.bundle", isDirectory: true) }
             .flatMap(Bundle.init(url:))
+#if SWIFT_PACKAGE
+        let packageMetallibURL = Bundle.module.url(
+            forResource: "Replicator",
+            withExtension: "metallib",
+            subdirectory: "Shaders"
+        )
+#else
+        let packageMetallibURL: URL? = nil
+#endif
 
         if let metallibURL = packagedResourceBundle?.url(
             forResource: "Replicator",
             withExtension: "metallib",
             subdirectory: "Shaders"
-        ) ?? Bundle.module.url(
+        ) ?? Bundle.main.url(
             forResource: "Replicator",
             withExtension: "metallib",
             subdirectory: "Shaders"
-        ) {
+        ) ?? packageMetallibURL {
             return try device.makeLibrary(URL: metallibURL)
         }
 
 #if DEBUG
+#if SWIFT_PACKAGE
+        let packageMetalSourceURL = Bundle.module.url(
+            forResource: "Replicator",
+            withExtension: "metal",
+            subdirectory: "Shaders"
+        )
+#else
+        let packageMetalSourceURL: URL? = nil
+#endif
         guard let url = packagedResourceBundle?.url(
             forResource: "Replicator",
             withExtension: "metal",
             subdirectory: "Shaders"
-        ) ?? Bundle.module.url(
+        ) ?? Bundle.main.url(
             forResource: "Replicator",
             withExtension: "metal",
             subdirectory: "Shaders"
-        ) else {
+        ) ?? packageMetalSourceURL else {
             throw EvolutionRendererError.missingShader
         }
         let source = try String(contentsOf: url, encoding: .utf8)

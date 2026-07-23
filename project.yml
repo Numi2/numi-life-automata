@@ -1,0 +1,73 @@
+name: NumiAutomata
+
+options:
+  bundleIdPrefix: com.numi
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: 79RNR2QWRF
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+
+targets:
+  AutogenesisCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/AutogenesisCore
+    settings:
+      base:
+        PRODUCT_NAME: AutogenesisCore
+        PRODUCT_MODULE_NAME: AutogenesisCore
+        SKIP_INSTALL: YES
+
+  NumiAutomata:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/AutogenesisMetal
+        excludes:
+          - Shaders
+      - path: Sources/AutogenesisMetal/Shaders
+        type: folder
+        buildPhase: resources
+      - path: Packaging/Assets.xcassets
+        buildPhase: resources
+      - path: Packaging/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - target: AutogenesisCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.numi.automata
+        PRODUCT_NAME: Numi Automata
+        EXECUTABLE_NAME: NumiAutomata
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Packaging/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Packaging/NumiAutomata.entitlements
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        ARCHS: arm64
+        SKIP_INSTALL: NO
+        SUPPORTS_MACCATALYST: NO
+
+schemes:
+  NumiAutomata:
+    build:
+      targets:
+        NumiAutomata: all
+    run:
+      config: Debug
+    archive:
+      config: Release

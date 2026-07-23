@@ -222,15 +222,24 @@ final class Metal4PipelineFactory {
         let packagedBundle = Bundle.main.resourceURL
             .map { $0.appendingPathComponent("NumiAutomata_NumiAutomata.bundle", isDirectory: true) }
             .flatMap(Bundle.init(url:))
-        return packagedBundle?.url(
-            forResource: name,
-            withExtension: fileExtension,
-            subdirectory: "Shaders"
-        ) ?? Bundle.module.url(
+#if SWIFT_PACKAGE
+        let packageResourceURL = Bundle.module.url(
             forResource: name,
             withExtension: fileExtension,
             subdirectory: "Shaders"
         )
+#else
+        let packageResourceURL: URL? = nil
+#endif
+        return packagedBundle?.url(
+            forResource: name,
+            withExtension: fileExtension,
+            subdirectory: "Shaders"
+        ) ?? Bundle.main.url(
+            forResource: name,
+            withExtension: fileExtension,
+            subdirectory: "Shaders"
+        ) ?? packageResourceURL
     }
 }
 
