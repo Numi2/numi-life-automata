@@ -45,6 +45,9 @@ constant uint mixedComponentOwner = maxAgentCount + 1u;
 constant float referenceTissueCellCount = 24.0;
 constant uint regulatoryNodeCapacity = 16u;
 constant uint regulatoryEdgeCapacity = 48u;
+constant uint regulatoryModuleCandidateCapacity = regulatoryNodeCapacity * 2u;
+constant uint regulatoryActiveFlag = 1u;
+constant uint regulatoryModuleShift = 1u;
 constant uint membraneVertexCount = 12u;
 constant uint membraneRenderSubdivision = 3u;
 constant uint membraneRenderSegmentCount = membraneVertexCount * membraneRenderSubdivision;
@@ -994,6 +997,123 @@ inline float recognitionCompatibility(AgentState a, AgentState b) {
     return saturate(1.0 - reciprocalMismatch * 0.92);
 }
 
+inline uint regulatoryModuleID(uint flags, uint fallbackInnovationID) {
+    uint moduleID = flags >> regulatoryModuleShift;
+    if (moduleID == 0u) {
+        moduleID = max(fallbackInnovationID & 0x7fffffffu, 1u);
+    }
+    return moduleID;
+}
+
+inline uint regulatoryModuleFlags(uint moduleID) {
+    return regulatoryActiveFlag |
+        ((max(moduleID, 1u) & 0x7fffffffu) << regulatoryModuleShift);
+}
+
+inline uint regulatoryActuatorModule(uint actuatorMask) {
+    for (uint actuator = 0u; actuator < 12u; ++actuator) {
+        if ((actuatorMask & (1u << actuator)) != 0u) {
+            return actuator + 1u;
+        }
+    }
+    return 1u;
+}
+
+inline uint regulatoryNodeSlotWithInnovation(
+    device const RegulatoryNode* nodes,
+    uint nodeBase,
+    uint innovationID
+) {
+    for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
+        RegulatoryNode node = nodes[nodeBase + index];
+        if ((node.flags & regulatoryActiveFlag) != 0u &&
+            node.innovationID == innovationID) {
+            return index;
+        }
+    }
+    return regulatoryNodeCapacity;
+}
+
+inline uint regulatoryEdgeSlotWithInnovation(
+    device const RegulatoryEdge* edges,
+    uint edgeBase,
+    uint innovationID
+) {
+    for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
+        RegulatoryEdge edge = edges[edgeBase + index];
+        if ((edge.flags & regulatoryActiveFlag) != 0u &&
+            edge.innovationID == innovationID) {
+            return index;
+        }
+    }
+    return regulatoryEdgeCapacity;
+}
+
+inline bool regulatoryProgramHasModule(
+    device const RegulatoryNode* nodes,
+    uint nodeBase,
+    uint moduleID
+) {
+    for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
+        RegulatoryNode node = nodes[nodeBase + index];
+        if ((node.flags & regulatoryActiveFlag) != 0u &&
+            regulatoryModuleID(node.flags, node.innovationID) == moduleID) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline uint regulatoryNodeCountForModule(
+    device const RegulatoryNode* nodes,
+    uint nodeBase,
+    uint moduleID
+) {
+    uint count = 0u;
+    for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
+        RegulatoryNode node = nodes[nodeBase + index];
+        if ((node.flags & regulatoryActiveFlag) != 0u &&
+            regulatoryModuleID(node.flags, node.innovationID) == moduleID) {
+            count += 1u;
+        }
+    }
+    return count;
+}
+
+inline uint regulatoryEdgeModuleID(
+    RegulatoryEdge edge,
+    device const RegulatoryNode* nodes,
+    uint nodeBase
+) {
+    uint moduleID = edge.flags >> regulatoryModuleShift;
+    if (moduleID != 0u) { return moduleID; }
+    if (edge.target < regulatoryNodeCapacity) {
+        RegulatoryNode target = nodes[nodeBase + edge.target];
+        if ((target.flags & regulatoryActiveFlag) != 0u) {
+            return regulatoryModuleID(target.flags, target.innovationID);
+        }
+    }
+    return max(edge.innovationID & 0x7fffffffu, 1u);
+}
+
+inline uint regulatoryEdgeCountForModule(
+    device const RegulatoryEdge* edges,
+    uint edgeBase,
+    device const RegulatoryNode* nodes,
+    uint nodeBase,
+    uint moduleID
+) {
+    uint count = 0u;
+    for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
+        RegulatoryEdge edge = edges[edgeBase + index];
+        if ((edge.flags & regulatoryActiveFlag) != 0u &&
+            regulatoryEdgeModuleID(edge, nodes, nodeBase) == moduleID) {
+            count += 1u;
+        }
+    }
+    return count;
+}
+
 inline ResonanceGenome founderResonanceGenome(AgentState agent, uint seed) {
     ResonanceGenome genome;
     float frequency = 0.0014 + agent.geneB.z * 0.0042 + random01(seed + 3u) * 0.0010;
@@ -1022,13 +1142,19 @@ inline uint topologyHash(
     uint edgeBase = owner * regulatoryEdgeCapacity;
     for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
         RegulatoryNode node = nodes[nodeBase + index];
-        if ((node.flags & 1u) == 0u) { continue; }
-        value = hash32(value ^ node.innovationID ^ node.sensorIndex * 16777619u ^ node.actuatorMask);
+        if ((node.flags & regulatoryActiveFlag) == 0u) { continue; }
+        value = hash32(
+            value ^ node.innovationID ^ node.sensorIndex * 16777619u ^
+            node.actuatorMask ^ node.flags * 2246822519u
+        );
     }
     for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
         RegulatoryEdge edge = edges[edgeBase + index];
-        if ((edge.flags & 1u) == 0u) { continue; }
-        value = hash32(value ^ edge.innovationID ^ edge.source * 374761393u ^ edge.target * 668265263u);
+        if ((edge.flags & regulatoryActiveFlag) == 0u) { continue; }
+        value = hash32(
+            value ^ edge.innovationID ^ edge.source * 374761393u ^
+            edge.target * 668265263u ^ edge.flags * 3266489917u
+        );
     }
     return value;
 }
@@ -1099,7 +1225,9 @@ inline void initializeFounderRegulatoryGenome(
         if (index == 0u) { node.actuatorMask |= 1u << 4u; }
         if (index == 2u) { node.actuatorMask |= 1u << 7u; }
         node.innovationID = atomic_fetch_add_explicit(&identityCounters[1], 1u, memory_order_relaxed);
-        node.flags = 1u;
+        node.flags = regulatoryModuleFlags(
+            regulatoryActuatorModule(node.actuatorMask)
+        );
         nodes[nodeBase + index] = node;
     }
 
@@ -1111,7 +1239,10 @@ inline void initializeFounderRegulatoryGenome(
         if (index < 4u) { edge.weight = 0.42 + random01(seed + 201u + index) * 0.72; }
         edge.plasticity = signedRandom(seed + 301u + index) * 0.025;
         edge.innovationID = atomic_fetch_add_explicit(&identityCounters[1], 1u, memory_order_relaxed);
-        edge.flags = 1u;
+        RegulatoryNode targetNode = nodes[nodeBase + edge.target];
+        edge.flags = regulatoryModuleFlags(
+            regulatoryModuleID(targetNode.flags, targetNode.innovationID)
+        );
         edges[edgeBase + index] = edge;
     }
 
@@ -1352,6 +1483,10 @@ inline void mutateDevelopmentalGenome(
                 duplicate.innovationID = atomic_fetch_add_explicit(
                     &identityCounters[1], 1u, memory_order_relaxed
                 );
+                uint duplicatedModuleID = max(
+                    duplicate.innovationID & 0x7fffffffu, 1u
+                );
+                duplicate.flags = regulatoryModuleFlags(duplicatedModuleID);
                 mutableNodes[childNodeBase + targetSlot] = duplicate;
 
                 // Preserve a small connected subgraph around a duplicated node.
@@ -1395,6 +1530,9 @@ inline void mutateDevelopmentalGenome(
                         copiedEdge.innovationID = atomic_fetch_add_explicit(
                             &identityCounters[1], 1u, memory_order_relaxed
                         );
+                        copiedEdge.flags = regulatoryModuleFlags(
+                            duplicatedModuleID
+                        );
                         mutableEdges[childEdgeBase + freeEdgeSlot] = copiedEdge;
                         numericalDistance += 0.018;
                     }
@@ -1413,6 +1551,9 @@ inline void mutateDevelopmentalGenome(
                         );
                         copiedEdge.innovationID = atomic_fetch_add_explicit(
                             &identityCounters[1], 1u, memory_order_relaxed
+                        );
+                        copiedEdge.flags = regulatoryModuleFlags(
+                            duplicatedModuleID
                         );
                         mutableEdges[childEdgeBase + freeEdgeSlot] = copiedEdge;
                         numericalDistance += 0.018;
@@ -1448,7 +1589,13 @@ inline void mutateDevelopmentalGenome(
                     edge.innovationID = atomic_fetch_add_explicit(
                         &identityCounters[1], 1u, memory_order_relaxed
                     );
-                    edge.flags = 1u;
+                    RegulatoryNode targetNode =
+                        mutableNodes[childNodeBase + edge.target];
+                    edge.flags = regulatoryModuleFlags(
+                        regulatoryModuleID(
+                            targetNode.flags, targetNode.innovationID
+                        )
+                    );
                     structuralChanges += 1u;
                 }
                 mutableEdges[childEdgeBase + slot] = edge;
@@ -1492,6 +1639,15 @@ inline void mutateDevelopmentalGenome(
                 edge.innovationID = atomic_fetch_add_explicit(
                     &identityCounters[1], 1u, memory_order_relaxed
                 );
+                if (reconnectedTarget < regulatoryNodeCapacity) {
+                    RegulatoryNode targetNode =
+                        mutableNodes[childNodeBase + reconnectedTarget];
+                    edge.flags = regulatoryModuleFlags(
+                        regulatoryModuleID(
+                            targetNode.flags, targetNode.innovationID
+                        )
+                    );
+                }
                 structuralChanges += 1u;
                 mutableEdges[childEdgeBase + slot] = edge;
             }
@@ -3792,41 +3948,196 @@ inline float recombineDevelopmentalPrograms(
     uint childEdgeBase = childProgramIndex * regulatoryEdgeCapacity;
 
     for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
-        RegulatoryNode inheritedNode;
-        if (random01(seed + index * 17u) < 0.5) {
-            inheritedNode = regulatoryNodes[primaryNodeBase + index];
-        } else {
-            inheritedNode = regulatoryNodes[secondaryNodeBase + index];
-        }
-        regulatoryNodes[childNodeBase + index] = inheritedNode;
+        regulatoryNodes[childNodeBase + index] = emptyRegulatoryNode();
     }
     for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
-        RegulatoryEdge inheritedEdge;
-        if (random01(seed + 401u + index * 23u) < 0.5) {
-            inheritedEdge = regulatoryEdges[primaryEdgeBase + index];
-        } else {
-            inheritedEdge = regulatoryEdges[secondaryEdgeBase + index];
+        regulatoryEdges[childEdgeBase + index] = emptyRegulatoryEdge();
+    }
+
+    // Recombine complete regulatory modules rather than unrelated storage slots.
+    // Matching innovations can exchange their quantitative allele; unmatched
+    // genes travel with their module, and capacity pressure rejects the whole
+    // module before any of its nodes or edges are copied.
+    uint moduleIDs[regulatoryModuleCandidateCapacity];
+    uint moduleSources[regulatoryModuleCandidateCapacity];
+    for (uint index = 0u; index < regulatoryModuleCandidateCapacity; ++index) {
+        moduleIDs[index] = 0u;
+        moduleSources[index] = 3u;
+    }
+    uint moduleCount = 0u;
+    for (uint parent = 0u; parent < 2u; ++parent) {
+        uint nodeBase = parent == 0u ? primaryNodeBase : secondaryNodeBase;
+        for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
+            RegulatoryNode node = regulatoryNodes[nodeBase + index];
+            if ((node.flags & regulatoryActiveFlag) == 0u) { continue; }
+            uint moduleID = regulatoryModuleID(node.flags, node.innovationID);
+            bool alreadyPresent = false;
+            for (uint candidate = 0u; candidate < moduleCount; ++candidate) {
+                alreadyPresent = alreadyPresent ||
+                    moduleIDs[candidate] == moduleID;
+            }
+            if (!alreadyPresent &&
+                moduleCount < regulatoryModuleCandidateCapacity) {
+                moduleIDs[moduleCount] = moduleID;
+                moduleSources[moduleCount] = 3u;
+                moduleCount += 1u;
+            }
         }
-        regulatoryEdges[childEdgeBase + index] = inheritedEdge;
+    }
+
+    uint acceptedNodeBudget = 0u;
+    uint acceptedEdgeBudget = 0u;
+    for (uint selection = 0u; selection < moduleCount; ++selection) {
+        uint selected = regulatoryModuleCandidateCapacity;
+        uint selectedRank = 0xffffffffu;
+        for (uint candidate = 0u; candidate < moduleCount; ++candidate) {
+            if (moduleSources[candidate] != 3u) { continue; }
+            uint rank = hash32(
+                moduleIDs[candidate] ^ seed ^ 0x9e3779b9u
+            );
+            if (selected >= regulatoryModuleCandidateCapacity ||
+                rank < selectedRank ||
+                (rank == selectedRank &&
+                    moduleIDs[candidate] < moduleIDs[selected])) {
+                selected = candidate;
+                selectedRank = rank;
+            }
+        }
+        if (selected >= regulatoryModuleCandidateCapacity) { break; }
+        uint moduleID = moduleIDs[selected];
+        bool primaryHasModule = regulatoryProgramHasModule(
+            regulatoryNodes, primaryNodeBase, moduleID
+        );
+        bool secondaryHasModule = regulatoryProgramHasModule(
+            regulatoryNodes, secondaryNodeBase, moduleID
+        );
+        uint source = primaryHasModule && secondaryHasModule
+            ? (random01(seed ^ hash32(moduleID + 0x85ebca6bu)) < 0.5
+                ? 0u : 1u)
+            : (primaryHasModule ? 0u : 1u);
+        uint sourceNodeBase = source == 0u
+            ? primaryNodeBase : secondaryNodeBase;
+        uint sourceEdgeBase = source == 0u
+            ? primaryEdgeBase : secondaryEdgeBase;
+        uint nodeCount = regulatoryNodeCountForModule(
+            regulatoryNodes, sourceNodeBase, moduleID
+        );
+        uint edgeCount = regulatoryEdgeCountForModule(
+            regulatoryEdges, sourceEdgeBase,
+            regulatoryNodes, sourceNodeBase, moduleID
+        );
+        bool fits = nodeCount > 0u &&
+            acceptedNodeBudget + nodeCount <= regulatoryNodeCapacity &&
+            acceptedEdgeBudget + edgeCount <= regulatoryEdgeCapacity;
+        moduleSources[selected] = fits ? source : 2u;
+        if (fits) {
+            acceptedNodeBudget += nodeCount;
+            acceptedEdgeBudget += edgeCount;
+        }
     }
 
     uint activeNodes = 0u;
-    for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
-        activeNodes += regulatoryNodes[childNodeBase + index].flags & 1u;
+    for (uint moduleIndex = 0u; moduleIndex < moduleCount; ++moduleIndex) {
+        uint source = moduleSources[moduleIndex];
+        if (source > 1u) { continue; }
+        uint moduleID = moduleIDs[moduleIndex];
+        uint sourceNodeBase = source == 0u
+            ? primaryNodeBase : secondaryNodeBase;
+        uint otherNodeBase = source == 0u
+            ? secondaryNodeBase : primaryNodeBase;
+        for (uint index = 0u; index < regulatoryNodeCapacity; ++index) {
+            RegulatoryNode sourceNode =
+                regulatoryNodes[sourceNodeBase + index];
+            if ((sourceNode.flags & regulatoryActiveFlag) == 0u ||
+                regulatoryModuleID(
+                    sourceNode.flags, sourceNode.innovationID
+                ) != moduleID) {
+                continue;
+            }
+            RegulatoryNode inheritedNode = sourceNode;
+            uint homologousSlot = regulatoryNodeSlotWithInnovation(
+                regulatoryNodes, otherNodeBase, sourceNode.innovationID
+            );
+            if (homologousSlot < regulatoryNodeCapacity &&
+                random01(
+                    seed ^ hash32(sourceNode.innovationID + 0xc2b2ae35u)
+                ) < 0.5) {
+                inheritedNode =
+                    regulatoryNodes[otherNodeBase + homologousSlot];
+            }
+            inheritedNode.flags = regulatoryModuleFlags(moduleID);
+            if (activeNodes < regulatoryNodeCapacity) {
+                regulatoryNodes[childNodeBase + activeNodes] = inheritedNode;
+                activeNodes += 1u;
+            }
+        }
     }
+
     uint activeEdges = 0u;
-    for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
-        RegulatoryEdge inheritedEdge = regulatoryEdges[childEdgeBase + index];
-        bool validEdge = (inheritedEdge.flags & 1u) != 0u &&
-            inheritedEdge.source < regulatoryNodeCapacity &&
-            inheritedEdge.target < regulatoryNodeCapacity &&
-            (regulatoryNodes[childNodeBase + inheritedEdge.source].flags & 1u) != 0u &&
-            (regulatoryNodes[childNodeBase + inheritedEdge.target].flags & 1u) != 0u;
-        if (validEdge) {
+    for (uint moduleIndex = 0u; moduleIndex < moduleCount; ++moduleIndex) {
+        uint source = moduleSources[moduleIndex];
+        if (source > 1u) { continue; }
+        uint moduleID = moduleIDs[moduleIndex];
+        uint sourceNodeBase = source == 0u
+            ? primaryNodeBase : secondaryNodeBase;
+        uint otherNodeBase = source == 0u
+            ? secondaryNodeBase : primaryNodeBase;
+        uint sourceEdgeBase = source == 0u
+            ? primaryEdgeBase : secondaryEdgeBase;
+        uint otherEdgeBase = source == 0u
+            ? secondaryEdgeBase : primaryEdgeBase;
+        for (uint index = 0u; index < regulatoryEdgeCapacity; ++index) {
+            RegulatoryEdge sourceEdge =
+                regulatoryEdges[sourceEdgeBase + index];
+            if ((sourceEdge.flags & regulatoryActiveFlag) == 0u ||
+                regulatoryEdgeModuleID(
+                    sourceEdge, regulatoryNodes, sourceNodeBase
+                ) != moduleID ||
+                sourceEdge.source >= regulatoryNodeCapacity ||
+                sourceEdge.target >= regulatoryNodeCapacity) {
+                continue;
+            }
+            RegulatoryEdge inheritedEdge = sourceEdge;
+            uint inheritedNodeBase = sourceNodeBase;
+            uint homologousSlot = regulatoryEdgeSlotWithInnovation(
+                regulatoryEdges, otherEdgeBase, sourceEdge.innovationID
+            );
+            if (homologousSlot < regulatoryEdgeCapacity &&
+                random01(
+                    seed ^ hash32(sourceEdge.innovationID + 0x27d4eb2fu)
+                ) < 0.5) {
+                inheritedEdge =
+                    regulatoryEdges[otherEdgeBase + homologousSlot];
+                inheritedNodeBase = otherNodeBase;
+            }
+            if (inheritedEdge.source >= regulatoryNodeCapacity ||
+                inheritedEdge.target >= regulatoryNodeCapacity) {
+                continue;
+            }
+            uint sourceInnovation =
+                regulatoryNodes[
+                    inheritedNodeBase + inheritedEdge.source
+                ].innovationID;
+            uint targetInnovation =
+                regulatoryNodes[
+                    inheritedNodeBase + inheritedEdge.target
+                ].innovationID;
+            uint remappedSource = regulatoryNodeSlotWithInnovation(
+                regulatoryNodes, childNodeBase, sourceInnovation
+            );
+            uint remappedTarget = regulatoryNodeSlotWithInnovation(
+                regulatoryNodes, childNodeBase, targetInnovation
+            );
+            if (remappedSource >= regulatoryNodeCapacity ||
+                remappedTarget >= regulatoryNodeCapacity ||
+                activeEdges >= regulatoryEdgeCapacity) {
+                continue;
+            }
+            inheritedEdge.source = remappedSource;
+            inheritedEdge.target = remappedTarget;
+            inheritedEdge.flags = regulatoryModuleFlags(moduleID);
+            regulatoryEdges[childEdgeBase + activeEdges] = inheritedEdge;
             activeEdges += 1u;
-        } else if ((inheritedEdge.flags & 1u) != 0u) {
-            inheritedEdge.flags = 0u;
-            regulatoryEdges[childEdgeBase + index] = inheritedEdge;
         }
     }
 

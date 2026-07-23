@@ -293,6 +293,34 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
+    func regulatoryRecombinationAlignsInnovationsAndPreservesWholeModules() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let start = try #require(shader.range(
+            of: "inline float recombineDevelopmentalPrograms"
+        ))
+        let end = try #require(shader.range(
+            of: "inline AgentState recombineCellPrograms",
+            range: start.upperBound..<shader.endIndex
+        ))
+        let recombination = String(shader[start.lowerBound..<end.lowerBound])
+        #expect(shader.contains("inline uint regulatoryModuleID"))
+        #expect(shader.contains("inline uint regulatoryNodeSlotWithInnovation"))
+        #expect(shader.contains("inline uint regulatoryEdgeSlotWithInnovation"))
+        #expect(recombination.contains("uint moduleIDs[regulatoryModuleCandidateCapacity]"))
+        #expect(recombination.contains("acceptedNodeBudget + nodeCount"))
+        #expect(recombination.contains("acceptedEdgeBudget + edgeCount"))
+        #expect(recombination.contains("sourceNode.innovationID"))
+        #expect(recombination.contains("sourceEdge.innovationID"))
+        #expect(recombination.contains("inheritedEdge.source = remappedSource"))
+        #expect(recombination.contains("inheritedEdge.target = remappedTarget"))
+        #expect(!recombination.contains("regulatoryNodes[primaryNodeBase + index]"))
+    }
+
+    @Test
     func extracellularDevelopmentIsPersistentLocalAndEnergeticallyPaid() throws {
         let shader = try String(
             contentsOf: repositoryRoot
