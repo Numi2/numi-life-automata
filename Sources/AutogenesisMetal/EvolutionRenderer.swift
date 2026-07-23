@@ -2008,7 +2008,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let membraneVertexCount = 12
     private static let membraneRenderSubdivision = 3
     private static let cellSpatialHashBucketCount = 16_384
-    private static let membraneContactPairCapacity = 524_288
+    private static let membraneContactPairCapacity =
+        maxCellCount * membraneVertexCount
     private static let contactWorkStateCount = 5
     private static let cellJunctionCapacity = 32_768
     private static let worldExchangeChannelCount = 14
@@ -2038,6 +2039,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let runtimeTelemetryPublicationInterval = 1.0 / 12.0
     private static let singleBufferGPUThresholdMilliseconds = 8.0
     private static let doubleBufferGPUThresholdMilliseconds = 12.0
+    // Leaves compositor and UI headroom inside a 60 Hz display interval.
+    private static let interactiveGPUFrameBudgetMilliseconds = 12.5
     private static let gpuTimingLogEnabled = ProcessInfo.processInfo.environment[
         "NUMI_GPU_TIMING_LOG"
     ] == "1"
@@ -2254,6 +2257,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var lastCPUEncodeMilliseconds = 0.0
     private var lastTotalGPUMilliseconds = 0.0
     private var interactiveInFlightSubmissionLimit = maximumInteractiveInFlightSubmissions
+    private var adaptiveInteractiveStepLimit = maximumInteractiveStepsPerSubmission
+    private var simulationStepGPUMillisecondsEWMA = 0.5
+    private var renderOnlyGPUMillisecondsEWMA = 2.0
+    private var hasSimulationStepTimingSample = false
     private var lastRuntimeTelemetryPublicationTime = 0.0
     private var lastPhaseTimings: [MetalPhaseTiming] = []
     private var checkpointStep: UInt64 = 0
@@ -3060,6 +3067,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             syntheticStallInjected = false
             syntheticRetiredCommandBuffers = 0
             lastMetalError = nil
+            adaptiveInteractiveStepLimit = Self.maximumInteractiveStepsPerSubmission
+            simulationStepGPUMillisecondsEWMA = 0.5
+            renderOnlyGPUMillisecondsEWMA = 2.0
+            hasSimulationStepTimingSample = false
             quantumStep = 0
             generation = 0
             evaluator = AdaptiveComplexityEvaluator(seed: 0xA170_6E51 ^ frameSettings.resetToken, eliteCount: 1)
@@ -3095,10 +3106,14 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
 
         var pendingMetricObservation: PendingMetricObservation?
+        var encodedSimulationStepCount = 0
         if frameSettings.isRunning {
             let admittedStepCount = min(
                 max(frameSettings.stepsPerFrame, 1),
-                Self.maximumInteractiveStepsPerSubmission
+                min(
+                    Self.maximumInteractiveStepsPerSubmission,
+                    adaptiveInteractiveStepLimit
+                )
             )
             for _ in 0..<admittedStepCount {
                 guard commandBuffer.remainingUniformBytes >=
@@ -3106,6 +3121,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     Self.reservedUniformBytesForFrameTail else { break }
                 encodeSimulationStep(into: commandBuffer, settings: frameSettings)
                 totalSteps &+= 1
+                encodedSimulationStepCount += 1
                 if totalSteps.isMultiple(of: Self.interactiveQuantumStride) {
                     encodeQuantumStep(into: commandBuffer, settings: frameSettings)
                 }
@@ -3170,7 +3186,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             0
         ) * 1_000
         unfinishedCommandBuffers += 1
-        commandBuffer.addCompletedHandler { [weak self, submittedCheckpoint] buffer in
+        commandBuffer.addCompletedHandler {
+            [weak self, submittedCheckpoint, encodedSimulationStepCount] buffer in
             let status = buffer.status
             let gpuMilliseconds = max(buffer.gpuEndTime - buffer.gpuStartTime, 0) * 1_000
             let phaseTimings = buffer.phaseSamples.map {
@@ -3198,7 +3215,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     epoch: submittedEpoch,
                     checkpoint: submittedCheckpoint,
                     gpuMilliseconds: gpuMilliseconds,
-                    phaseTimings: phaseTimings
+                    phaseTimings: phaseTimings,
+                    encodedSimulationStepCount: encodedSimulationStepCount
                 )
             }
         }
@@ -3239,7 +3257,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         epoch: UInt64,
         checkpoint: PendingRecoveryCheckpoint?,
         gpuMilliseconds: Double,
-        phaseTimings: [MetalPhaseTiming]
+        phaseTimings: [MetalPhaseTiming],
+        encodedSimulationStepCount: Int
     ) {
         unfinishedCommandBuffers = max(unfinishedCommandBuffers - 1, 0)
         lastCompletionTime = CFAbsoluteTimeGetCurrent()
@@ -3253,6 +3272,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         if status == .completed, errorDescription == nil {
             lastTotalGPUMilliseconds = gpuMilliseconds
             updateInteractiveInFlightSubmissionLimit(gpuMilliseconds: gpuMilliseconds)
+            updateAdaptiveInteractiveStepLimit(
+                gpuMilliseconds: gpuMilliseconds,
+                encodedSimulationStepCount: encodedSimulationStepCount,
+                phaseTimings: phaseTimings
+            )
             lastPhaseTimings = phaseTimings
             if Self.gpuTimingLogEnabled, !phaseTimings.isEmpty {
                 let phases = phaseTimings.map {
@@ -3337,6 +3361,83 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             interactiveInFlightSubmissionLimit = 1
         } else if gpuMilliseconds >= Self.doubleBufferGPUThresholdMilliseconds {
             interactiveInFlightSubmissionLimit = Self.maximumInteractiveInFlightSubmissions
+        }
+    }
+
+    private func updateAdaptiveInteractiveStepLimit(
+        gpuMilliseconds: Double,
+        encodedSimulationStepCount: Int,
+        phaseTimings: [MetalPhaseTiming]
+    ) {
+        guard gpuMilliseconds.isFinite, gpuMilliseconds >= 0 else { return }
+        if encodedSimulationStepCount == 0 {
+            renderOnlyGPUMillisecondsEWMA =
+                renderOnlyGPUMillisecondsEWMA * 0.84 + gpuMilliseconds * 0.16
+            return
+        }
+
+        let timedRenderMilliseconds = phaseTimings.reduce(0.0) { total, timing in
+            switch timing.phase {
+            case "direct scientific display", "scene raster",
+                 "bloom downsample", "display composite":
+                total + timing.gpuMilliseconds
+            default:
+                total
+            }
+        }
+        let timedSubmissionMilliseconds = phaseTimings.reduce(0.0) {
+            $0 + $1.gpuMilliseconds
+        }
+        if timedRenderMilliseconds > 0 {
+            // Precise Metal counter samples periodically calibrate render cost;
+            // intervening frames use the stable estimate without CPU stalls.
+            renderOnlyGPUMillisecondsEWMA =
+                renderOnlyGPUMillisecondsEWMA * 0.80 +
+                timedRenderMilliseconds * 0.20
+        }
+        let measuredSimulationMilliseconds =
+            timedSubmissionMilliseconds > timedRenderMilliseconds
+            ? timedSubmissionMilliseconds - timedRenderMilliseconds
+            : gpuMilliseconds - renderOnlyGPUMillisecondsEWMA
+        let simulationMilliseconds = max(
+            measuredSimulationMilliseconds,
+            Double(encodedSimulationStepCount) * 0.05
+        )
+        let observedPerStep =
+            simulationMilliseconds / Double(encodedSimulationStepCount)
+        if hasSimulationStepTimingSample {
+            simulationStepGPUMillisecondsEWMA =
+                simulationStepGPUMillisecondsEWMA * 0.82 +
+                observedPerStep * 0.18
+        } else {
+            simulationStepGPUMillisecondsEWMA = observedPerStep
+            hasSimulationStepTimingSample = true
+        }
+
+        let availableSimulationMilliseconds = max(
+            Self.interactiveGPUFrameBudgetMilliseconds -
+                renderOnlyGPUMillisecondsEWMA,
+            0.5
+        )
+        let sustainableStepCount = max(
+            1,
+            min(
+                Self.maximumInteractiveStepsPerSubmission,
+                Int(floor(
+                    availableSimulationMilliseconds /
+                        max(simulationStepGPUMillisecondsEWMA, 0.05)
+                ))
+            )
+        )
+        if sustainableStepCount < adaptiveInteractiveStepLimit {
+            // Fast response prevents a growing population from queuing long
+            // frames. Biology slows; render quality and live cells do not.
+            adaptiveInteractiveStepLimit = sustainableStepCount
+        } else if sustainableStepCount >= adaptiveInteractiveStepLimit + 2,
+                  gpuMilliseconds <
+                    Self.interactiveGPUFrameBudgetMilliseconds * 0.78 {
+            // Recover one step at a time to avoid oscillation around the budget.
+            adaptiveInteractiveStepLimit += 1
         }
     }
 

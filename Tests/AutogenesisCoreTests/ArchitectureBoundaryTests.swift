@@ -1065,12 +1065,77 @@ struct ArchitectureBoundaryTests {
         ))
         let resolver = String(shader[resolverStart.lowerBound..<applyStart.lowerBound])
         let union = String(shader[unionStart.lowerBound..<compressStart.lowerBound])
-        #expect(shader.contains("constant uint membraneContactPairCapacity = 524288u"))
+        #expect(shader.contains(
+            "constant uint membraneContactPairCapacity = maxCellCount * membraneVertexCount"
+        ))
+        #expect(shader.contains("uint nearestIndex[membraneVertexCount]"))
+        #expect(shader.contains("float nearestSurfaceGap[membraneVertexCount]"))
+        #expect(shader.contains(
+            "uint sector = nearestMembraneContactSector("
+        ))
+        #expect(shader.contains("magnitude.y <= magnitude.x * 0.2679492"))
+        #expect(!shader.contains("float angle = atan2("))
+        #expect(!shader.contains("traversed < 96u"))
         #expect(resolver.contains("device const uint2* contactPairs"))
         #expect(union.contains("device const uint2* contactPairs"))
         #expect(!resolver.contains("hashHeads"))
         #expect(!union.contains("hashHeads"))
         #expect(shader.contains("invariantContactPairOverflow"))
+        #expect(shader.contains(
+            "if (previousCount > 0u && currentCount == 0u)"
+        ))
+        #expect(shader.contains("uniforms.step % componentTopologyReconciliationStride"))
+    }
+
+    @Test
+    func stableDevelopmentUsesStaggeredAnalyticalIntegration() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        #expect(shader.contains("uint relaxationSpan"))
+        #expect(shader.contains("float retainedOverSpan = relaxationSpan >= 2u"))
+        #expect(shader.contains("if (relaxationSpan >= 4u)"))
+        #expect(shader.contains("float integratedRate = 1.0 - retainedOverSpan"))
+        #expect(shader.contains("bool regulatoryHot ="))
+        #expect(shader.contains("uint regulatoryCadence = regulatoryHot"))
+        #expect(shader.contains(
+            "(uniforms.step + cellIdentity.persistentID) % regulatoryCadence"
+        ))
+        #expect(shader.contains("regulatoryOutput.a = cell.regulation"))
+        #expect(shader.contains("regulatoryOutput.b = cell.regulationB"))
+    }
+
+    @Test
+    func interactiveLoadSheddingSlowsBiologyWithoutReducingGraphics() throws {
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+        #expect(renderer.contains(
+            "interactiveGPUFrameBudgetMilliseconds = 12.5"
+        ))
+        #expect(renderer.contains("adaptiveInteractiveStepLimit"))
+        #expect(renderer.contains("simulationStepGPUMillisecondsEWMA"))
+        #expect(renderer.contains("updateAdaptiveInteractiveStepLimit("))
+        #expect(renderer.contains(
+            "min(\n                    Self.maximumInteractiveStepsPerSubmission,\n                    adaptiveInteractiveStepLimit"
+        ))
+        let adaptiveStart = try #require(renderer.range(
+            of: "private func updateAdaptiveInteractiveStepLimit"
+        ))
+        let telemetryStart = try #require(renderer.range(
+            of: "private func publishRuntimeTelemetry",
+            range: adaptiveStart.upperBound..<renderer.endIndex
+        ))
+        let adaptive = String(
+            renderer[adaptiveStart.lowerBound..<telemetryStart.lowerBound]
+        )
+        #expect(!adaptive.contains("observationZoom"))
+        #expect(!adaptive.contains("rasterStep"))
+        #expect(!adaptive.contains("visibleCell"))
     }
 
     @Test
@@ -1129,7 +1194,7 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func componentTopologyIsEventDrivenAndClearsOnlyLivingRoots() throws {
+    func componentTopologyInvalidatesOnReachabilityEventsAndClearsOnlyLivingRoots() throws {
         let shader = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
@@ -1142,7 +1207,9 @@ struct ArchitectureBoundaryTests {
         )
         #expect(shader.contains("componentTopologyReconciliationStride = 256u"))
         #expect(shader.contains("kernel void detectCellTopologyChanges"))
-        #expect(shader.contains("currentCount != previousCount || currentHash != previousHash"))
+        #expect(shader.contains("previousCount > 0u && currentCount == 0u"))
+        #expect(shader.contains("persistentTopologyJunction"))
+        #expect(shader.contains("topologyBreakGap"))
         #expect(shader.contains("bool newSameOwnerConnection"))
         #expect(shader.contains("bool fusionCandidate"))
         #expect(shader.contains("kernel void finalizeCellTopology"))
