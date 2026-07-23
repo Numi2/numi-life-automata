@@ -10447,7 +10447,7 @@ kernel void compactVisibleJunctions(
         !all(isfinite(junctionStates[junctionIndex].remodeling))) { return; }
 
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (observationZoom <= 1.25 || observationZoom >= 64.0 ||
+    if (observationZoom <= 0.35 || observationZoom >= 64.0 ||
         (uniforms.trackedAgentID != 0xffffffffu &&
             uniforms.trackedAgentID != owner && observationZoom >= 34.0)) { return; }
     float2 centerA = cellWorldPosition(agents[owner], cells[cellA].position, uniforms);
@@ -10863,13 +10863,22 @@ vertex JunctionRasterData junctionVertex(
     float collectiveCohesion = saturate(max(
         stateA.collectiveBoundary.y, stateB.collectiveBoundary.y
     ));
-    float thickness = clamp(
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    float overviewLOD = 1.0 - smoothstep(4.0, 8.0, observationZoom);
+    float detailThickness = clamp(
         worldUnit * uniforms.cameraZoom * (
             0.010 + load * 0.012 + corticalTension * 0.004 +
             collectiveCohesion * 0.014
         ),
         0.0018, 0.020
     );
+    float overviewThickness = overviewLOD * clamp(
+        worldUnit * uniforms.cameraZoom * (
+            0.048 + strength * 0.020 + collectiveCohesion * 0.024
+        ),
+        0.0024, 0.0064
+    );
+    float thickness = max(detailThickness, overviewThickness);
     float2 normal = normalize(float2(-clipDelta.y, clipDelta.x));
     float2 clipPosition = mix(clipA, clipB, coordinate.x) +
         normal * coordinate.y * thickness;
@@ -10916,8 +10925,10 @@ vertex JunctionRasterData junctionVertex(
     }
     output.lineageA = float4(hsvToRGB(float3(hueA, 0.82, 0.92)), 1.0);
     output.lineageB = float4(hsvToRGB(float3(hueB, 0.82, 0.92)), 1.0);
-    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    output.visibility = smoothstep(2.0, 8.0, observationZoom) *
+    float overviewVisibility = smoothstep(0.35, 0.85, observationZoom) *
+        (1.0 - smoothstep(5.5, 9.0, observationZoom));
+    float detailVisibility = smoothstep(2.0, 8.0, observationZoom);
+    output.visibility = max(overviewVisibility, detailVisibility) *
         (1.0 - smoothstep(112.0, 180.0, observationZoom));
     return output;
 }
@@ -10936,6 +10947,32 @@ fragment float4 junctionFragment(
     float signedStrain = clamp(input.mechanics.y, -1.0, 1.0);
     float strength = saturate(input.mechanics.z);
     float corticalTension = saturate(input.mechanics.w);
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    if (observationZoom < 6.0) {
+        float3 lineageColor = mix(
+            input.lineageA.rgb, input.lineageB.rgb, along
+        );
+        float centerFill = 1.0 - smoothstep(0.18, 0.86, side);
+        float3 tissueColor = mix(
+            float3(0.012, 0.090, 0.076), lineageColor, 0.42
+        );
+        tissueColor = mix(
+            tissueColor, float3(0.48, 1.0, 0.78),
+            input.collectiveCohesion * 0.22
+        );
+        float3 overviewColor = tissueColor * ribbon *
+            (0.34 + centerFill * 0.42 + strength * 0.24);
+        float overviewAlpha = ribbon * input.visibility *
+            saturate(0.46 + strength * 0.18 +
+                input.collectiveCohesion * 0.30);
+        if (!all(isfinite(overviewColor)) || !isfinite(overviewAlpha)) {
+            discard_fragment();
+        }
+        return float4(
+            clamp(overviewColor * input.visibility, 0.0, 16.0),
+            saturate(overviewAlpha)
+        );
+    }
     float3 compressionColor = float3(0.04, 0.62, 1.0);
     float3 tensionColor = float3(1.0, 0.24, 0.025);
     float3 mechanicalColor = mix(
@@ -11027,6 +11064,7 @@ struct CellRasterData {
     float radialCoordinate;
     float edgeExposure;
     float2 footState;
+    float organism;
     float4 localMembrane;
 };
 
@@ -11117,11 +11155,13 @@ inline CellRasterData makeCellRasterData(
     // the sign while retaining the strain magnitude. Only a maintained exposed
     // arc can project the supracellular surface beyond the cellular membrane.
     float edgeExposure = localVertex.mechanics.w > 0.0 ? 1.0 : 0.0;
-    float renderFootMaturity =
-        (agent.componentFlags & componentMulticellularFlag) != 0u
-        ? saturate(cell.collectiveBoundary.z) : 0.0;
+    float multicellularBody =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    float renderFootMaturity = multicellularBody *
+        saturate(cell.collectiveBoundary.z);
     float renderedFootPad = 0.0;
     float renderFootStance = 0.0;
+    float2 renderedFootDirection = float2(0.0);
     if (triangleVertex != 0u && edgeExposure > 0.0 &&
         renderFootMaturity > 0.001) {
         float2 membraneDirection = membranePosition / max(
@@ -11133,12 +11173,14 @@ inline CellRasterData makeCellRasterData(
         float renderFootCycle = fract(cell.collectiveBoundary.w + footSidePhase);
         renderFootStance = smoothstep(0.04, 0.24, renderFootCycle) *
             (1.0 - smoothstep(0.62, 0.94, renderFootCycle));
-        float2 renderFootDirection = normalize(
+        renderedFootDirection = normalize(
             componentBoundaryNormal +
             float2((renderFootCycle * 2.0 - 1.0) * 0.26, 0.0) +
             componentBoundaryNormal * 0.0001
         );
-        float footAlignment = saturate(dot(membraneDirection, renderFootDirection));
+        float footAlignment = saturate(dot(
+            membraneDirection, renderedFootDirection
+        ));
         float focusedFootAlignment = footAlignment * footAlignment;
         focusedFootAlignment *= focusedFootAlignment;
         focusedFootAlignment *= focusedFootAlignment;
@@ -11155,6 +11197,14 @@ inline CellRasterData makeCellRasterData(
         saturate(cell.collectiveBoundary.y) * 0.006
     );
     float2 renderMembranePosition = membranePosition;
+    float overviewBodyLOD = multicellularBody *
+        (1.0 - smoothstep(4.0, 8.0, observationZoom));
+    if (triangleVertex != 0u) {
+        // Preserve the measured contour while giving its existing membrane a
+        // bounded overview footprint; this closes sub-pixel gaps without an
+        // organism sprite or a second geometry path.
+        renderMembranePosition *= 1.0 + overviewBodyLOD * 0.18;
+    }
     if (triangleVertex != 0u && surfaceExtension > 0.000001) {
         float membraneRadius = triangleVertex == 1u ? startRadius : endRadius;
         float2 outwardNormal = membraneRadius > 0.000001
@@ -11178,6 +11228,17 @@ inline CellRasterData makeCellRasterData(
     float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
     float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
         max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    float footOverviewProjection = renderedFootPad *
+        (1.0 - smoothstep(4.0, 8.0, observationZoom));
+    if (footOverviewProjection > 0.001 &&
+        length(renderedFootDirection) > 0.001) {
+        float2 worldFootDirection =
+            heading * renderedFootDirection.x +
+            lateral * renderedFootDirection.y;
+        float2 screenFootDirection = worldFootDirection / viewScale;
+        screenUV += normalize(screenFootDirection) *
+            footOverviewProjection * 0.0032;
+    }
     // Do not reject one vertex of an otherwise valid triangle by screen position.
     // Mixed valid/sentinel vertices form a giant clipped primitive and were able to
     // overwrite large display tiles. The earlier physical bounds make finiteness a
@@ -11249,6 +11310,7 @@ inline CellRasterData makeCellRasterData(
         ? saturate(cell.tissueGeometry.z)
         : edgeExposure;
     output.footState = float2(renderedFootPad, renderFootStance);
+    output.organism = multicellularBody;
     float localIntegrity = triangleVertex == 0u
         ? saturate(cell.physiology.w) : saturate(localVertex.mechanics.y);
     float localPressure = triangleVertex == 0u
@@ -11349,6 +11411,49 @@ fragment float4 cellFragment(
     if (body <= 0.001) { discard_fragment(); }
 
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    if (observationZoom < 6.0) {
+        float organism = saturate(input.organism);
+        float integrity = saturate(input.localMembrane.x);
+        float atp = saturate(input.physiology.x);
+        float exposure = saturate(input.edgeExposure);
+        float outerBand = body * smoothstep(0.62, 0.98, radius);
+        float exposedBand = outerBand * mix(0.52, 1.0, exposure);
+        float innerBody = body * (1.0 - outerBand * 0.68);
+        float3 lineage = hsvToRGB(float3(input.lineageHue, 0.72, 0.66));
+        float3 solitaryColor = mix(
+            float3(0.16, 0.035, 0.070), lineage, 0.46
+        );
+        float3 collectiveColor = mix(
+            float3(0.014, 0.115, 0.092), lineage, 0.32
+        );
+        float3 color = mix(
+            solitaryColor, collectiveColor, organism
+        ) * innerBody * (0.42 + atp * 0.44);
+        color += mix(
+            lineage, float3(0.42, 1.0, 0.76), organism * 0.72
+        ) * exposedBand * (
+            0.28 + integrity * 0.38 + organism * 0.34
+        );
+        float collectiveSurface = outerBand * organism * exposure *
+            saturate(
+                0.26 + input.collectiveBoundary.x * 0.48 +
+                input.collectiveBoundary.y * 0.26
+            );
+        color += float3(0.72, 1.0, 0.88) * collectiveSurface * 0.48;
+        float footPad = outerBand * saturate(input.footState.x);
+        float footSole = footPad * saturate(input.footState.y);
+        color = mix(color, float3(0.006, 0.050, 0.038), footPad * 0.82);
+        color += float3(0.06, 1.0, 0.50) * footSole * 0.92;
+        color += float3(0.10, 0.92, 1.0) * input.tracked *
+            exposedBand * 0.42;
+        float alpha = body * input.visibility *
+            mix(0.60, 0.96, organism);
+        color *= input.visibility;
+        if (!all(isfinite(color)) || !isfinite(alpha)) {
+            discard_fragment();
+        }
+        return float4(clamp(color, 0.0, 16.0), saturate(alpha));
+    }
     if (observationZoom >= 18.0) {
         // Dense tissue is dominated by fragment occupancy. Preserve the causal
         // observables that distinguish cells and bodies, but omit sub-pixel

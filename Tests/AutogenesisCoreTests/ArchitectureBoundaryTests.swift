@@ -1218,4 +1218,41 @@ struct ArchitectureBoundaryTests {
         #expect(shader.contains("float3(0.012, 0.085, 0.070), footPad"))
         #expect(!shader.contains("organismFootSprite"))
     }
+
+    @Test
+    func ecologyOverviewKeepsPhysicalIndividualsConnectedAndFeetReadable() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let renderer = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
+            encoding: .utf8
+        )
+
+        let compactionStart = try #require(shader.range(
+            of: "kernel void compactVisibleJunctions"
+        ))
+        let compactionEnd = try #require(shader.range(
+            of: "kernel void finalizeRenderDrawArguments",
+            range: compactionStart.upperBound..<shader.endIndex
+        ))
+        let compaction = String(
+            shader[compactionStart.lowerBound..<compactionEnd.lowerBound]
+        )
+        #expect(compaction.contains("observationZoom <= 0.35"))
+        #expect(!compaction.contains("observationZoom <= 1.25"))
+        #expect(shader.contains("float overviewVisibility = smoothstep(0.35, 0.85"))
+        #expect(shader.contains("float overviewThickness = overviewLOD * clamp"))
+        #expect(shader.contains("float multicellularBody ="))
+        #expect(shader.contains("output.organism = multicellularBody"))
+        #expect(shader.contains("float footOverviewProjection = renderedFootPad"))
+        #expect(shader.contains("float organism = saturate(input.organism)"))
+        #expect(renderer.contains(
+            "let rendersTissueOverlay = observationZoom > 0.35 && renderScale < 3"
+        ))
+        #expect(!renderer.contains("organismOverviewRenderPipeline"))
+    }
 }
