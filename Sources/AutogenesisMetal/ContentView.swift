@@ -179,10 +179,6 @@ struct ContentView: View {
                 store.addColony()
             }
 
-            simpleCommandButton("New world", systemImage: "arrow.counterclockwise") {
-                store.restart()
-            }
-
             Spacer(minLength: 4)
 
             Menu {
@@ -548,10 +544,6 @@ struct ContentView: View {
 
             numiIconButton("plus", help: "Add a new life-form", tint: .mint) {
                 store.addColony()
-            }
-
-            numiIconButton("arrow.counterclockwise", help: "Start a new world") {
-                store.restart()
             }
 
             numiIconButton(

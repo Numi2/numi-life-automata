@@ -605,10 +605,16 @@ struct ArchitectureBoundaryTests {
                 .appending(path: "Sources/AutogenesisMetal/MetalEvolutionView.swift"),
             encoding: .utf8
         )
+        let store = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionStore.swift"),
+            encoding: .utf8
+        )
 
         #expect(!content.contains("Picker(\"Speed\""))
         #expect(!content.contains(".pickerStyle(.segmented)"))
         #expect(content.contains("ForEach([1, 3, 6, 24]"))
+        #expect(store.contains("@Published var stepsPerFrame = 3"))
         #expect(metalView.contains("@ObservedObject var store: EvolutionStore"))
     }
 
@@ -791,19 +797,23 @@ struct ArchitectureBoundaryTests {
         #expect(renderer.contains("deepBodyContextRenderPipeline"))
         #expect(renderer.contains("waveCellRenderPipeline"))
         #expect(renderer.contains("guard encodeVisibleCellCompaction("))
+        #expect(renderer.contains(
+            "let rendersDeepBiologicalContext =\n" +
+            "                renderScale < 5 || settings.trackedAgentID != .max"
+        ))
+        #expect(renderer.contains("} else if rendersDeepBiologicalContext {"))
         #expect(!renderer.contains("molecularCellMeshRenderPipeline"))
         #expect(contentView.contains("Intracellular molecules in physical cells"))
         #expect(contentView.contains("Wave state coupled to physical cells and organisms"))
         #expect(contentView.contains("if (0...4).contains(index), store.followedAgentID == nil"))
         #expect(contentView.contains("store.ensureLivingFocus()"))
-        #expect(store.contains("private var autoFollowInitialObservation = true"))
+        #expect(store.contains("private var autoFollowInitialObservation = false"))
         #expect(store.contains("autoFollowInitialObservation = magnification >= 6"))
         #expect(store.contains(
             "private func clearFollow() {\n        autoFollowInitialObservation = false"
         ))
-        #expect(store.contains(
-            "resetCamera()\n        autoFollowInitialObservation = true"
-        ))
+        #expect(!store.contains("func restart()"))
+        #expect(!contentView.contains("store.restart()"))
         #expect(renderer.contains("encoder.setRenderPipelineState(deepBodyContextRenderPipeline)"))
         #expect(contentView.contains("VISIBLE INTRACELLULAR POOLS"))
         #expect(!contentView.contains("MEASURED REACTION PATH"))

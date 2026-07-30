@@ -5107,16 +5107,24 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             frameIndex: UInt32(truncatingIfNeeded: frameSerial)
         )
 
-        // Deep instruments present directly. All three compact only visible physical
-        // cells; molecular scale renders their contents, while wave and spinor scales
-        // retain a faint body interior plus the measured exposed membrane. They skip
-        // junctions and avoid HDR store/reload, bloom, and a second render pass.
+        // Deep instruments present directly. Molecular and wave scales compact only
+        // visible physical cells; followed spinor views retain the same faint body
+        // context, while the unfocused launch instrument needs only the spinor field.
+        // They skip junctions and avoid HDR store/reload, bloom, and a second pass.
         if renderScale >= 3 {
-            guard encodeVisibleCellCompaction(
-                into: commandBuffer,
-                settings: settings,
-                includeJunctions: false
-            ) else { return }
+            // The launch presentation is the unfocused spinor instrument itself.
+            // Cell compaction and biological overlays do not contribute to that
+            // image, so reserve them for molecular/wave scales or an explicitly
+            // followed organism.
+            let rendersDeepBiologicalContext =
+                renderScale < 5 || settings.trackedAgentID != .max
+            if rendersDeepBiologicalContext {
+                guard encodeVisibleCellCompaction(
+                    into: commandBuffer,
+                    settings: settings,
+                    includeJunctions: false
+                ) else { return }
+            }
             let descriptor = MTL4RenderPassDescriptor()
             let attachment = descriptor.colorAttachments[0]!
             attachment.texture = drawableTexture
@@ -5164,7 +5172,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     indirectBuffer: cellDrawArguments,
                     indirectBufferOffset: 0
                 )
-            } else {
+            } else if rendersDeepBiologicalContext {
                 encoder.setRenderPipelineState(deepBodyContextRenderPipeline)
                 encoder.setVertexBuffer(agentState, offset: 0, index: 0)
                 encoder.setVertexBuffer(agentOccupancy, offset: 0, index: 1)

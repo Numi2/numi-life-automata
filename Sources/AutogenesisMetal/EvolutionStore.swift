@@ -461,7 +461,7 @@ final class EvolutionStore: ObservableObject {
     private static let spinorOrigin = SIMD2<Float>(repeating: 0.500_488_281_25)
 
     @Published var isRunning = true
-    @Published var stepsPerFrame = 6
+    @Published var stepsPerFrame = 3
     @Published var resourceFlux: Double = 1.0
     @Published var mutationScale: Double = 1.0
     @Published var transportScale: Double = 1.0
@@ -536,7 +536,10 @@ final class EvolutionStore: ObservableObject {
     )
     private var lineageTracker = LineageDivergenceTracker()
     private var hasObservedFirstBiologicalUnit = false
-    private var autoFollowInitialObservation = true
+    // Fresh launches stay centered on the initialized quantum cell so both
+    // spinor components are visible immediately. Explicit scale/follow actions
+    // can still opt into tracking a biological unit.
+    private var autoFollowInitialObservation = false
     private var pendingMechanosensoryIntervention: (baseline: EvolutionSnapshot, blocked: Bool)?
 
     init() {
@@ -573,63 +576,6 @@ final class EvolutionStore: ObservableObject {
             expansionToken: expansionToken,
             resetToken: resetToken
         )
-    }
-
-    func restart() {
-        resetToken &+= 1
-        snapshot = EvolutionSnapshot()
-        history.removeAll(keepingCapacity: true)
-        events.removeAll(keepingCapacity: true)
-        addedColonyCount = 0
-        founderCount = 0
-        fusionEventCount = 0
-        crossbreedingEventCount = 0
-        lineageAnalysis = .empty
-        lineageBranches.removeAll(keepingCapacity: true)
-        componentAncestryEdges.removeAll(keepingCapacity: true)
-        lineageTracker.reset()
-        followedBirthID = nil
-        followedAgentID = nil
-        observableAgentCount = 0
-        resolvedIndividualCount = 0
-        resolvedCellIndividualCount = 0
-        resolvedCollectiveIndividualCount = 0
-        meanEnergeticIndependence = 0
-        meanMechanochemicalClosure = 0
-        maximumProgramReplicationGeneration = 0
-        individualityEvidence = .inconclusive
-        autonomyVectors.removeAll(keepingCapacity: true)
-        currentComponentAutonomyVectors.removeAll(keepingCapacity: true)
-        resolvedIndividualLabels.removeAll(keepingCapacity: true)
-        runtimeTelemetry = .idle
-        maximumLivingLineageGeneration = 0
-        livingDescendantCount = 0
-        resolvedDescendantCount = 0
-        livingDescendantCellCount = 0
-        followedEnergeticIndependence = 0
-        followedMechanochemicalClosure = 0
-        observedAgents.removeAll(keepingCapacity: true)
-        individualityObserver.reset()
-        previousProgramRepresentations.removeAll(keepingCapacity: true)
-        pendingComponentContributions.removeAll(keepingCapacity: true)
-        selectionIntervals.removeAll(keepingCapacity: true)
-        componentMorphologyArchive.removeAll(keepingCapacity: true)
-        componentMorphologyOrder.removeAll(keepingCapacity: true)
-        previousResolvedIndividualKeys.removeAll(keepingCapacity: true)
-        currentSelection = SelectionPartition(
-            betweenComponentSelection: 0,
-            withinComponentSelection: 0,
-            transmissionChange: 0,
-            covarianceSampleCount: 0
-        )
-        worldScale = 1
-        expansionToken = 0
-        lastRecordedGeneration = 0
-        hasObservedFirstBiologicalUnit = false
-        mechanosensingBlocked = false
-        pendingMechanosensoryIntervention = nil
-        resetCamera()
-        autoFollowInitialObservation = true
     }
 
     func toggleMechanosensingIntervention() {

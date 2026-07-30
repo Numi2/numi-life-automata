@@ -51,7 +51,7 @@ targets:
         PRODUCT_NAME: Numi Automata
         EXECUTABLE_NAME: NumiAutomata
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "2"
+        CURRENT_PROJECT_VERSION: "3"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Packaging/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

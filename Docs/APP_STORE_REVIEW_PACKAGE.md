@@ -7,7 +7,7 @@
 - Bundle ID: `com.numi.automata`
 - Apple ID: `6794099092`
 - Version: `1.0`
-- Build: `2`
+- Build: `3`
 - Minimum system: macOS 26.0
 - Category: Education
 - Distribution: Free
@@ -68,10 +68,15 @@ evolution,artificial life,cells,organisms,simulation,science,ecology,emergence
 Numi Automata is an offline, sandboxed Metal simulation. It has no account,
 network service, analytics, advertising, payments, or user-generated content.
 
-On launch, the main simulation opens automatically. Use the scale controls to
-move between ecology, organism, cellular, intracellular, and wave views. Use
-the speed control to run the unchanged solver at 1x, 3x, 6x, or 24x. The
-scientific inspector is optional.
+On launch, the main simulation opens automatically, centered on the initialized
+quantum cell with both spinor components visible. The default simulation speed
+is Normal (3x). Use the scale controls to move between ecology, organism,
+cellular, intracellular, and wave views, or select 1x, 3x, 6x, or 24x from the
+speed control. The scientific inspector is optional.
+
+Build 3 removes the circular-arrow New World/refresh control reported in the
+previous review. There is no refresh or interactive world-reset action in
+either interface.
 
 The world intentionally begins without initialized cells. A founder cell is
 allocated when local field thresholds are met; this can take a short time.

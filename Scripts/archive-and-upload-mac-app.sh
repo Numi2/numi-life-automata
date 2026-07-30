@@ -37,4 +37,4 @@ xcodebuild -exportArchive \
     -exportOptionsPlist "$root/Config/ExportOptions-AppStoreConnect.plist" \
     -allowProvisioningUpdates
 
-print "Uploaded Numi Automata 1.0 (2) to App Store Connect."
+print "Uploaded Numi Automata 1.0 (3) to App Store Connect."
