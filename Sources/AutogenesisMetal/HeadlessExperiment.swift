@@ -320,6 +320,18 @@ struct ExperimentComponentSnapshot: Codable, Sendable, Equatable {
     let regeneratedDevelopment: Bool
     let challenged: Bool
     let homeostatic: Bool
+    let ontogeneticProgress: Double
+    let reproductiveMaturity: Double
+    let senescentLoad: Double
+    let regenerativeReopening: Double
+    let germlineRole: Double
+    let somaRole: Double
+    let neuralRole: Double
+    let builderRole: Double
+    let predictionError: Double
+    let habituation: Double
+    let acquiredBehavior: Double
+    let nicheConstruction: [Double]
     let morphology: [Double]
 }
 
@@ -438,6 +450,21 @@ struct ExperimentSample: Codable {
     let meanDevelopmentalPolarityCoherence: Double
     let meanMorphogenSynthesisRate: Double
     let meanMorphogenTransportWork: Double
+    let meanOntogeneticProgress: Double
+    let meanReproductiveMaturity: Double
+    let meanSenescentLoad: Double
+    let meanRegenerativeReopening: Double
+    let meanGermlineRole: Double
+    let meanSomaRole: Double
+    let meanNeuralRole: Double
+    let meanBuilderRole: Double
+    let meanPredictionError: Double
+    let meanHabituation: Double
+    let meanAcquiredBehavior: Double
+    let meanShelterConstruction: Double
+    let meanReservoirConstruction: Double
+    let meanRecyclingConstruction: Double
+    let meanDetoxificationConstruction: Double
     let meanEnergeticIndependence: Double
     let meanBoundaryMaintenance: Double
     let meanMechanochemicalClosure: Double

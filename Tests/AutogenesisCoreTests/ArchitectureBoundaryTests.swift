@@ -10,7 +10,7 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func causalShaderContainsNoObserverOrLifecycleState() throws {
+    func causalShaderContainsNoObserverOrScriptedLifecycleLabels() throws {
         let shader = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
@@ -285,8 +285,8 @@ struct ArchitectureBoundaryTests {
                 .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
             encoding: .utf8
         )
-        #expect(shader.contains("float regulatorySensors[20]"))
-        #expect(shader.contains("node.sensorIndex < 20u"))
+        #expect(shader.contains("float regulatorySensors[24]"))
+        #expect(shader.contains("node.sensorIndex < 24u"))
         #expect(shader.contains("float4 morphogenesisA;"))
         #expect(shader.contains("float4 morphogenesisB;"))
         #expect(shader.contains("float actuators[12]"))
@@ -299,6 +299,48 @@ struct ArchitectureBoundaryTests {
         for forbidden in ["sensorCell", "muscleCell", "armorCell", "germCell"] {
             #expect(!shader.contains(forbidden))
         }
+    }
+
+    @Test
+    func lifecycleLearningAndNicheConstructionRemainEvolvableAndPhysical() throws {
+        let shader = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/Shaders/Replicator.metal"),
+            encoding: .utf8
+        )
+        let lifecycle = try #require(shader.range(of: "float reproductiveMaturity ="))
+        let movement = try #require(shader.range(
+            of: "float2 tractionDirection =",
+            range: lifecycle.upperBound..<shader.endIndex
+        ))
+        let update = String(shader[lifecycle.lowerBound..<movement.lowerBound])
+
+        #expect(shader.contains("float4 lifecycleA;"))
+        #expect(shader.contains("float4 lifecycleB;"))
+        #expect(shader.contains("float4 nicheConstruction;"))
+        #expect(shader.contains("float4 neuralPlasticity;"))
+        #expect(update.contains("float regenerativeReopening ="))
+        #expect(update.contains("float senescence = clamp("))
+        #expect(update.contains("float4 roles = clamp("))
+        #expect(shader.contains("float acquiredBehavior = clamp("))
+        #expect(update.contains("float nicheShelterDrive = builderRole"))
+        #expect(update.contains("float nicheReservoirDrive = builderRole"))
+        #expect(update.contains("float nicheRecyclingDrive = builderRole"))
+        #expect(update.contains("float nicheDetoxDrive = builderRole"))
+        #expect(shader.contains("float seasonalWave ="))
+        #expect(shader.contains("float longSeason ="))
+        #expect(shader.contains("cell.lifecycle.x *= 1.0 - propaguleRejuvenation"))
+        #expect(shader.contains("Soma-heavy fragments retain age"))
+        #expect(shader.contains("child.learning *= acquiredStateInheritance"))
+        #expect(shader.contains("transmission *= 0.18 + saturate(culturalExpression)"))
+        #expect(!shader.contains("scalarFitness"))
+        #expect(!shader.contains("globalFitness"))
+        let store = try String(
+            contentsOf: repositoryRoot
+                .appending(path: "Sources/AutogenesisMetal/EvolutionStore.swift"),
+            encoding: .utf8
+        )
+        #expect(store.contains("agent.hasReceivedDamageChallenge || agent.boundary.w < 0.92"))
     }
 
     @Test
@@ -452,14 +494,14 @@ struct ArchitectureBoundaryTests {
     }
 
     @Test
-    func experimentJournalUsesSchema16() throws {
+    func experimentJournalUsesSchema17() throws {
         let renderer = try String(
             contentsOf: repositoryRoot
                 .appending(path: "Sources/AutogenesisMetal/EvolutionRenderer.swift"),
             encoding: .utf8
         )
-        #expect(renderer.contains("schemaVersion: 16"))
-        #expect(!renderer.contains("schemaVersion: 14"))
+        #expect(renderer.contains("schemaVersion: 17"))
+        #expect(!renderer.contains("schemaVersion: 16"))
     }
 
     @Test

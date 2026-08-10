@@ -846,6 +846,16 @@ struct ContentView: View {
                 storyStateValue("GROWTH", value: storyGrowthStatus, tint: .pink)
             }
 
+            sectionLabel("THIS LIFE")
+            HStack(spacing: 8) {
+                storyStateValue("LIFE", value: storyLifeStatus, tint: .orange)
+                storyStateValue("ROLE", value: storyRoleStatus, tint: .cyan)
+            }
+            HStack(spacing: 8) {
+                storyStateValue("LEARNING", value: storyLearningStatus, tint: .blue)
+                storyStateValue("WORLD WORK", value: storyNicheStatus, tint: .green)
+            }
+
             sectionLabel("RECENT EVENTS")
             if store.events.isEmpty {
                 Text("The story is just beginning.")
@@ -889,6 +899,12 @@ struct ContentView: View {
 
     private var storyIcon: String {
         if store.snapshot.cellCount == 0 { return "sparkles" }
+        if storyLifeStatus == "Healing" { return "bandage" }
+        if storyLifeStatus == "Aging" { return "hourglass" }
+        if storyLearningStatus == "Adapting" || storyLearningStatus == "Learned" {
+            return "brain.head.profile"
+        }
+        if storyNicheStatus != "None yet" { return "leaf" }
         if storyGrowthStatus == "Growing" { return "arrow.up.right" }
         if storyHealthStatus == "Strained" || storyHealthStatus == "At risk" {
             return "heart.text.square"
@@ -900,6 +916,21 @@ struct ContentView: View {
     private var storyHeadline: String {
         if store.snapshot.cellCount == 0 {
             return "The world is waiting for life to begin."
+        }
+        if storyLifeStatus == "Healing" {
+            return "Injury has reopened growth, and life is rebuilding itself."
+        }
+        if storyLifeStatus == "Aging" {
+            return "This life is aging, with repair competing against wear."
+        }
+        if storyLearningStatus == "Adapting" || storyLearningStatus == "Learned" {
+            return "Life is changing its behavior from experience."
+        }
+        if storyNicheStatus != "None yet" {
+            return "Life is reshaping its surroundings to make a place to live."
+        }
+        if storyLifeStatus == "Mature" {
+            return "A mature life-form is ready to create a new generation."
         }
         if store.snapshot.metrics.resourceDensity < 0.015 {
             return "Life is searching for enough food to continue."
@@ -929,7 +960,7 @@ struct ContentView: View {
         }
         let lifeCount = store.resolvedIndividualCount
         let lifeWord = lifeCount == 1 ? "life-form is" : "life-forms are"
-        return "\(cellCount) cells are sharing energy and signals. \(lifeCount) \(lifeWord) being tracked."
+        return "\(cellCount) cells are sharing energy and signals. \(lifeCount) \(lifeWord) being tracked. Life stages arise from inherited rules and present conditions, not a fixed script."
     }
 
     private var storyEnergyStatus: String {
@@ -954,6 +985,52 @@ struct ContentView: View {
         return "Quiet"
     }
 
+    private var storyLifeStatus: String {
+        guard store.snapshot.cellCount > 0 else { return "Waiting" }
+        if store.snapshot.meanRegenerativeReopening >= 0.10 &&
+            (store.snapshot.meanCellIntegrity < 0.92 || store.snapshot.meanCellStress > 0.18) {
+            return "Healing"
+        }
+        if store.snapshot.meanSenescentLoad >= 0.22 { return "Aging" }
+        if store.snapshot.meanReproductiveMaturity >= 0.55 { return "Mature" }
+        if store.snapshot.meanOntogeneticProgress < 0.18 { return "New life" }
+        return "Growing up"
+    }
+
+    private var storyRoleStatus: String {
+        guard store.snapshot.cellCount > 0 else { return "Waiting" }
+        let roles = [
+            (store.snapshot.meanGermlineRole, "Future young"),
+            (store.snapshot.meanSomaRole, "Body"),
+            (store.snapshot.meanNeuralRole, "Nerve"),
+            (store.snapshot.meanBuilderRole, "Builder")
+        ]
+        return roles.max { $0.0 < $1.0 }?.1 ?? "Undecided"
+    }
+
+    private var storyLearningStatus: String {
+        guard store.snapshot.cellCount > 0 else { return "Waiting" }
+        guard store.snapshot.meanNeuralRole >= 0.12 else { return "Not yet" }
+        if abs(store.snapshot.meanAcquiredBehavior) >= 0.06 { return "Learned" }
+        if store.snapshot.meanPredictionError >= 0.12 { return "Adapting" }
+        if store.snapshot.meanHabituation >= 0.48 { return "Familiar" }
+        return "Practising"
+    }
+
+    private var storyNicheStatus: String {
+        guard store.snapshot.cellCount > 0 else { return "Waiting" }
+        let works = [
+            (store.snapshot.meanShelterConstruction, "Shelter"),
+            (store.snapshot.meanReservoirConstruction, "Food store"),
+            (store.snapshot.meanRecyclingConstruction, "Recycler"),
+            (store.snapshot.meanDetoxificationConstruction, "Cleanup")
+        ]
+        guard let strongest = works.max(by: { $0.0 < $1.0 }), strongest.0 >= 0.002 else {
+            return "None yet"
+        }
+        return strongest.1
+    }
+
     @ViewBuilder
     private var inspectorMetrics: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -976,6 +1053,13 @@ struct ContentView: View {
                 observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                 observerMetric("Membrane voltage", value: signedDecimal(store.snapshot.meanMembraneVoltage), tint: .mint, values: store.history.map(\.meanMembraneVoltage))
                 observerMetric("Repair program / paid effect", value: "\(decimal(store.snapshot.meanRepairProgram)) / \(scientific(store.snapshot.meanRepairEffect))", tint: .green, values: store.history.map(\.meanRepairProgram))
+                observerMetric("Life progress / maturity", value: "\(percent(store.snapshot.meanOntogeneticProgress)) / \(percent(store.snapshot.meanReproductiveMaturity))", tint: .orange, values: store.history.map(\.meanOntogeneticProgress))
+                observerMetric("Senescence / regeneration", value: "\(percent(store.snapshot.meanSenescentLoad)) / \(percent(store.snapshot.meanRegenerativeReopening))", tint: .purple, values: store.history.map(\.meanSenescentLoad))
+                observerMetric("Germline / soma roles", value: "\(percent(store.snapshot.meanGermlineRole)) / \(percent(store.snapshot.meanSomaRole))", tint: .yellow, values: store.history.map(\.meanGermlineRole))
+                observerMetric("Neural / builder roles", value: "\(percent(store.snapshot.meanNeuralRole)) / \(percent(store.snapshot.meanBuilderRole))", tint: .cyan, values: store.history.map(\.meanNeuralRole))
+                observerMetric("Prediction error / habituation", value: "\(decimal(store.snapshot.meanPredictionError)) / \(percent(store.snapshot.meanHabituation))", tint: .blue, values: store.history.map(\.meanPredictionError))
+                observerMetric("Shelter / reservoir work", value: "\(scientific(store.snapshot.meanShelterConstruction)) / \(scientific(store.snapshot.meanReservoirConstruction))", tint: .green, values: store.history.map(\.meanShelterConstruction))
+                observerMetric("Recycling / detox work", value: "\(scientific(store.snapshot.meanRecyclingConstruction)) / \(scientific(store.snapshot.meanDetoxificationConstruction))", tint: .mint, values: store.history.map(\.meanRecyclingConstruction))
                 observerMetric("Exposed membrane", value: decimal(store.snapshot.meanExposedMembraneLength), tint: .blue, values: store.history.map(\.meanExposedMembraneLength))
             } else if store.observationZoom >= 18, store.displayMode == .causality {
                 let tissueCount = store.observableAgentCount
@@ -1015,6 +1099,12 @@ struct ContentView: View {
                 observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
                 observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                 observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
+                observerMetric("Life progress / maturity", value: "\(percent(store.snapshot.meanOntogeneticProgress)) / \(percent(store.snapshot.meanReproductiveMaturity))", tint: .orange, values: store.history.map(\.meanOntogeneticProgress))
+                observerMetric("Senescence / regeneration", value: "\(percent(store.snapshot.meanSenescentLoad)) / \(percent(store.snapshot.meanRegenerativeReopening))", tint: .purple, values: store.history.map(\.meanSenescentLoad))
+                observerMetric("Germline / soma roles", value: "\(percent(store.snapshot.meanGermlineRole)) / \(percent(store.snapshot.meanSomaRole))", tint: .yellow, values: store.history.map(\.meanGermlineRole))
+                observerMetric("Neural / builder roles", value: "\(percent(store.snapshot.meanNeuralRole)) / \(percent(store.snapshot.meanBuilderRole))", tint: .cyan, values: store.history.map(\.meanNeuralRole))
+                observerMetric("Prediction error / learned bias", value: "\(decimal(store.snapshot.meanPredictionError)) / \(signedDecimal(store.snapshot.meanAcquiredBehavior))", tint: .blue, values: store.history.map(\.meanPredictionError))
+                observerMetric("Niche work S/R/R/D", value: "\(scientific(store.snapshot.meanShelterConstruction)) / \(scientific(store.snapshot.meanReservoirConstruction)) / \(scientific(store.snapshot.meanRecyclingConstruction)) / \(scientific(store.snapshot.meanDetoxificationConstruction))", tint: .green, values: store.history.map(\.meanShelterConstruction))
                 observerMetric("Junction transport / polarity", value: "\(decimal(store.snapshot.meanJunctionMorphogenTransport)) / \(percent(store.snapshot.meanDevelopmentalPolarityCoherence))", tint: .mint, values: store.history.map(\.meanJunctionMorphogenTransport))
                 observerMetric("Morphogen source / work", value: "\(scientific(store.snapshot.meanMorphogenSynthesisRate)) / \(scientific(store.snapshot.meanMorphogenTransportWork))", tint: .orange, values: store.history.map(\.meanMorphogenSynthesisRate))
                 observerMetric("Membrane A / P", value: membraneGeometryLabel, tint: .blue, values: store.history.map(\.meanMembraneShapeIndex))
@@ -1054,6 +1144,9 @@ struct ContentView: View {
                     if store.displayMode == .development {
                         observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                         observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
+                        observerMetric("Life progress / maturity", value: "\(percent(store.snapshot.meanOntogeneticProgress)) / \(percent(store.snapshot.meanReproductiveMaturity))", tint: .orange, values: store.history.map(\.meanOntogeneticProgress))
+                        observerMetric("Senescence / regeneration", value: "\(percent(store.snapshot.meanSenescentLoad)) / \(percent(store.snapshot.meanRegenerativeReopening))", tint: .purple, values: store.history.map(\.meanSenescentLoad))
+                        observerMetric("Cell roles G/S/N/B", value: "\(percent(store.snapshot.meanGermlineRole)) / \(percent(store.snapshot.meanSomaRole)) / \(percent(store.snapshot.meanNeuralRole)) / \(percent(store.snapshot.meanBuilderRole))", tint: .cyan, values: store.history.map(\.meanNeuralRole))
                         observerMetric("Transport / polarity", value: "\(decimal(store.snapshot.meanJunctionMorphogenTransport)) / \(percent(store.snapshot.meanDevelopmentalPolarityCoherence))", tint: .mint, values: store.history.map(\.meanJunctionMorphogenTransport))
                     }
                     observerMetric("Mean |v|", value: speedLabel, tint: .cyan, values: store.history.map(\.meanOrganismSpeed))
@@ -1069,6 +1162,7 @@ struct ContentView: View {
                 observerMetric("Mean free R", value: resourceLabel, tint: .cyan, values: store.history.map(\.metrics.resourceDensity))
                 observerMetric("Substrate forcing", value: decimal(store.snapshot.metrics.substrateFluctuation), tint: .cyan, values: store.history.map(\.metrics.substrateFluctuation))
                 observerMetric("Detritus density", value: decimal(store.snapshot.metrics.detritusDensity), tint: .orange, values: store.history.map(\.metrics.detritusDensity))
+                observerMetric("Constructed niche S/R/R/D", value: "\(scientific(store.snapshot.meanShelterConstruction)) / \(scientific(store.snapshot.meanReservoirConstruction)) / \(scientific(store.snapshot.meanRecyclingConstruction)) / \(scientific(store.snapshot.meanDetoxificationConstruction))", tint: .green, values: store.history.map(\.meanShelterConstruction))
                 observerMetric("Barrier area", value: percent(store.snapshot.metrics.barrierFraction), tint: .gray, values: store.history.map(\.metrics.barrierFraction))
                 observerMetric("Mechanical drive", value: decimal(store.snapshot.metrics.environmentalMechanicalDrive), tint: .pink, values: store.history.map(\.metrics.environmentalMechanicalDrive))
                 observerMetric("Mean |ΔB|", value: activityLabel, tint: .orange, values: store.history.map(\.metrics.temporalActivity))
@@ -1678,6 +1772,16 @@ struct ContentView: View {
         case "Morphogen A / B": "Growth signals A / B"
         case "Membrane voltage": "Cell charge"
         case "Repair program / paid effect": "Healing effort / result"
+        case "Life progress / maturity": "Growing up / ready for young"
+        case "Senescence / regeneration": "Aging / healing"
+        case "Germline / soma roles": "Future-young / body cells"
+        case "Neural / builder roles": "Learning / world-building cells"
+        case "Prediction error / habituation": "Surprise / familiarity"
+        case "Prediction error / learned bias": "Surprise / learned response"
+        case "Shelter / reservoir work": "Shelter / food storage"
+        case "Recycling / detox work": "Recycling / cleanup"
+        case "Niche work S/R/R/D", "Constructed niche S/R/R/D": "Shelter / storage / recycling / cleanup"
+        case "Cell roles G/S/N/B": "Future-young / body / learning / builder cells"
         case "Exposed membrane": "Outer edge"
         case "Components / inferred individuals": "Groups / life-forms"
         case "Mean / max component": "Average / largest group"
@@ -1859,6 +1963,11 @@ struct ContentView: View {
         case .cellDivision: "A cell split in two"
         case .programMutation: "A new trait appeared"
         case .crossbreeding: "Two traits combined"
+        case .maturation: "A life-form grew up"
+        case .regeneration: "A life-form began healing"
+        case .senescence: "A life-form began aging"
+        case .learning: "A life-form learned from experience"
+        case .nicheConstruction: "A life-form changed its home"
         }
     }
 
@@ -1890,6 +1999,16 @@ struct ContentView: View {
             "A small inherited change created a possible new trait."
         case .crossbreeding:
             "Two existing traits were combined in a new cell."
+        case .maturation:
+            "Inherited rules and present conditions made reproduction possible."
+        case .regeneration:
+            "Injury reopened growth programs so damaged tissue could rebuild."
+        case .senescence:
+            "Wear is accumulating, and continued life now costs more repair."
+        case .learning:
+            "Experience changed this individual's response without rewriting its genes."
+        case .nicheConstruction:
+            "Cells spent energy changing the local world into shelter, storage, recycling, or cleanup."
         }
     }
 
@@ -2335,6 +2454,11 @@ struct ContentView: View {
         case .cellDivision: "arrow.triangle.2.circlepath"
         case .programMutation: "point.3.filled.connected.trianglepath.dotted"
         case .crossbreeding: "arrow.triangle.merge"
+        case .maturation: "figure.arms.open"
+        case .regeneration: "bandage"
+        case .senescence: "hourglass"
+        case .learning: "brain.head.profile"
+        case .nicheConstruction: "leaf"
         }
     }
 
@@ -2352,6 +2476,11 @@ struct ContentView: View {
         case .cellDivision: .cyan
         case .programMutation: .pink
         case .crossbreeding: .purple
+        case .maturation: .orange
+        case .regeneration: .mint
+        case .senescence: .purple
+        case .learning: .blue
+        case .nicheConstruction: .green
         }
     }
 
@@ -2359,6 +2488,7 @@ struct ContentView: View {
         switch kind {
         case .branching, .fusion: "FAMILY"
         case .cellDivision, .programMutation, .crossbreeding: "TRAIT"
+        case .maturation, .regeneration, .senescence, .learning, .nicheConstruction: "LIFE"
         default: "TIME"
         }
     }

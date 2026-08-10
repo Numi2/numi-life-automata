@@ -11,11 +11,18 @@ air="$temporary_root/Replicator.air"
 compiled="$temporary_root/Replicator.metallib"
 translated_script="$temporary_root/Replicator.mtl4-json"
 compiled_archive="$temporary_root/Replicator.mtl4archive"
+runtime_only="${NUMI_RUNTIME_ONLY_BUILD:-0}"
 
 trap 'rm -rf "$temporary_root"' EXIT
 
 xcrun -sdk macosx metal -std=metal4.0 -c "$shader" -o "$air"
 xcrun -sdk macosx metallib "$air" -o "$compiled"
+if [[ "$runtime_only" == "1" ]]; then
+    mv "$compiled" "$metallib"
+    print "Metal 4 shader library: $metallib"
+    print "Metal 4 pipeline archive: omitted from this runtime-only build"
+    exit 0
+fi
 sed -E \
     "s#\"path\": \"[^\"]*Replicator.metallib\"#\"path\": \"$compiled\"#" \
     "$pipeline_script" > "$translated_script"

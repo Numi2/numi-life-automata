@@ -4,11 +4,15 @@ set -euo pipefail
 root="${0:A:h:h}"
 destination="${NUMI_INSTALL_DIR:-$HOME/Applications}"
 open_after_install=true
+runtime_only=false
 
 while (( $# > 0 )); do
     case "$1" in
         --no-open)
             open_after_install=false
+            ;;
+        --runtime-only)
+            runtime_only=true
             ;;
         --install-dir)
             if (( $# < 2 )); then
@@ -20,10 +24,12 @@ while (( $# > 0 )); do
             ;;
         -h|--help)
             cat <<'EOF'
-Usage: ./Scripts/install-macos-app.sh [--no-open] [--install-dir DIRECTORY]
+Usage: ./Scripts/install-macos-app.sh [--no-open] [--runtime-only] [--install-dir DIRECTORY]
 
 Builds, signs, and installs Numi Automata as a normal macOS application.
 The default destination is ~/Applications.
+--runtime-only builds the metallib used by normal execution and omits the
+optional qualification archive when Apple's offline archive compiler is unavailable.
 EOF
             exit 0
             ;;
@@ -52,12 +58,16 @@ trap 'rm -rf "$temporary_root"' EXIT
 
 print "Building Numi Automata (release)..."
 cd "$root"
-./Scripts/build-metal4-assets.sh
+if $runtime_only; then
+    NUMI_RUNTIME_ONLY_BUILD=1 ./Scripts/build-metal4-assets.sh
+else
+    ./Scripts/build-metal4-assets.sh
+fi
 if [[ ! -s Sources/AutogenesisMetal/Shaders/Replicator.metallib ]]; then
     print -u2 "error: ahead-of-time Metal 4 shader library was not produced"
     exit 1
 fi
-if [[ ! -s Sources/AutogenesisMetal/Shaders/Replicator.mtl4archive ]]; then
+if ! $runtime_only && [[ ! -s Sources/AutogenesisMetal/Shaders/Replicator.mtl4archive ]]; then
     print -u2 "error: ahead-of-time Metal 4 pipeline archive was not produced"
     exit 1
 fi
@@ -81,6 +91,9 @@ cp "$root/Packaging/PrivacyInfo.xcprivacy" \
 cp "$binary_directory/$executable_name" "$staged_app/Contents/MacOS/$executable_name"
 ditto "$binary_directory/$resource_bundle_name" \
     "$staged_app/Contents/Resources/$resource_bundle_name"
+if $runtime_only; then
+    rm -f "$staged_app/Contents/Resources/$resource_bundle_name/Shaders/Replicator.mtl4archive"
+fi
 
 # SwiftPM does not expand the Xcode build-setting placeholders in the shared
 # release plist. Resolve them before LaunchServices registers the local app.

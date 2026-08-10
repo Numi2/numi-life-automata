@@ -128,7 +128,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 16,
+            schemaVersion: 17,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -1000,6 +1000,21 @@ extension EvolutionRenderer {
                     regeneratedDevelopment: agent.componentFlags & 2 != 0,
                     challenged: agent.componentFlags & 8 != 0,
                     homeostatic: agent.componentFlags & 4 != 0,
+                    ontogeneticProgress: Double(aggregate.lifecycle.x),
+                    reproductiveMaturity: Double(aggregate.lifecycle.y),
+                    senescentLoad: Double(aggregate.lifecycle.z),
+                    regenerativeReopening: Double(aggregate.lifecycle.w),
+                    germlineRole: Double(aggregate.roles.x),
+                    somaRole: Double(aggregate.roles.y),
+                    neuralRole: Double(aggregate.roles.z),
+                    builderRole: Double(aggregate.roles.w),
+                    predictionError: Double(aggregate.learning.y),
+                    habituation: Double(aggregate.learning.z),
+                    acquiredBehavior: Double(aggregate.learning.w),
+                    nicheConstruction: [
+                        Double(aggregate.niche.x), Double(aggregate.niche.y),
+                        Double(aggregate.niche.z), Double(aggregate.niche.w)
+                    ],
                     morphology: morphologyDescriptor(owner: owner).values
                 ))
             }
@@ -1359,6 +1374,21 @@ extension EvolutionRenderer {
             meanMorphogenTransportWork: cellWeightedMean {
                 $0.developmentCausality.w
             },
+            meanOntogeneticProgress: cellWeightedMean { $0.lifecycle.x },
+            meanReproductiveMaturity: cellWeightedMean { $0.lifecycle.y },
+            meanSenescentLoad: cellWeightedMean { $0.lifecycle.z },
+            meanRegenerativeReopening: cellWeightedMean { $0.lifecycle.w },
+            meanGermlineRole: cellWeightedMean { $0.roles.x },
+            meanSomaRole: cellWeightedMean { $0.roles.y },
+            meanNeuralRole: cellWeightedMean { $0.roles.z },
+            meanBuilderRole: cellWeightedMean { $0.roles.w },
+            meanPredictionError: cellWeightedMean { $0.learning.y },
+            meanHabituation: cellWeightedMean { $0.learning.z },
+            meanAcquiredBehavior: cellWeightedMean { $0.learning.w },
+            meanShelterConstruction: cellWeightedMean { $0.niche.x },
+            meanReservoirConstruction: cellWeightedMean { $0.niche.y },
+            meanRecyclingConstruction: cellWeightedMean { $0.niche.z },
+            meanDetoxificationConstruction: cellWeightedMean { $0.niche.w },
             meanEnergeticIndependence: cellWeightedMean {
                 let supply = max($0.energetics.x, 0)
                 return supply / max(supply + max($0.energetics.y, 0) +
@@ -1523,6 +1553,10 @@ private struct AgentObservationRecord {
     var mechanochemical: SIMD4<Float>
     var social: SIMD4<Float>
     var environment: SIMD4<Float>
+    var lifecycle: SIMD4<Float>
+    var roles: SIMD4<Float>
+    var learning: SIMD4<Float>
+    var niche: SIMD4<Float>
 }
 
 private struct CellObservationRecord {
@@ -1536,6 +1570,10 @@ private struct CellObservationRecord {
     var mechanochemical: SIMD4<Float>
     var social: SIMD4<Float>
     var environment: SIMD4<Float>
+    var lifecycle: SIMD4<Float>
+    var roles: SIMD4<Float>
+    var learning: SIMD4<Float>
+    var niche: SIMD4<Float>
 }
 
 private struct CellState {
@@ -1560,6 +1598,10 @@ private struct CellState {
     var development: SIMD4<Float>
     var collectiveBoundary: SIMD4<Float>
     var surfaceMaterial: SIMD4<Float>
+    var lifecycle: SIMD4<Float>
+    var roles: SIMD4<Float>
+    var learning: SIMD4<Float>
+    var niche: SIMD4<Float>
 }
 
 private struct CellIdentity {
@@ -1658,6 +1700,10 @@ private struct CellAggregate {
     var developmentCausality: SIMD4<Float>
     var embodiedMemory: SIMD4<Float>
     var surfaceMaterial: SIMD4<Float>
+    var lifecycle: SIMD4<Float>
+    var roles: SIMD4<Float>
+    var learning: SIMD4<Float>
+    var niche: SIMD4<Float>
 }
 
 private struct DevelopmentalGenome {
@@ -1673,6 +1719,10 @@ private struct DevelopmentalGenome {
     var ecologicalResponse: SIMD4<Float>
     var morphogenesisA: SIMD4<Float>
     var morphogenesisB: SIMD4<Float>
+    var lifecycleA: SIMD4<Float>
+    var lifecycleB: SIMD4<Float>
+    var nicheConstruction: SIMD4<Float>
+    var neuralPlasticity: SIMD4<Float>
 }
 
 private struct RegulatoryNode {
@@ -1754,6 +1804,10 @@ struct AgentObservation: Sendable, Equatable {
     let mechanochemical: SIMD4<Float>
     let social: SIMD4<Float>
     let environment: SIMD4<Float>
+    let lifecycle: SIMD4<Float>
+    let roles: SIMD4<Float>
+    let learning: SIMD4<Float>
+    let niche: SIMD4<Float>
 
     var generation: UInt32 { componentDescentDepth }
 }
@@ -1776,6 +1830,10 @@ struct CellObservation: Sendable, Equatable {
     let mechanochemical: SIMD4<Float>
     let social: SIMD4<Float>
     let environment: SIMD4<Float>
+    let lifecycle: SIMD4<Float>
+    let roles: SIMD4<Float>
+    let learning: SIMD4<Float>
+    let niche: SIMD4<Float>
 }
 
 struct RecordedLineageEvent: Sendable, Equatable {
@@ -2291,21 +2349,21 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
     init(view: MTKView) throws {
         precondition(MemoryLayout<AgentState>.stride == 192, "AgentState Metal ABI drift")
-        precondition(MemoryLayout<AgentObservationRecord>.stride == 176, "AgentObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellObservationRecord>.stride == 160, "CellObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellState>.stride == 320, "CellState Metal ABI drift")
+        precondition(MemoryLayout<AgentObservationRecord>.stride == 240, "AgentObservationRecord Metal ABI drift")
+        precondition(MemoryLayout<CellObservationRecord>.stride == 224, "CellObservationRecord Metal ABI drift")
+        precondition(MemoryLayout<CellState>.stride == 384, "CellState Metal ABI drift")
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
         precondition(MemoryLayout<CellMemoryState>.stride == 32, "CellMemoryState Metal ABI drift")
         precondition(MemoryLayout<CellCorpseState>.stride == 56, "CellCorpseState Metal ABI drift")
         precondition(MemoryLayout<HeritableProgram>.stride == 128, "HeritableProgram Metal ABI drift")
         precondition(MemoryLayout<ProgramSlotState>.stride == 32, "ProgramSlotState Metal ABI drift")
         precondition(MemoryLayout<CellJunctionState>.stride == 64, "CellJunctionState Metal ABI drift")
-        precondition(MemoryLayout<CellAggregate>.stride == 368, "CellAggregate Metal ABI drift")
-        precondition(MemoryLayout<DevelopmentalGenome>.stride == 192, "DevelopmentalGenome Metal ABI drift")
+        precondition(MemoryLayout<CellAggregate>.stride == 432, "CellAggregate Metal ABI drift")
+        precondition(MemoryLayout<DevelopmentalGenome>.stride == 256, "DevelopmentalGenome Metal ABI drift")
         precondition(MemoryLayout<RegulatoryNode>.stride == 32, "RegulatoryNode Metal ABI drift")
         precondition(MemoryLayout<RegulatoryEdge>.stride == 32, "RegulatoryEdge Metal ABI drift")
         precondition(MemoryLayout<ResonanceGenome>.stride == 32, "ResonanceGenome Metal ABI drift")
-        precondition(MemoryLayout<ProgramMetricRecord>.stride == 224, "ProgramMetricRecord Metal ABI drift")
+        precondition(MemoryLayout<ProgramMetricRecord>.stride == 288, "ProgramMetricRecord Metal ABI drift")
         precondition(MemoryLayout<MembraneVertex>.stride == 32, "MembraneVertex Metal ABI drift")
         precondition(MemoryLayout<LineageEventRecord>.stride == 80, "LineageEventRecord Metal ABI drift")
         precondition(
@@ -5623,7 +5681,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     boundary: record.boundary,
                     mechanochemical: record.mechanochemical,
                     social: record.social,
-                    environment: record.environment
+                    environment: record.environment,
+                    lifecycle: record.lifecycle,
+                    roles: record.roles,
+                    learning: record.learning,
+                    niche: record.niche
                 ))
             }
             let cellRecords = buffers.cellRecords.contents().bindMemory(
@@ -5659,7 +5721,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     boundary: record.boundary,
                     mechanochemical: record.mechanochemical,
                     social: record.social,
-                    environment: record.environment
+                    environment: record.environment,
+                    lifecycle: record.lifecycle,
+                    roles: record.roles,
+                    learning: record.learning,
+                    niche: record.niche
                 ))
             }
             let eventRecords = buffers.lineageEvents.contents().bindMemory(
@@ -5863,6 +5929,30 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
                 let weight = Double(max(cellular[index].physiology.x, 0))
                 total += SIMD4<Double>(cellular[index].developmentCausality) * weight
+            } / Double(max(cellCount, 1))
+        let meanLifecycle: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].lifecycle) * weight
+            } / Double(max(cellCount, 1))
+        let meanRoles: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].roles) * weight
+            } / Double(max(cellCount, 1))
+        let meanLearning: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].learning) * weight
+            } / Double(max(cellCount, 1))
+        let meanNiche: SIMD4<Double> = livingIndices.isEmpty
+            ? .zero
+            : livingIndices.reduce(into: SIMD4<Double>.zero) { total, index in
+                let weight = Double(max(cellular[index].physiology.x, 0))
+                total += SIMD4<Double>(cellular[index].niche) * weight
             } / Double(max(cellCount, 1))
         let meanCausalEffects: SIMD4<Double> = livingIndices.isEmpty
             ? .zero
@@ -6146,6 +6236,21 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 Double(identityCounterValues[10]) / Self.energyAuditScale
             latestSnapshot.fusionContactSamples = identityCounterValues[11]
             latestSnapshot.successfulFusionContactSamples = identityCounterValues[12]
+            latestSnapshot.meanOntogeneticProgress = meanLifecycle.x
+            latestSnapshot.meanReproductiveMaturity = meanLifecycle.y
+            latestSnapshot.meanSenescentLoad = meanLifecycle.z
+            latestSnapshot.meanRegenerativeReopening = meanLifecycle.w
+            latestSnapshot.meanGermlineRole = meanRoles.x
+            latestSnapshot.meanSomaRole = meanRoles.y
+            latestSnapshot.meanNeuralRole = meanRoles.z
+            latestSnapshot.meanBuilderRole = meanRoles.w
+            latestSnapshot.meanPredictionError = meanLearning.y
+            latestSnapshot.meanHabituation = meanLearning.z
+            latestSnapshot.meanAcquiredBehavior = meanLearning.w
+            latestSnapshot.meanShelterConstruction = meanNiche.x
+            latestSnapshot.meanReservoirConstruction = meanNiche.y
+            latestSnapshot.meanRecyclingConstruction = meanNiche.z
+            latestSnapshot.meanDetoxificationConstruction = meanNiche.w
 #if DEBUG
             let netCellularPower = cellularEnergyHarvest - cellularEnergyDemand -
                 cellularEnergyDissipation

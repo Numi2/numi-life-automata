@@ -253,7 +253,7 @@ enum LifecycleExperimentCLI {
             targetRule: "Use the same deterministic regenerative-descendant target selected by the paired sham and wound branches at the final baseline step.",
             stoppingRule: "Attempt fixed SplitMix64-derived seeds in order until the predeclared valid-cycle count is reached or maximumSeedCount is exhausted. Stopping never depends on success or resemblance.",
             validCycleRule: "The same target must exist in both baseline branches, receive the treatment wound, and both runs must retain zero invariant flags and absolute energy residual at most 0.001.",
-            completedCycleRule: "The wounded target must recover relative to its sham twin, then emit a physical fission whose child remains multicellular, metabolically viable, developmentally restarted, and observed across the maturation window.",
+            completedCycleRule: "The wounded target must recover relative to its sham twin, then emit a physical fission whose child crosses reproductive maturity and remains multicellular, metabolically viable, developmentally restarted, and observed across the maturation window.",
             qualificationRule: "At least minimumValidCycles are required; a two-sided 95% Wilson lower bound above 0.5 supports recovery or lifecycle completion.",
             configuration: configuration
         ))
@@ -522,7 +522,8 @@ enum LifecycleExperimentCLI {
         let viable = snapshots.filter {
             $0.birthID == birthID && $0.step >= bornAt &&
                 $0.regeneratedDevelopment && $0.cellCount >= 2 &&
-                $0.atp >= 0.08 && $0.integrity >= 0.60 && $0.stress <= 0.35
+                $0.atp >= 0.08 && $0.integrity >= 0.60 && $0.stress <= 0.35 &&
+                $0.reproductiveMaturity >= 0.55
         }.sorted { $0.step < $1.step }
         guard let first = viable.first, let last = viable.last,
               last.step >= first.step + configuration.maturationWindow else { return [] }

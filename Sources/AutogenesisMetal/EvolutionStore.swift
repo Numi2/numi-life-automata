@@ -40,6 +40,11 @@ enum EvolutionEventKind: Sendable, Equatable {
     case cellDivision
     case programMutation
     case crossbreeding
+    case maturation
+    case regeneration
+    case senescence
+    case learning
+    case nicheConstruction
 }
 
 struct EvolutionEvent: Identifiable, Sendable, Equatable {
@@ -128,6 +133,21 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanDevelopmentalPolarityCoherence: Double = 0
     var meanMorphogenSynthesisRate: Double = 0
     var meanMorphogenTransportWork: Double = 0
+    var meanOntogeneticProgress: Double = 0
+    var meanReproductiveMaturity: Double = 0
+    var meanSenescentLoad: Double = 0
+    var meanRegenerativeReopening: Double = 0
+    var meanGermlineRole: Double = 0
+    var meanSomaRole: Double = 0
+    var meanNeuralRole: Double = 0
+    var meanBuilderRole: Double = 0
+    var meanPredictionError: Double = 0
+    var meanHabituation: Double = 0
+    var meanAcquiredBehavior: Double = 0
+    var meanShelterConstruction: Double = 0
+    var meanReservoirConstruction: Double = 0
+    var meanRecyclingConstruction: Double = 0
+    var meanDetoxificationConstruction: Double = 0
     var meanResonanceFrequency: Double = 0
     var meanResonanceDamping: Double = 0
     var meanResonanceBandwidth: Double = 0
@@ -510,6 +530,7 @@ final class EvolutionStore: ObservableObject {
     private var nextEventID: UInt64 = 1
     private var lastRecordedGeneration = 0
     private var observedAgents: [AgentObservation] = []
+    private var observedLifeMilestones: [UInt32: UInt8] = [:]
     private var followedBirthID: UInt32?
     private struct ObservedProgramKey: Hashable {
         let componentID: UInt64
@@ -699,6 +720,7 @@ final class EvolutionStore: ObservableObject {
         cellObservations: [CellObservation]
     ) {
         observedAgents = agents
+        observeLifeMilestones(in: agents)
         if observableAgentCount != agents.count {
             observableAgentCount = agents.count
         }
@@ -833,9 +855,99 @@ final class EvolutionStore: ObservableObject {
             currentComponentAutonomyVectors.removeAll(keepingCapacity: true)
             resolvedIndividualLabels.removeAll(keepingCapacity: true)
             previousResolvedIndividualKeys.removeAll(keepingCapacity: true)
+            observedLifeMilestones.removeAll(keepingCapacity: true)
             individualityEvidence = .inconclusive
         }
         runtimeTelemetry = telemetry
+    }
+
+    private func observeLifeMilestones(in agents: [AgentObservation]) {
+        let maturityFlag: UInt8 = 1 << 0
+        let regenerationFlag: UInt8 = 1 << 1
+        let senescenceFlag: UInt8 = 1 << 2
+        let learningFlag: UInt8 = 1 << 3
+        let nicheFlag: UInt8 = 1 << 4
+        let ordered = agents.sorted {
+            let lhsFollowed = $0.birthID == followedBirthID
+            let rhsFollowed = $1.birthID == followedBirthID
+            if lhsFollowed != rhsFollowed { return lhsFollowed }
+            return $0.birthID < $1.birthID
+        }
+        var recordedCount = 0
+
+        for agent in ordered {
+            var flags = observedLifeMilestones[agent.birthID, default: 0]
+            let label = "Life-form #\(agent.birthID)"
+
+            func recordOnce(
+                flag: UInt8,
+                condition: Bool,
+                kind: EvolutionEventKind,
+                title: String,
+                detail: String
+            ) -> Bool {
+                guard condition, flags & flag == 0 else { return false }
+                flags |= flag
+                guard recordedCount < 2 else { return false }
+                recordEvent(
+                    generation: snapshot.generation,
+                    kind: kind,
+                    title: title,
+                    detail: detail
+                )
+                recordedCount += 1
+                return true
+            }
+
+            _ = recordOnce(
+                flag: maturityFlag,
+                condition: agent.lifecycle.y >= 0.55,
+                kind: .maturation,
+                title: "\(label) reached reproductive maturity",
+                detail: "Its inherited regulation crossed the observed maturity threshold; reproduction is now physically permitted when energy, germline allocation, and detachment conditions also allow it."
+            )
+            _ = recordOnce(
+                flag: regenerationFlag,
+                condition: agent.lifecycle.w >= 0.18 &&
+                    (agent.hasReceivedDamageChallenge || agent.boundary.w < 0.92),
+                kind: .regeneration,
+                title: "\(label) reopened development after injury",
+                detail: "Damage raised its regenerative reopening state, allowing repair and developmental programs to become active again."
+            )
+            _ = recordOnce(
+                flag: learningFlag,
+                condition: agent.roles.z >= 0.25 && abs(agent.learning.w) >= 0.025,
+                kind: .learning,
+                title: "\(label) acquired a response during life",
+                detail: "Neural-like cells changed an embodied sensorimotor bias from experience. The acquired value is not written back into the genome."
+            )
+            _ = recordOnce(
+                flag: nicheFlag,
+                condition: agent.roles.w >= 0.20 && max(
+                    max(agent.niche.x, agent.niche.y),
+                    max(agent.niche.z, agent.niche.w)
+                ) >= 0.015,
+                kind: .nicheConstruction,
+                title: "\(label) began constructing a niche",
+                detail: "Builder-like cells paid energy to alter local matrix or chemistry, creating shelter, storage, recycling, or detoxification effects."
+            )
+            _ = recordOnce(
+                flag: senescenceFlag,
+                condition: agent.lifecycle.z >= 0.22,
+                kind: .senescence,
+                title: "\(label) entered observable senescence",
+                detail: "Accumulated age load is now increasing maintenance demand and membrane wear; continued survival depends on evolved maintenance and regeneration."
+            )
+
+            observedLifeMilestones[agent.birthID] = flags
+        }
+
+        if observedLifeMilestones.count > 8_192 {
+            let livingBirthIDs = Set(agents.map(\.birthID))
+            observedLifeMilestones = observedLifeMilestones.filter {
+                livingBirthIDs.contains($0.key)
+            }
+        }
     }
 
     private func updateIndividualityObserver(

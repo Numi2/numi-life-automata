@@ -173,6 +173,14 @@ struct CellState {
     float4 collectiveBoundary;
     // Persistent predatory edge, armor, sensory edge, and locomotor edge material.
     float4 surfaceMaterial;
+    // Ontogenetic progress, reproductive maturity, senescent load, regenerative reopening.
+    float4 lifecycle;
+    // Continuously expressed germline-like, soma-like, neural, and niche-builder roles.
+    float4 roles;
+    // Cue prediction, prediction error, habituation, and acquired sensorimotor bias.
+    float4 learning;
+    // Paid shelter, reservoir, recycling, and detoxification construction activity.
+    float4 niche;
 };
 
 // Four packed half4 episodes. Each episode is
@@ -300,6 +308,14 @@ struct CellAggregate {
     float4 embodiedMemory;
     // Mean persistent predatory, armor, sensory, and locomotor surface material.
     float4 surfaceMaterial;
+    // Mean ontogeny, reproductive maturity, senescence, and regenerative reopening.
+    float4 lifecycle;
+    // Mean germline-like, soma-like, neural, and niche-builder expression.
+    float4 roles;
+    // Mean cue prediction, prediction error, habituation, and acquired behavior.
+    float4 learning;
+    // Mean shelter, reservoir, recycling, and detoxification construction activity.
+    float4 niche;
 };
 
 struct QualificationTargetMeasurement {
@@ -333,6 +349,14 @@ struct DevelopmentalGenome {
     float4 morphogenesisA;
     // Plasticity gain, canalization rate, material retention, injury reopening.
     float4 morphogenesisB;
+    // Maturation rate, adult threshold, senescence onset, and senescence rate.
+    float4 lifecycleA;
+    // Regenerative gain, germline allocation, soma maintenance, metamorphic plasticity.
+    float4 lifecycleB;
+    // Shelter, resource reservoir, detrital recycling, and toxin-countermeasure investment.
+    float4 nicheConstruction;
+    // Neural differentiation, learning rate, habituation, and cultural transmission.
+    float4 neuralPlasticity;
 };
 
 struct RegulatoryNode {
@@ -404,6 +428,10 @@ struct AgentObservationRecord {
     float4 social;
     // Substrate forcing, barrier load, environmental frequency, and frequency match.
     float4 environment;
+    float4 lifecycle;
+    float4 roles;
+    float4 learning;
+    float4 niche;
 };
 
 struct CellObservationRecord {
@@ -426,6 +454,10 @@ struct CellObservationRecord {
     // ATP sharing, rejection, junction transmission, and program conflict.
     float4 social;
     float4 environment;
+    float4 lifecycle;
+    float4 roles;
+    float4 learning;
+    float4 niche;
 };
 
 struct LineageEventRecord {
@@ -874,6 +906,10 @@ inline DevelopmentalGenome emptyDevelopmentalGenome() {
     genome.ecologicalResponse = float4(0.28, 0.24, 0.30, 0.36);
     genome.morphogenesisA = float4(0.68, 2.40, 0.72, 0.70);
     genome.morphogenesisB = float4(0.72, 0.42, 0.78, 0.66);
+    genome.lifecycleA = float4(1.0, 0.46, 1.05, 0.34);
+    genome.lifecycleB = float4(0.76, 0.48, 0.66, 0.72);
+    genome.nicheConstruction = float4(0.42, 0.38, 0.46, 0.40);
+    genome.neuralPlasticity = float4(0.48, 0.36, 0.42, 0.28);
     return genome;
 }
 
@@ -1209,6 +1245,22 @@ inline uint agentGenomeHash(
         hash32(as_type<uint>(development.morphogenesisB.y)) ^
         hash32(as_type<uint>(development.morphogenesisB.z)) ^
         as_type<uint>(development.morphogenesisB.w));
+    value = hash32(value ^ as_type<uint>(development.lifecycleA.x) ^
+        hash32(as_type<uint>(development.lifecycleA.y)) ^
+        hash32(as_type<uint>(development.lifecycleA.z)) ^
+        as_type<uint>(development.lifecycleA.w));
+    value = hash32(value ^ as_type<uint>(development.lifecycleB.x) ^
+        hash32(as_type<uint>(development.lifecycleB.y)) ^
+        hash32(as_type<uint>(development.lifecycleB.z)) ^
+        as_type<uint>(development.lifecycleB.w));
+    value = hash32(value ^ as_type<uint>(development.nicheConstruction.x) ^
+        hash32(as_type<uint>(development.nicheConstruction.y)) ^
+        hash32(as_type<uint>(development.nicheConstruction.z)) ^
+        as_type<uint>(development.nicheConstruction.w));
+    value = hash32(value ^ as_type<uint>(development.neuralPlasticity.x) ^
+        hash32(as_type<uint>(development.neuralPlasticity.y)) ^
+        hash32(as_type<uint>(development.neuralPlasticity.z)) ^
+        as_type<uint>(development.neuralPlasticity.w));
     return value;
 }
 
@@ -1350,6 +1402,43 @@ inline void initializeFounderRegulatoryGenome(
         float4(0.10, 0.05, 0.0, 0.0),
         float4(2.00, 1.50, 1.0, 2.00)
     );
+    genome.lifecycleA = clamp(
+        float4(
+            0.62 + agent.geneB.x * 0.92,
+            0.28 + agent.geneA.y * 0.34,
+            0.82 + agent.geneA.w * 0.74,
+            0.18 + agent.geneB.y * 4.8
+        ) + randomSigned4(seed + 453u) * float4(0.12, 0.055, 0.12, 0.10),
+        float4(0.25, 0.20, 0.58, 0.05),
+        float4(2.20, 0.82, 1.90, 1.80)
+    );
+    genome.lifecycleB = clamp(
+        float4(
+            0.42 + agent.geneA.w * 0.92,
+            0.24 + agent.geneB.z * 0.66,
+            0.34 + agent.geneA.y * 0.78,
+            0.38 + agent.geneB.x * 0.82
+        ) + randomSigned4(seed + 457u) * 0.10,
+        float4(0.0), float4(2.0)
+    );
+    genome.nicheConstruction = clamp(
+        float4(
+            0.18 + agent.geneA.y * 0.74,
+            0.16 + agent.geneC.x * 0.42 + agent.geneC.y * 0.32,
+            0.14 + agent.geneC.z * 0.82,
+            0.16 + agent.geneA.w * 0.72
+        ) + randomSigned4(seed + 461u) * 0.09,
+        float4(0.0), float4(1.60)
+    );
+    genome.neuralPlasticity = clamp(
+        float4(
+            0.20 + agent.geneA.z * 0.74,
+            0.16 + agent.geneB.x * 0.68,
+            0.18 + agent.geneA.w * 0.58,
+            0.10 + agent.social.y * 0.62
+        ) + randomSigned4(seed + 465u) * 0.08,
+        float4(0.0), float4(1.60)
+    );
     genomes[programIndex] = genome;
     genome.topology.z = topologyHash(nodes, edges, programIndex);
     genomes[programIndex] = genome;
@@ -1469,6 +1558,10 @@ inline void mutateDevelopmentalGenome(
     float4 oldEcologicalResponse = child.ecologicalResponse;
     float4 oldMorphogenesisA = child.morphogenesisA;
     float4 oldMorphogenesisB = child.morphogenesisB;
+    float4 oldLifecycleA = child.lifecycleA;
+    float4 oldLifecycleB = child.lifecycleB;
+    float4 oldNicheConstruction = child.nicheConstruction;
+    float4 oldNeuralPlasticity = child.neuralPlasticity;
     child.mechanochemistryA = clamp(
         child.mechanochemistryA + randomSigned4(seed + 709u) * (0.010 + mutation * 1.25),
         float4(0.12), float4(3.0)
@@ -1518,6 +1611,27 @@ inline void mutateDevelopmentalGenome(
         float4(0.10, 0.05, 0.0, 0.0),
         float4(2.00, 1.50, 1.0, 2.00)
     );
+    child.lifecycleA = clamp(
+        child.lifecycleA + randomSigned4(seed + 732u) *
+            (float4(0.010, 0.004, 0.012, 0.008) +
+                mutation * float4(1.30, 0.42, 1.55, 1.25)),
+        float4(0.25, 0.20, 0.58, 0.05),
+        float4(2.20, 0.82, 1.90, 1.80)
+    );
+    child.lifecycleB = clamp(
+        child.lifecycleB + randomSigned4(seed + 734u) * (0.008 + mutation * 1.18),
+        float4(0.0), float4(2.0)
+    );
+    child.nicheConstruction = clamp(
+        child.nicheConstruction + randomSigned4(seed + 736u) *
+            (0.007 + mutation * 1.02),
+        float4(0.0), float4(1.60)
+    );
+    child.neuralPlasticity = clamp(
+        child.neuralPlasticity + randomSigned4(seed + 738u) *
+            (0.007 + mutation * 1.08),
+        float4(0.0), float4(1.60)
+    );
     numericalDistance += length(child.mechanochemistryA - oldMechanochemistryA) * 0.020 +
         length(child.mechanochemistryB - oldMechanochemistryB) * 0.020 +
         length(child.morphogenKinetics - oldMorphogenKinetics) * 0.026 +
@@ -1525,7 +1639,11 @@ inline void mutateDevelopmentalGenome(
         length(child.junctionMaterial - oldJunctionMaterial) * 0.024 +
         length(child.ecologicalResponse - oldEcologicalResponse) * 0.022 +
         length(child.morphogenesisA - oldMorphogenesisA) * 0.024 +
-        length(child.morphogenesisB - oldMorphogenesisB) * 0.024;
+        length(child.morphogenesisB - oldMorphogenesisB) * 0.024 +
+        length(child.lifecycleA - oldLifecycleA) * 0.024 +
+        length(child.lifecycleB - oldLifecycleB) * 0.022 +
+        length(child.nicheConstruction - oldNicheConstruction) * 0.022 +
+        length(child.neuralPlasticity - oldNeuralPlasticity) * 0.022;
     uint structuralChanges = 0u;
     bool structuralMutation = branchMutation;
     if (structuralMutation) {
@@ -1541,7 +1659,7 @@ inline void mutateDevelopmentalGenome(
                 RegulatoryNode duplicate = mutableNodes[childNodeBase + sourceSlot];
                 duplicate.bias = mutateScalar(duplicate.bias, seed + 739u, 0.22, -3.0, 3.0);
                 duplicate.sensorIndex = random01(seed + 743u) < 0.54
-                    ? duplicate.sensorIndex : (hash32(seed + 745u) % 20u);
+                    ? duplicate.sensorIndex : (hash32(seed + 745u) % 24u);
                 duplicate.actuatorMask = random01(seed + 747u) < 0.60
                     ? duplicate.actuatorMask : (1u << (hash32(seed + 751u) % 12u));
                 duplicate.innovationID = atomic_fetch_add_explicit(
@@ -1778,7 +1896,7 @@ inline RegulatoryOutputs evolveDevelopmentalProgram(
         float centeredPrevious = previous[index] * 2.0 - 1.0;
         drive[index] = node.bias + centeredPrevious *
             (1.64 + min(abs(node.outputWeight), 2.0) * 0.10);
-        if ((node.flags & 1u) != 0u && node.sensorIndex < 20u) {
+        if ((node.flags & 1u) != 0u && node.sensorIndex < 24u) {
             drive[index] += sensors[node.sensorIndex] * node.sensorWeight;
         }
     }
@@ -2672,6 +2790,23 @@ kernel void reactWorld(
 
     float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
     float2 substratePulse = substrateForcing(uv, geology, uniforms.step);
+    // Seasons are external physical forcing, not lifecycle stages. Local phase
+    // offsets prevent the whole world from changing in lockstep, while rare
+    // compound pulses create drought, bloom, and disturbance mosaics.
+    float seasonalPhase = fract(
+        float(uniforms.step) / 7200.0 + geology.x * 0.21 + geology.y * 0.13 +
+            uv.x * 0.07 - uv.y * 0.05
+    );
+    float seasonalWave = 0.5 + 0.5 * sin(seasonalPhase * 2.0 * M_PI_F);
+    float longSeason = 0.5 + 0.5 * sin(
+        (float(uniforms.step) / 29400.0 + geology.z * 0.17) * 2.0 * M_PI_F
+    );
+    float seasonalProductivity = mix(0.48, 1.34, seasonalWave) *
+        mix(0.78, 1.18, longSeason);
+    substratePulse *= float2(
+        seasonalProductivity,
+        mix(1.30, 0.62, seasonalWave) * mix(0.84, 1.12, longSeason)
+    );
     float obstacle = smoothstep(0.48, 0.84, geology.w);
     float mineralPacking = smoothstep(0.20, 0.86, geology.y);
     float matrixPacking = smoothstep(0.035, 0.58, extracellular.z);
@@ -2694,8 +2829,11 @@ kernel void reactWorld(
     resourceB += uniforms.dt * uniforms.resourceFlux * substratePulse.y *
         (0.000025 + geology.y * 0.0062) * sourceAccess *
         max(resourceCapacityB - resourceB, 0.0);
+    float seasonalDisturbance = smoothstep(0.88, 0.99, 1.0 - seasonalWave) *
+        smoothstep(0.58, 0.92, geology.z + longSeason * 0.28);
     toxin += uniforms.dt * (
-        geology.z * 0.0045 + environmentalDisturbance(uv, uniforms.step) * 0.00065
+        geology.z * 0.0045 + environmentalDisturbance(uv, uniforms.step) * 0.00065 +
+        seasonalDisturbance * 0.0011
     );
     toxin *= 1.0 - uniforms.dt *
         (0.052 + (1.0 - geology.z) * 0.040) * mix(1.0, 0.45, matrixPacking);
@@ -3640,6 +3778,10 @@ inline CellState emptyCell() {
     cell.development = float4(1.0, 0.0, 0.5, 0.0);
     cell.collectiveBoundary = float4(0.0);
     cell.surfaceMaterial = float4(0.0);
+    cell.lifecycle = float4(0.0);
+    cell.roles = float4(0.0);
+    cell.learning = float4(0.0);
+    cell.niche = float4(0.0);
     return cell;
 }
 
@@ -3698,6 +3840,10 @@ inline CellState founderCell(AgentState agent, ResonanceGenome resonanceGenome, 
     );
     cell.collectiveBoundary = float4(0.0);
     cell.surfaceMaterial = float4(0.0);
+    cell.lifecycle = float4(0.0, 0.0, 0.0, 1.0);
+    cell.roles = float4(0.72, 0.28, 0.0, 0.0);
+    cell.learning = float4(0.0);
+    cell.niche = float4(0.0);
     return cell;
 }
 
@@ -4260,6 +4406,18 @@ inline float recombineDevelopmentalPrograms(
     child.morphogenesisB = crossoverFloat4(
         primary.morphogenesisB, secondary.morphogenesisB, seed + 951u
     );
+    child.lifecycleA = crossoverFloat4(
+        primary.lifecycleA, secondary.lifecycleA, seed + 957u
+    );
+    child.lifecycleB = crossoverFloat4(
+        primary.lifecycleB, secondary.lifecycleB, seed + 959u
+    );
+    child.nicheConstruction = crossoverFloat4(
+        primary.nicheConstruction, secondary.nicheConstruction, seed + 963u
+    );
+    child.neuralPlasticity = crossoverFloat4(
+        primary.neuralPlasticity, secondary.neuralPlasticity, seed + 967u
+    );
     float recombinationDistance =
         length(primary.actuatorBiasA - secondary.actuatorBiasA) * 0.010 +
         length(primary.actuatorBiasB - secondary.actuatorBiasB) * 0.010 +
@@ -4270,7 +4428,11 @@ inline float recombineDevelopmentalPrograms(
         length(primary.junctionMaterial - secondary.junctionMaterial) * 0.012 +
         length(primary.ecologicalResponse - secondary.ecologicalResponse) * 0.012 +
         length(primary.morphogenesisA - secondary.morphogenesisA) * 0.014 +
-        length(primary.morphogenesisB - secondary.morphogenesisB) * 0.014;
+        length(primary.morphogenesisB - secondary.morphogenesisB) * 0.014 +
+        length(primary.lifecycleA - secondary.lifecycleA) * 0.014 +
+        length(primary.lifecycleB - secondary.lifecycleB) * 0.012 +
+        length(primary.nicheConstruction - secondary.nicheConstruction) * 0.012 +
+        length(primary.neuralPlasticity - secondary.neuralPlasticity) * 0.012;
     child.mutation = float4(
         max(primary.mutation.x, secondary.mutation.x) + recombinationDistance,
         recombinationDistance,
@@ -4465,6 +4627,10 @@ inline uint seedOrganismCells(
     );
     aggregate.embodiedMemory = float4(0.0);
     aggregate.surfaceMaterial = founder.surfaceMaterial;
+    aggregate.lifecycle = founder.lifecycle;
+    aggregate.roles = founder.roles;
+    aggregate.learning = founder.learning;
+    aggregate.niche = founder.niche;
     aggregates[owner] = aggregate;
     return cellIndex;
 }
@@ -4607,6 +4773,10 @@ kernel void initializeAgents(
     aggregate.developmentCausality = float4(0.0);
     aggregate.embodiedMemory = float4(0.0);
     aggregate.surfaceMaterial = float4(0.0);
+    aggregate.lifecycle = float4(0.0);
+    aggregate.roles = float4(0.0);
+    aggregate.learning = float4(0.0);
+    aggregate.niche = float4(0.0);
     cellAggregates[gid] = aggregate;
     for (uint programIndex = gid; programIndex < maxHeritableProgramCount;
          programIndex += maxAgentCount) {
@@ -4761,6 +4931,10 @@ kernel void collectAgentObservations(
         max(aggregate.programEcology.w, 0.0)
     );
     observation.environment = aggregate.environment;
+    observation.lifecycle = aggregate.lifecycle;
+    observation.roles = aggregate.roles;
+    observation.learning = aggregate.learning;
+    observation.niche = aggregate.niche;
     observations[gid] = observation;
 }
 
@@ -4857,6 +5031,10 @@ kernel void collectCellObservations(
         max(interaction.w, 0.0)
     );
     observation.environment = cell.environment;
+    observation.lifecycle = cell.lifecycle;
+    observation.roles = cell.roles;
+    observation.learning = cell.learning;
+    observation.niche = cell.niche;
     observations[gid] = observation;
 }
 
@@ -6019,6 +6197,21 @@ kernel void reassignCellComponents(
             cell.tissueGeometry.z * (0.28 + cell.tissueGeometry.w * 0.72)
         );
         applyLocalReproductiveClimax(cell, separationClimax);
+        // A propagule is not declared young by its new component handle. Its
+        // developmental clock reopens only in proportion to the germline-like
+        // state physically carried by its cells. Soma-heavy fragments retain age.
+        float propaguleRejuvenation = clamp(
+            0.10 + cell.roles.x * 0.62 +
+                ((newAgent.componentFlags & componentSexualOffspringFlag) != 0u
+                    ? 0.18 : 0.0),
+            0.10, 0.86
+        );
+        cell.lifecycle.x *= 1.0 - propaguleRejuvenation * 0.88;
+        cell.lifecycle.y *= 1.0 - propaguleRejuvenation;
+        cell.lifecycle.z *= 1.0 - propaguleRejuvenation * 0.92;
+        cell.lifecycle.w = max(cell.lifecycle.w, propaguleRejuvenation);
+        cell.learning *= 0.12 + propaguleRejuvenation * 0.18;
+        cell.niche = float4(0.0);
     }
     // Ownership changes only the coordinate frame. Preserve the locally
     // produced detachment state so a newborn fragment cannot immediately
@@ -6636,6 +6829,38 @@ kernel void evolveOrganismCells(
         -1.0, 1.0
     );
     float embodiedReplay = recallEmbodiedAction(embodiedMemory, embodiedCue);
+    // This is acquired state, not a genome edit. The inherited program controls
+    // how strongly neural-like cells predict, habituate, and reuse experience.
+    float previousPrediction = clamp(cell.learning.x, -1.0, 1.0);
+    float predictionError = clamp(embodiedCue - previousPrediction, -1.0, 1.0);
+    float previousHabituation = saturate(cell.learning.z);
+    float inheritedNeuralCompetence = saturate(
+        cell.roles.z * development.neuralPlasticity.x
+    );
+    float learningEnergy = smoothstep(0.10, 0.42, cell.physiology.x) *
+        smoothstep(0.30, 0.74, cell.physiology.w);
+    float acquiredLearningRate = clamp(
+        development.neuralPlasticity.y * inheritedNeuralCompetence *
+            learningEnergy * (1.0 - previousHabituation) * 0.020,
+        0.0, 0.035
+    );
+    float cuePrediction = mix(
+        previousPrediction, embodiedCue, acquiredLearningRate
+    );
+    float habituationTarget = 1.0 - smoothstep(0.035, 0.42, abs(predictionError));
+    float habituation = clamp(
+        mix(
+            previousHabituation, habituationTarget,
+            0.0012 + development.neuralPlasticity.z * inheritedNeuralCompetence * 0.006
+        ),
+        0.0, 1.0
+    );
+    float acquiredBehavior = clamp(
+        cell.learning.w * (0.9992 - habituation * 0.0003) +
+            acquiredLearningRate * (embodiedReplay - cell.learning.w) +
+            predictionError * inheritedNeuralCompetence * 0.0008,
+        -1.0, 1.0
+    );
 
     float oldVoltage = cell.dynamics.x;
     float recovery = cell.dynamics.y;
@@ -6650,7 +6875,7 @@ kernel void evolveOrganismCells(
     float resonatorDisplacement = cell.resonance.x;
     float resonatorVelocity = cell.resonance.y;
     float resonatorAcceleration = resonanceGenome.mechanics.z * strainVelocity +
-        embodiedReplay * 0.0028 -
+        embodiedReplay * 0.0028 + acquiredBehavior * inheritedNeuralCompetence * 0.0018 -
         2.0 * resonanceGenome.mechanics.y * angularFrequency * resonatorVelocity -
         angularFrequency * angularFrequency * resonatorDisplacement;
     resonatorVelocity = clamp(resonatorVelocity + resonatorAcceleration * 0.055, -0.18, 0.18);
@@ -6741,7 +6966,7 @@ kernel void evolveOrganismCells(
         oldVoltage - oldVoltage * oldVoltage * oldVoltage / 3.0 - recovery +
         0.19 + metabolicDrive + gapCoupling + mechanosensoryDrive + calciumCurrent +
         phaseDrive * 0.10 + endogenousReproductivePleasure * 0.040 +
-        embodiedReplay * 0.030
+        embodiedReplay * 0.030 + acquiredBehavior * inheritedNeuralCompetence * 0.026
     ) * 0.020;
     float voltage = clamp(oldVoltage + voltageDerivative, -1.8, 1.8);
     recovery = clamp(recovery + 0.0038 * (voltage + 0.56 - recovery * 0.78), -0.8, 1.8);
@@ -6830,11 +7055,59 @@ kernel void evolveOrganismCells(
         saturate(cell.physiology.w) * 0.20 -
         woundCue * 0.55
     );
+    float previousOntogeny = max(cell.lifecycle.x, 0.0);
+    float previousMaturity = saturate(cell.lifecycle.y);
+    float previousSenescence = saturate(cell.lifecycle.z);
+    float lifecycleSupport = smoothstep(0.10, 0.46, cell.physiology.x) *
+        smoothstep(0.30, 0.76, cell.physiology.w) *
+        (1.0 - smoothstep(0.58, 0.90, cell.signals.z));
+    float ontogeny = min(
+        previousOntogeny + 0.00011 * development.lifecycleA.x *
+            mix(0.32, 1.0, lifecycleSupport),
+        2.5
+    );
+    float maturityTarget = smoothstep(
+        max(development.lifecycleA.y - 0.10, 0.02),
+        development.lifecycleA.y + 0.14,
+        ontogeny
+    ) * lifecycleSupport;
+    float reproductiveMaturity = clamp(
+        mix(previousMaturity, maturityTarget, 0.0025 + lifecycleSupport * 0.0065),
+        0.0, 1.0
+    );
+    float regenerativeTarget = saturate(
+        injuryPlasticity * development.lifecycleB.x *
+            (0.46 + saturate(
+                1.0 - cell.physiology.w + woundCue + localContactDamage
+            ) * 0.54)
+    );
+    float regenerativeReopening = clamp(
+        mix(cell.lifecycle.w, regenerativeTarget, regenerativeTarget > cell.lifecycle.w
+            ? 0.038 : 0.0045 + stableClosure * 0.012),
+        0.0, 1.0
+    );
+    float somaMaintenanceMemory = saturate(cell.roles.y * development.lifecycleB.z);
+    float senescenceTarget = saturate(
+        smoothstep(
+            development.lifecycleA.z,
+            development.lifecycleA.z + 0.38,
+            ontogeny
+        ) * development.lifecycleA.w * mix(1.0, 0.34, somaMaintenanceMemory)
+    );
+    float senescence = clamp(
+        mix(previousSenescence, senescenceTarget, 0.0012) -
+            regenerativeReopening * cell.regulation.w *
+                development.lifecycleB.x * 0.00018,
+        0.0, 1.0
+    );
+    float metamorphicPulse = max(reproductiveMaturity - previousMaturity, 0.0) *
+        development.lifecycleB.w * 24.0;
     float developmentalPlasticity = saturate(
-        (activeGrowth + injuryPlasticity) * development.morphogenesisB.x -
+        (activeGrowth + injuryPlasticity + regenerativeReopening * 0.72 +
+            metamorphicPulse) * development.morphogenesisB.x -
         stableClosure * development.morphogenesisB.y
     );
-    float regulatorySensors[20] = {
+    float regulatorySensors[24] = {
         clamp(cell.physiology.x * 2.0 - 1.0, -1.0, 1.0),
         clamp(voltage / 1.8, -1.0, 1.0),
         fieldStrain,
@@ -6862,7 +7135,16 @@ kernel void evolveOrganismCells(
         axialPosition,
         lateralPosition,
         segmentationWave,
-        developmentalPlasticity * 2.0 - 1.0
+        developmentalPlasticity * 2.0 - 1.0,
+        reproductiveMaturity * 2.0 - 1.0,
+        senescence,
+        predictionError,
+        clamp(
+            localDevelopmentalField.z * 1.2 + localEcology.y * 0.35 -
+                saturate(localEnvironment.z * 0.72 + localEcology.z * 0.88) *
+                    0.72 - 0.35,
+            -1.0, 1.0
+        )
     };
     bool regulatoryHot =
         injuryPlasticity > 0.035 ||
@@ -6900,6 +7182,66 @@ kernel void evolveOrganismCells(
     float secretionProgram = regulationB.y;
     float apoptosisSuppression = regulationB.z;
     float motilityProgram = regulationB.w;
+    float germlineTarget = saturate(
+        reproductiveMaturity * development.lifecycleB.y *
+        (0.28 + proliferationProgram * 0.46 +
+            development.mechanochemistryB.w * membraneExposure * 0.26) *
+        (1.0 - senescence * 0.82)
+    );
+    float somaTarget = saturate(
+        development.lifecycleB.z *
+        (repairProgram * 0.42 + adhesiveProgram * 0.30 +
+            stableClosure * 0.20 + (1.0 - membraneExposure) * 0.08) *
+        (0.42 + reproductiveMaturity * 0.58)
+    );
+    float neuralTarget = saturate(
+        development.neuralPlasticity.x *
+        (0.20 + existingSurfaceMaterial.z * 0.34 +
+            saturate(junctionConductance) * 0.24 +
+            saturate(abs(voltage) * 0.22 + calcium * 0.18 + erk * 0.16)) *
+        (0.36 + reproductiveMaturity * 0.64) * (1.0 - senescence * 0.58)
+    );
+    float nicheInvestment = dot(
+        development.nicheConstruction, float4(0.25)
+    );
+    float builderTarget = saturate(
+        nicheInvestment *
+        (secretionProgram * 0.34 + adhesiveProgram * 0.26 +
+            repairProgram * 0.20 + constructionProgram.y * 0.20) *
+        membraneExposure * (0.44 + reproductiveMaturity * 0.56)
+    );
+    float roleResponse = 0.0025 + developmentalPlasticity * 0.010 +
+        regenerativeReopening * 0.012;
+    float4 roles = clamp(
+        mix(
+            saturate(cell.roles),
+            float4(germlineTarget, somaTarget, neuralTarget, builderTarget),
+            roleResponse
+        ),
+        float4(0.0), float4(1.0)
+    );
+    float germlineRole = roles.x;
+    float somaRole = roles.y;
+    float neuralRole = roles.z;
+    float builderRole = roles.w;
+    float juvenileGrowthAllocation = 1.0 - reproductiveMaturity;
+    proliferationProgram = saturate(
+        proliferationProgram *
+        (0.68 + juvenileGrowthAllocation * 0.34 +
+            germlineRole * reproductiveMaturity * 0.42) *
+        (1.0 - senescence * mix(0.34, 0.72, somaRole))
+    );
+    repairProgram = saturate(
+        repairProgram * (0.78 + somaRole * 0.34 +
+            regenerativeReopening * development.lifecycleB.x * 0.36)
+    );
+    apoptosisSuppression = saturate(
+        apoptosisSuppression * (1.0 - senescence * (0.28 + somaRole * 0.34)) +
+            regenerativeReopening * 0.16
+    );
+    motilityProgram = saturate(
+        motilityProgram + acquiredBehavior * neuralRole * 0.12
+    );
     float integrityDeficit = max(1.0 - saturate(cell.physiology.w), 0.0);
     float repairUrgency = cellularRepairUrgency(
         cell.physiology.w, cell.signals.z, woundCue, localContactDamage
@@ -7069,10 +7411,26 @@ kernel void evolveOrganismCells(
             (0.30 + motilityProgram * (0.18 + erk * 0.34))
     );
     float localMatrixNeed = 1.0 - extracellularMatrixSupport;
+    float nicheShelterDrive = builderRole * development.nicheConstruction.x *
+        adhesiveProgram * repairProgram * membraneExposure *
+        (0.24 + externalStress * 0.76) * metabolicReadiness;
+    float nicheReservoirDrive = builderRole * development.nicheConstruction.y *
+        secretionProgram * membraneExposure *
+        (0.22 + ecologicalScarcity * 0.78) * localMatrixNeed * metabolicReadiness;
+    float nicheRecyclingDrive = builderRole * development.nicheConstruction.z *
+        detritalScavenging * membraneExposure *
+        smoothstep(0.015, 0.34, localEcology.y) * metabolicReadiness;
+    float nicheDetoxDrive = builderRole * development.nicheConstruction.w *
+        repairProgram * membraneExposure * toxinLoad * metabolicReadiness;
+    float4 nicheActivity = saturate(float4(
+        nicheShelterDrive, nicheReservoirDrive,
+        nicheRecyclingDrive, nicheDetoxDrive
+    ));
     float extracellularMatrixConstruction = membraneExposure * adhesiveProgram *
         repairProgram * saturate(cell.physiology.x) *
         (0.30 + woundCue * 0.74 + repairUrgency * 0.58) *
-        (0.62 + localMatrixNeed * 0.38) * metabolicReadiness;
+        (0.62 + localMatrixNeed * 0.38) * metabolicReadiness +
+        nicheShelterDrive * 0.52 + nicheReservoirDrive * 0.46;
     float extracellularMatrixRemodeling = membraneExposure * motilityProgram *
         secretionProgram * extracellularMatrixSupport *
         (0.20 + woundCue * 0.80) * metabolicReadiness;
@@ -7117,7 +7475,8 @@ kernel void evolveOrganismCells(
         mix(0.44, 1.0, discretionaryActivityScale);
     maintenance *= (0.94 + repairProgram * 0.16 + proliferationProgram * 0.10) *
         mix(0.20, 1.0, metabolicReadiness) *
-        mix(1.0, 0.48, starvationQuiescence);
+        mix(1.0, 0.48, starvationQuiescence) *
+        (1.0 + senescence * (0.16 + somaRole * 0.24));
     float signalingCost = (calcium * 0.000020 + erk * 0.000024 +
         (mechanicsToCalciumEffect + calciumToERKEffect) * 0.000080) *
         development.mechanochemistryB.x;
@@ -7136,6 +7495,7 @@ kernel void evolveOrganismCells(
     float constructionWork = surfaceConstructionWork + surfaceMaintenanceWork +
         extracellularMatrixConstruction * 0.000052 +
         extracellularMatrixRemodeling * 0.000030 +
+        dot(nicheActivity, float4(0.000028, 0.000034, 0.000024, 0.000032)) +
         integumentSynthesisDrive * 0.000082 +
         appendageGrowthDrive * 0.000068 +
         appendageActuationWork +
@@ -7144,9 +7504,11 @@ kernel void evolveOrganismCells(
         junctionStrainMemory * 0.000016;
     float cellularCatalystSecretion = secretionProgram * agent.geneA.y *
         agent.geneA.w * membraneExposure * metabolicReadiness *
-        (0.000002 + localEcology.y * 0.000014);
+        (0.000002 + localEcology.y * 0.000014) +
+        nicheRecyclingDrive * 0.000020;
     float cellularToxinNeutralization = toxinTolerance * toxinLoad *
-        membraneExposure * metabolicReadiness * 0.000018;
+        membraneExposure * metabolicReadiness * 0.000018 +
+        nicheDetoxDrive * 0.000022;
     float ecologicalResponseWork = toxinTolerance * toxinLoad * 0.000022 +
         detritalScavenging * consumedDetritus * 0.045 +
         shearAnchoring * environmentalDrive * 0.075 +
@@ -7157,11 +7519,13 @@ kernel void evolveOrganismCells(
             (1.0 - adhesiveProgram) *
             smoothstep(0.16, 0.38, cell.physiology.x),
         reproductiveDrive * membraneExposure * motilityProgram * 0.58
-    ) * discretionaryActivityScale;
+    ) * reproductiveMaturity * (0.22 + germlineRole * 0.78) *
+        discretionaryActivityScale;
     float crossbreedingPreparation = mixedProgramTissue &&
         meanRecognitionCompatibility >= 0.0
         ? saturate(meanRecognitionCompatibility) * agent.social.w *
             saturate(junctionConductance) * metabolicReadiness *
+            reproductiveMaturity * (0.24 + germlineRole * 0.76) *
             discretionaryActivityScale
         : 0.0;
     float requestedRepairWork = repairUrgency * repairCommitment * (
@@ -7290,7 +7654,8 @@ kernel void evolveOrganismCells(
     float unresolvedRepair = repairUrgency * (1.0 - repairSatisfaction);
     float stressTarget = saturate(
         externalStress + energyStrain * 0.46 + unresolvedRepair * 0.24 -
-            endogenousReproductivePleasure * 0.10
+            endogenousReproductivePleasure * 0.10 +
+            senescence * (0.10 + somaRole * 0.10)
     );
     float stressResponse = stressTarget > cell.signals.z
         ? 0.026 : 0.012 + repairCommitment * repairSatisfaction * 0.024;
@@ -7298,7 +7663,8 @@ kernel void evolveOrganismCells(
     float apoptosis = clamp(
         cell.signals.w + max(stress - 0.72, 0.0) * 0.0024 - 0.00022 -
             repairProgram * 0.00030 - apoptosisSuppression * 0.00034 +
-            incomingRejection * 0.00040,
+            incomingRejection * 0.00040 +
+            senescence * (0.00010 + somaRole * 0.00018),
         0.0, 1.0
     );
     float permeabilityTurnover = permeabilityProgram * 0.000024 *
@@ -7313,7 +7679,8 @@ kernel void evolveOrganismCells(
         cell.physiology.w + (atp - membraneATPSetpoint) * 0.00020 + membraneRepair -
             stress * 0.00022 - apoptosis * 0.00031 - permeabilityTurnover -
             incomingRejection * 0.00026 +
-            integumentCoverage * integumentTension * expenseScale * 0.000026,
+            integumentCoverage * integumentTension * expenseScale * 0.000026 -
+            senescence * (0.000018 + somaRole * 0.000020),
         0.0, 1.0
     );
     float energySupport = cellularEnergySupport(
@@ -7405,6 +7772,14 @@ kernel void evolveOrganismCells(
         saturate(appendageMaturity), gaitPhase
     );
     cell.surfaceMaterial = updatedSurfaceMaterial;
+    cell.lifecycle = float4(
+        ontogeny, reproductiveMaturity, senescence, regenerativeReopening
+    );
+    cell.roles = roles;
+    cell.learning = float4(
+        cuePrediction, predictionError, habituation, acquiredBehavior
+    );
+    cell.niche = nicheActivity * expenseScale;
 
     float2 boundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
         ? normalize(cell.tissueGeometry.xy)
@@ -7466,7 +7841,8 @@ kernel void evolveOrganismCells(
             (1.0 - adhesiveProgram) * smoothstep(0.16, 0.38, atp),
         sexualRelease * exposure * (0.42 + motilityProgram * 0.58) *
             smoothstep(0.075, 0.24, atp)
-    ) * (1.0 + organismReproductivePleasure * 0.34);
+    ) * reproductiveMaturity * (0.20 + germlineRole * 0.80) *
+        (1.0 + organismReproductivePleasure * 0.34);
     activeTraction += boundaryNormal * propaguleDrive *
         (0.00018 + detachmentRelease * 0.00012) * structuralDrag;
     activeTraction *= expenseScale;
@@ -8515,7 +8891,8 @@ kernel void resolveMembraneContacts(
         CellState scavenger = cells[gid];
         float scavenging = saturate(
             agents[owner].geneC.z * 0.52 + scavenger.regulationB.x * 0.20 +
-            scavenger.regulationB.w * 0.18 + scavenger.tissueGeometry.z * 0.10
+            scavenger.regulationB.w * 0.14 + scavenger.tissueGeometry.z * 0.08 +
+            scavenger.niche.z * 0.18 + scavenger.roles.z * 0.10
         );
         uint requested = uint(clamp(
             (0.0035 + scavenging * 0.012) * float(corpseStructureScale),
@@ -8680,6 +9057,16 @@ kernel void resolveMembraneContacts(
                             float transmission = (sameOwner ? 0.085 : 0.035) *
                                 (0.30 + transmissionCompatibility * 0.70) *
                                 saturate(1.0 - localGap / max(interactionRange, 0.0001));
+                            float culturalExpression = sqrt(max(
+                                developmentalGenomes[programIndex].neuralPlasticity.w *
+                                developmentalGenomes[otherProgramIndex].neuralPlasticity.w,
+                                0.0
+                            ));
+                            culturalExpression *= sqrt(max(
+                                cells[gid].roles.z * cells[otherIndex].roles.z,
+                                0.0
+                            ));
+                            transmission *= 0.18 + saturate(culturalExpression) * 0.82;
                             accumulateEmbodiedMemory(
                                 contactEffects, gid, episodeB, transmission
                             );
@@ -10190,6 +10577,31 @@ kernel void divideAndReduceOrganismCells(
             child.signalCausality = float4(0.0);
             child.tissueForce = float4(0.0);
             child.tissueGeometry = float4(axis, 1.0, 0.0);
+            float cellularRejuvenation = clamp(
+                0.18 + parent.roles.x * inheritedDevelopment.lifecycleB.y * 0.42 +
+                    (sexualBodyPair ? 0.18 : 0.0),
+                0.12, 0.78
+            );
+            child.lifecycle.x *= 1.0 - cellularRejuvenation;
+            child.lifecycle.y *= 1.0 - cellularRejuvenation * 0.86;
+            child.lifecycle.z *= 1.0 - cellularRejuvenation * 0.92;
+            child.lifecycle.w = max(
+                child.lifecycle.w,
+                cellularRejuvenation * inheritedDevelopment.lifecycleB.x * 0.34
+            );
+            child.roles = mix(
+                child.roles,
+                float4(max(child.roles.x, 0.56), child.roles.y * 0.72,
+                    child.roles.z * 0.54, child.roles.w * 0.48),
+                cellularRejuvenation
+            );
+            float acquiredStateInheritance = clamp(
+                0.08 + inheritedDevelopment.neuralPlasticity.w * 0.18 +
+                    parent.roles.x * 0.10,
+                0.08, 0.38
+            );
+            child.learning *= acquiredStateInheritance;
+            child.niche = float4(0.0);
 
             uint parentStateBase = divisionParent * regulatoryNodeCapacity;
             uint childStateBase = divisionTarget * regulatoryNodeCapacity;
@@ -10342,12 +10754,17 @@ kernel void divideAndReduceOrganismCells(
                 return;
             }
             CellMemoryState childMemory = cellMemories[divisionParent];
+            float experientialInheritance = clamp(
+                0.16 + parent.roles.x * 0.16 +
+                    developmentalGenomes[childIdentity.programIndex].neuralPlasticity.w * 0.24,
+                0.16, 0.58
+            );
             for (uint memoryIndex = 0u; memoryIndex < embodiedMemoryCount;
                  ++memoryIndex) {
                 float4 inheritedEpisode = unpackEmbodiedMemory(
                     childMemory.episodes[memoryIndex]
                 );
-                inheritedEpisode.w *= 0.88;
+                inheritedEpisode.w *= experientialInheritance;
                 childMemory.episodes[memoryIndex] = packEmbodiedMemory(inheritedEpisode);
             }
             if (programCrossbred && recombinationDonor < maxCellCount) {
@@ -10355,7 +10772,10 @@ kernel void divideAndReduceOrganismCells(
                 strongestEmbodiedMemory(
                     cellMemories[recombinationDonor], donorEpisode
                 );
-                donorEpisode.w *= 0.62;
+                donorEpisode.w *= clamp(
+                    developmentalGenomes[childIdentity.programIndex].neuralPlasticity.w * 0.28,
+                    0.04, 0.38
+                );
                 receiveEmbodiedEpisode(childMemory, donorEpisode);
             }
             cellMemories[divisionTarget] = childMemory;
@@ -10513,6 +10933,10 @@ kernel void divideAndReduceOrganismCells(
     float4 embodiedMemoryTotal = float4(0.0);
     float embodiedMemoryWeight = 0.0;
     float4 surfaceMaterialTotal = float4(0.0);
+    float4 lifecycleTotal = float4(0.0);
+    float4 rolesTotal = float4(0.0);
+    float4 learningTotal = float4(0.0);
+    float4 nicheTotal = float4(0.0);
     uint programFingerprint = 0u;
     uint maximumProgramReplicationGeneration = 0u;
     index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
@@ -10526,6 +10950,10 @@ kernel void divideAndReduceOrganismCells(
         }
         CellState cell = cells[index];
         surfaceMaterialTotal += cell.surfaceMaterial;
+        lifecycleTotal += cell.lifecycle;
+        rolesTotal += cell.roles;
+        learningTotal += cell.learning;
+        nicheTotal += cell.niche;
         float4 strongestEpisode;
         strongestEmbodiedMemory(cellMemories[index], strongestEpisode);
         float episodeWeight = max(strongestEpisode.w, 0.0001);
@@ -10840,6 +11268,10 @@ kernel void divideAndReduceOrganismCells(
     aggregate.embodiedMemory = embodiedMemoryWeight > 0.0001
         ? embodiedMemoryTotal / embodiedMemoryWeight : float4(0.0);
     aggregate.surfaceMaterial = surfaceMaterialTotal * inverseCount;
+    aggregate.lifecycle = lifecycleTotal * inverseCount;
+    aggregate.roles = rolesTotal * inverseCount;
+    aggregate.learning = learningTotal * inverseCount;
+    aggregate.niche = nicheTotal * inverseCount;
     aggregates[owner] = aggregate;
     agent.programReplicationGeneration = maximumProgramReplicationGeneration;
     agents[owner] = agent;
@@ -11677,6 +12109,10 @@ struct CellRasterData {
     float4 collectiveBoundary;
     float4 programEcology;
     float4 construction;
+    float4 lifecycle;
+    float4 roles;
+    float4 learning;
+    float4 niche;
     float lineageHue;
     float closureSignal;
     float visibility;
@@ -11721,6 +12157,15 @@ inline float4 organismOverviewCellColor(
             input.collectiveBoundary.y * 0.26
         );
     color += float3(0.72, 1.0, 0.88) * collectiveSurface * 0.48;
+    float lifecycleBand = exposedBand * saturate(
+        input.lifecycle.y * 0.34 + input.lifecycle.w * 0.66
+    );
+    color += mix(
+        float3(1.0, 0.58, 0.08), float3(0.08, 1.0, 0.54),
+        saturate(input.lifecycle.w)
+    ) * lifecycleBand * 0.34;
+    color += float3(0.52, 0.16, 0.72) * innerBody *
+        saturate(input.lifecycle.z) * 0.26;
     float footPad = outerBand * saturate(input.footState.x);
     float footSole = footPad * saturate(input.footState.y);
     color = mix(color, float3(0.006, 0.050, 0.038), footPad * 0.82);
@@ -11943,6 +12388,10 @@ inline CellRasterData makeCellRasterData(
     uint programIndex = cellIdentities[cellIndex].programIndex;
     output.construction = saturate(cell.tissueGeometry.z) *
         saturate(cell.surfaceMaterial);
+    output.lifecycle = cell.lifecycle;
+    output.roles = cell.roles;
+    output.learning = cell.learning;
+    output.niche = cell.niche;
     output.lineageHue = programSlotMatches(
         programSlots, programIndex, cellIdentities[cellIndex].programGeneration
     ) &&
@@ -12126,15 +12575,14 @@ fragment float4 cellFragment(
         float voltage = saturate(input.dynamics.x * 0.30 + 0.5);
         float3 lineage = hsvToRGB(float3(input.lineageHue, 0.76, 0.66));
         float roleTotal = max(
-            input.phenotype.x + input.phenotype.y +
-                input.phenotype.z + input.phenotype.w,
+            input.roles.x + input.roles.y + input.roles.z + input.roles.w,
             0.001
         );
         float3 roleColor = (
-            float3(0.02, 0.92, 0.66) * input.phenotype.x +
-            float3(0.98, 0.18, 0.08) * input.phenotype.y +
-            float3(0.08, 0.50, 1.0) * input.phenotype.z +
-            float3(0.98, 0.12, 0.68) * input.phenotype.w
+            float3(1.00, 0.56, 0.06) * input.roles.x +
+            float3(0.08, 0.82, 0.62) * input.roles.y +
+            float3(0.04, 0.62, 1.00) * input.roles.z +
+            float3(0.18, 1.00, 0.34) * input.roles.w
         ) / roleTotal;
         float3 voltageColor = mix(
             float3(0.02, 0.34, 1.0), float3(1.0, 0.08, 0.02), voltage
@@ -12171,6 +12619,15 @@ fragment float4 cellFragment(
         color += float3(0.98, 0.08, 0.66) * erkBody * 0.54;
         color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.86;
         color += float3(0.08, 1.0, 0.62) * repairFront * 0.92;
+        color += float3(0.05, 1.0, 0.46) * cytoplasm *
+            saturate(input.lifecycle.w) * 0.34;
+        color += float3(0.58, 0.12, 0.76) * cytoplasm *
+            saturate(input.lifecycle.z) * 0.30;
+        color += float3(0.12, 0.74, 1.0) * visibleMembrane *
+            saturate(abs(input.learning.w)) * input.roles.z * 0.28;
+        color += float3(0.34, 0.98, 0.30) * visibleMembrane *
+            saturate(input.niche.x + input.niche.y + input.niche.z + input.niche.w) *
+            input.roles.w * 0.18;
         color += float3(1.0, 0.055, 0.018) * woundArc * 0.82;
         color += float3(1.0, 0.30, 0.015) * membrane * localPressure * 0.62;
         color = mix(color, float3(0.012, 0.085, 0.070), footPad * 0.62);
