@@ -93,7 +93,7 @@ enum RecoveryProbeCLI {
         var settings = RendererSettings(
             isRunning: true,
             stepsPerFrame: 24,
-            resourceFlux: 1,
+            externalEnergyFlux: 1,
             mutationScale: 1,
             transportScale: 1,
             mechanosensingGain: 1,

@@ -70,7 +70,7 @@ enum NumiAutomataEntrypoint {
                 try PairedCausalExperimentCLI.run(arguments: arguments.dropFirst())
             case "regeneration-experiment":
                 try PairedRegenerationExperimentCLI.run(arguments: arguments.dropFirst())
-            case "lifecycle-experiment":
+            case "lifeHistory-experiment":
                 try LifecycleExperimentCLI.run(arguments: arguments.dropFirst())
             case "recovery-probe":
                 try RecoveryProbeCLI.run(arguments: arguments.dropFirst())

@@ -1,0 +1,314 @@
+#pragma once
+
+inline float4 expressedGenomePagePayload(
+    device const GenomePage* pages,
+    uint firstPage,
+    uint pageType,
+    uint payloadIndex
+) {
+    uint page = firstPage;
+    uint traversed = 0u;
+    while (page < genomePageCapacity && traversed < 512u) {
+        GenomePage candidate = pages[page];
+        if (candidate.header.x == pageType) {
+            return candidate.payload[min(payloadIndex, 14u)];
+        }
+        page = candidate.header.y;
+        ++traversed;
+    }
+    return float4(0.0);
+}
+
+inline AgentState decodeAgentExpressionFromGenomePages(
+    AgentState fallback,
+    GenomeHeader header,
+    device const GenomePage* pages
+) {
+    if (header.firstPage >= genomePageCapacity) { return fallback; }
+    fallback.metabolicExpression = clamp(
+        expressedGenomePagePayload(pages, header.firstPage, genomePageReaction, 5u),
+        0.0, 1.0
+    );
+    fallback.transportExpression = clamp(
+        expressedGenomePagePayload(pages, header.firstPage, genomePageTransport, 0u),
+        0.0, 1.0
+    );
+    fallback.receptorChemistry = clamp(
+        expressedGenomePagePayload(pages, header.firstPage, genomePageReceptor, 0u),
+        0.0, 1.0
+    );
+    fallback.junctionChemistry = clamp(
+        expressedGenomePagePayload(pages, header.firstPage, genomePageJunction, 0u),
+        0.0, 1.0
+    );
+    fallback.dynamicExpression = clamp(
+        expressedGenomePagePayload(pages, header.firstPage, genomePageElectrical, 0u),
+        0.0, 1.0
+    );
+    fallback.genomeHash = header.genomeHash;
+    fallback.mutationDistance = header.mutationDistance;
+    fallback.lastMutationDistance = header.lastMutationDistance;
+    fallback.programReplicationGeneration = header.replicationGeneration;
+    return fallback;
+}
+
+inline ProgramExpressionCache decodeProgramExpressionFromGenomePages(
+    ProgramExpressionCache fallback,
+    GenomeHeader header,
+    device const GenomePage* pages
+) {
+    if (header.firstPage >= genomePageCapacity) { return fallback; }
+    fallback.pageSummary = uint4(
+        header.pageCount,
+        header.pageCount > 0u ? header.pageCount - 1u : 0u,
+        header.genomeHash,
+        header.replicationGeneration
+    );
+    fallback.morphogenTransport = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageReceptor, 1u
+    );
+    fallback.chemicalResponse = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageReceptor, 2u
+    );
+    fallback.materialSynthesis = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageMaterial, 0u
+    );
+    fallback.morphogenKinetics = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageMaterial, 2u
+    );
+    fallback.morphogenesisA = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageMaterial, 3u
+    );
+    fallback.junctionMaterial = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageJunction, 1u
+    );
+    fallback.mechanochemistryA = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageElectrical, 1u
+    );
+    fallback.mechanochemistryB = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageElectrical, 2u
+    );
+    fallback.plasticityControl = expressedGenomePagePayload(
+        pages, header.firstPage, genomePagePlasticity, 0u
+    );
+    fallback.turnoverControl = expressedGenomePagePayload(
+        pages, header.firstPage, genomePagePlasticity, 1u
+    );
+    fallback.allocationControl = expressedGenomePagePayload(
+        pages, header.firstPage, genomePagePlasticity, 2u
+    );
+    fallback.morphogenesisB = expressedGenomePagePayload(
+        pages, header.firstPage, genomePagePlasticity, 3u
+    );
+    return fallback;
+}
+
+inline ResonanceExpressionCache decodeResonanceFromGenomePages(
+    ResonanceExpressionCache fallback,
+    GenomeHeader header,
+    device const GenomePage* pages
+) {
+    if (header.firstPage >= genomePageCapacity) { return fallback; }
+    fallback.mechanics = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageElectrical, 3u
+    );
+    fallback.tuning = expressedGenomePagePayload(
+        pages, header.firstPage, genomePageElectrical, 4u
+    );
+    return fallback;
+}
+
+inline AgentState synchronizePublishedGenomeExpression(
+    device const GenomeHeader* headers,
+    device const GenomePage* pages,
+    device ProgramExpressionCache* expressionCaches,
+    device ResonanceExpressionCache* resonanceCaches,
+    device ProgramLineageRecord* lineageRecords,
+    uint programIndex,
+    AgentState fallback
+) {
+    GenomeHeader header = headers[programIndex];
+    AgentState decoded = decodeAgentExpressionFromGenomePages(
+        fallback, header, pages
+    );
+    expressionCaches[programIndex] = decodeProgramExpressionFromGenomePages(
+        expressionCaches[programIndex], header, pages
+    );
+    resonanceCaches[programIndex] = decodeResonanceFromGenomePages(
+        resonanceCaches[programIndex], header, pages
+    );
+    ProgramLineageRecord lineage = lineageRecords[programIndex];
+    lineage.metabolicExpression = decoded.metabolicExpression;
+    lineage.dynamicExpression = decoded.dynamicExpression;
+    lineage.transportExpression = decoded.transportExpression;
+    lineage.receptorChemistry = decoded.receptorChemistry;
+    lineage.junctionChemistry = decoded.junctionChemistry;
+    lineage.genomeHash = header.genomeHash;
+    lineage.generation = header.replicationGeneration;
+    lineageRecords[programIndex] = lineage;
+    return decoded;
+}
+
+/// Reaction pages store basis-material reactants in payload 0/1 and products
+/// in 2/3. Mutation may change pathway kinetics, but products are rebuilt from
+/// the exact reactant composition. payload[4].x is the declared chemical or
+/// external energy source and payload[4].y is bounded usable work.
+inline void enforceAtomBalancedReactionPage(thread GenomePage& page) {
+    float4 reactantsA = max(page.payload[0], float4(0.0));
+    float4 reactantsB = max(page.payload[1], float4(0.0));
+    page.payload[0] = reactantsA;
+    page.payload[1] = reactantsB;
+    page.payload[2] = reactantsA;
+    page.payload[3] = reactantsB;
+    float declaredSource = max(page.payload[4].x, 0.0);
+    page.payload[4].x = declaredSource;
+    page.payload[4].y = min(max(page.payload[4].y, 0.0), declaredSource);
+}
+
+inline bool publishGenomeOverlay(
+    device GenomeHeader* headers,
+    device GenomePage* pages,
+    device atomic_uint* arenaState,
+    device ChemistryAuditState* chemistryAudit,
+    uint parentProgram,
+    uint secondaryProgram,
+    uint childProgram,
+    uint childGeneration,
+    uint childGenomeHash,
+    uint childOriginBirthID,
+    uint pageType,
+    float mutationDistance,
+    uint seed,
+    bool recombined
+) {
+    if (parentProgram >= maxGenomeHeaderCount ||
+        childProgram >= maxGenomeHeaderCount ||
+        headers[parentProgram].firstPage >= genomePageCapacity) {
+        return false;
+    }
+    GenomeHeader parent = headers[parentProgram];
+    uint operation = hash32(seed + 31u) & 3u;
+    if (!recombined && operation == 1u && parent.pageCount > 1u) {
+        GenomeHeader child = parent;
+        child.firstPage = pages[parent.firstPage].header.y;
+        child.pageCount = parent.pageCount - 1u;
+        child.generation = childGeneration;
+        child.genomeHash = hash32(
+            childGenomeHash ^ child.firstPage ^ (pageType * 0x9e3779b9u) ^ 0x27d4eb2fu
+        );
+        child.parentGenomeHash = parent.genomeHash;
+        child.secondParentGenomeHash = 0u;
+        child.originBirthID = childOriginBirthID;
+        child.parentProgramIndex = parentProgram;
+        child.parentProgramGeneration = parent.generation;
+        child.secondParentProgramIndex = maxGenomeHeaderCount;
+        child.secondParentProgramGeneration = 0u;
+        child.mutationDistance = parent.mutationDistance + mutationDistance;
+        child.lastMutationDistance = mutationDistance;
+        child.replicationGeneration = parent.replicationGeneration + 1u;
+        child.flags = 1u | 4u;
+        headers[childProgram] = child;
+        return true;
+    }
+    bool splitPage = !recombined && operation == 2u;
+    uint allocatedPageCount = splitPage ? 2u : 1u;
+    uint pageIndex = atomic_fetch_add_explicit(
+        &arenaState[0], allocatedPageCount, memory_order_relaxed
+    );
+    if (pageIndex >= genomePageCapacity ||
+        allocatedPageCount > genomePageCapacity - pageIndex) {
+        atomic_fetch_add_explicit(
+            &chemistryAudit->skippedGenomeMutationCount, 1u, memory_order_relaxed
+        );
+        return false;
+    }
+    float4 inheritedPayload[15];
+    for (uint payload = 0u; payload < 15u; ++payload) {
+        inheritedPayload[payload] = expressedGenomePagePayload(
+            pages, parent.firstPage, pageType, payload
+        );
+        if (recombined && secondaryProgram < maxGenomeHeaderCount &&
+            headers[secondaryProgram].firstPage < genomePageCapacity) {
+            inheritedPayload[payload] = mix(
+                inheritedPayload[payload],
+                expressedGenomePagePayload(
+                    pages, headers[secondaryProgram].firstPage, pageType, payload
+                ),
+                random01(seed + 1u + payload * 3u)
+            );
+        }
+    }
+    GenomePage overlay;
+    overlay.header = uint4(
+        pageType,
+        splitPage ? pageIndex + 1u : parent.firstPage,
+        atomic_fetch_add_explicit(&arenaState[1], 1u, memory_order_relaxed),
+        childGeneration
+    );
+    for (uint payload = 0u; payload < 15u; ++payload) {
+        overlay.payload[payload] = inheritedPayload[payload];
+    }
+    float amplitude = recombined ? 0.012 : clamp(0.008 + mutationDistance, 0.008, 0.18);
+    overlay.payload[0] = inheritedPayload[0] + randomSigned4(seed + 11u) * amplitude;
+    overlay.payload[1] = inheritedPayload[1] + randomSigned4(seed + 17u) * amplitude * 0.72;
+    overlay.payload[2] = float4(
+        mutationDistance,
+        recombined ? 1.0 : 0.0,
+        random01(seed + 23u),
+        random01(seed + 29u)
+    );
+    if (pageType == genomePageReaction) {
+        enforceAtomBalancedReactionPage(overlay);
+    }
+    pages[pageIndex] = overlay;
+
+    if (splitPage) {
+        GenomePage split = overlay;
+        split.header = uint4(
+            pageType,
+            parent.firstPage,
+            atomic_fetch_add_explicit(&arenaState[1], 1u, memory_order_relaxed),
+            childGeneration
+        );
+        for (uint payload = 0u; payload < 15u; ++payload) {
+            split.payload[payload] += randomSigned4(
+                seed + 101u + payload * 7u
+            ) * amplitude * 0.35;
+        }
+        if (pageType == genomePageReaction) {
+            enforceAtomBalancedReactionPage(split);
+        }
+        pages[pageIndex + 1u] = split;
+    }
+
+    GenomeHeader child = parent;
+    child.firstPage = pageIndex;
+    child.secondaryFirstPage = recombined && secondaryProgram < maxGenomeHeaderCount
+        ? headers[secondaryProgram].firstPage : parent.secondaryFirstPage;
+    child.pageCount = min(
+        parent.pageCount + allocatedPageCount, 0xfffffffeu
+    );
+    child.generation = childGeneration;
+        child.genomeHash = hash32(
+            childGenomeHash ^ pageIndex ^ (pageType * 0x9e3779b9u) ^
+            (recombined ? 0x85ebca6bu : 0u)
+        );
+    child.parentGenomeHash = parent.genomeHash;
+    child.secondParentGenomeHash = recombined &&
+        secondaryProgram < maxGenomeHeaderCount
+        ? headers[secondaryProgram].genomeHash : 0u;
+    child.originBirthID = childOriginBirthID;
+    child.parentProgramIndex = parentProgram;
+    child.parentProgramGeneration = parent.generation;
+    child.secondParentProgramIndex = recombined
+        ? secondaryProgram : maxGenomeHeaderCount;
+    child.secondParentProgramGeneration = recombined &&
+        secondaryProgram < maxGenomeHeaderCount
+        ? headers[secondaryProgram].generation : 0u;
+    child.mutationDistance = parent.mutationDistance + mutationDistance;
+    child.lastMutationDistance = mutationDistance;
+    child.replicationGeneration = parent.replicationGeneration + 1u;
+    child.flags = 1u | (recombined ? 2u : 0u);
+    headers[childProgram] = child;
+    return true;
+}

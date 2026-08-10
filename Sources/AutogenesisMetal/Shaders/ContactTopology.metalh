@@ -1,0 +1,1511 @@
+kernel void clearCellSpatialHash(
+    device atomic_uint* hashHeads [[buffer(0)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid < cellSpatialHashBucketCount) {
+        atomic_store_explicit(&hashHeads[gid], emptySpatialHashEntry, memory_order_relaxed);
+    }
+}
+
+kernel void clearActiveCellContactEffects(
+    device atomic_int* contactEffects [[buffer(0)]],
+    device atomic_int* membraneContactEffects [[buffer(1)]],
+    device atomic_uint* topologySignatures [[buffer(2)]],
+    device CellIdentity* cellIdentities [[buffer(3)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint cellIndex = activeCellIndices[compactIndex];
+    if (cellIndex >= maxCellCount) { return; }
+    for (uint channel = 0u; channel < cellContactEffectChannelCount; ++channel) {
+        atomic_store_explicit(
+            &contactEffects[cellIndex * cellContactEffectChannelCount + channel],
+            0, memory_order_relaxed
+        );
+    }
+    // The selected mate is a contact-local fact and is rebuilt every step.
+    // The second-parent body ID and conception step in padding 1/2 persist.
+    cellIdentities[cellIndex].identityPadding0 = 0u;
+    uint membraneBase = cellIndex * membraneVertexCount * 3u;
+    for (uint channel = 0u; channel < membraneVertexCount * 3u; ++channel) {
+        atomic_store_explicit(
+            &membraneContactEffects[membraneBase + channel], 0, memory_order_relaxed
+        );
+    }
+    uint topologyBase = cellIndex * 4u;
+    atomic_store_explicit(&topologySignatures[topologyBase], 0u, memory_order_relaxed);
+    atomic_store_explicit(&topologySignatures[topologyBase + 1u], 0u, memory_order_relaxed);
+}
+
+kernel void clearOwnerCellLists(
+    device atomic_uint* ownerCellHeads [[buffer(0)]],
+    device const uint* activeComponents [[buffer(1)]],
+    device const atomic_uint* activeComponentCount [[buffer(2)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeComponentCount, memory_order_relaxed)) { return; }
+    uint owner = activeComponents[compactIndex];
+    if (owner < maxAgentCount) {
+        atomic_store_explicit(
+            &ownerCellHeads[owner], emptySpatialHashEntry, memory_order_relaxed
+        );
+    }
+}
+
+inline void insertOwnedCellSorted(
+    device atomic_uint* ownerCellHeads,
+    device atomic_uint* ownerCellNext,
+    uint gid,
+    uint owner
+) {
+    atomic_store_explicit(&ownerCellNext[gid], emptySpatialHashEntry, memory_order_relaxed);
+    for (uint attempt = 0u; attempt < maxCellCount; ++attempt) {
+        device atomic_uint* insertionLink = &ownerCellHeads[owner];
+        uint successor = atomic_load_explicit(insertionLink, memory_order_relaxed);
+        while (successor < gid) {
+            insertionLink = &ownerCellNext[successor];
+            successor = atomic_load_explicit(insertionLink, memory_order_relaxed);
+        }
+        if (successor == gid) { return; }
+        atomic_store_explicit(&ownerCellNext[gid], successor, memory_order_relaxed);
+        uint expectedSuccessor = successor;
+        if (atomic_compare_exchange_weak_explicit(
+            insertionLink,
+            &expectedSuccessor,
+            gid,
+            memory_order_relaxed,
+            memory_order_relaxed
+        )) {
+            return;
+        }
+    }
+}
+
+kernel void buildOwnerCellLists(
+    device const atomic_uint* agentOccupancy [[buffer(0)]],
+    device const atomic_uint* cellOccupancy [[buffer(1)]],
+    device const CellIdentity* cellIdentities [[buffer(2)]],
+    device atomic_uint* ownerCellHeads [[buffer(3)]],
+    device atomic_uint* ownerCellNext [[buffer(4)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount) { return; }
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+            cellOccupancyAlive) {
+        atomic_store_explicit(
+            &ownerCellNext[gid], emptySpatialHashEntry, memory_order_relaxed
+        );
+        return;
+    }
+    insertOwnedCellSorted(ownerCellHeads, ownerCellNext, gid, owner);
+}
+
+kernel void buildCellSpatialHash(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device atomic_uint* cellOccupancy [[buffer(3)]],
+    device atomic_uint* hashHeads [[buffer(4)]],
+    device uint* hashNext [[buffer(5)]],
+    constant SimulationUniforms& uniforms [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    device atomic_uint* ownerCellHeads [[buffer(8)]],
+    device atomic_uint* ownerCellNext [[buffer(9)]],
+    device CellCorpseState* cellCorpses [[buffer(10)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= maxCellCount) { return; }
+    uint occupancy = atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed);
+    if (occupancy == cellOccupancyCorpse) {
+        uint structure = atomic_load_explicit(
+            &cellCorpses[gid].structure, memory_order_relaxed
+        );
+        uint age = uniforms.step >= cellCorpses[gid].deathStep
+            ? uniforms.step - cellCorpses[gid].deathStep : 0u;
+        if (structure == 0u || age > corpseMaximumPersistenceSteps) {
+            atomic_store_explicit(
+                &cellCorpses[gid].structure, 0u, memory_order_relaxed
+            );
+            atomic_store_explicit(
+                &cellOccupancy[gid], cellOccupancyFree, memory_order_relaxed
+            );
+            hashNext[gid] = emptySpatialHashEntry;
+            atomic_store_explicit(
+                &ownerCellNext[gid], emptySpatialHashEntry, memory_order_relaxed
+            );
+            return;
+        }
+        float decay = exp2(-1.0 / 420.0);
+        uint decayed = min(structure, uint(
+            max(float(structure) * max(1.0 - decay, 0.00035), 1.0)
+        ));
+        if (decayed > 0u) {
+            claimCorpseStructure(&cellCorpses[gid].structure, decayed);
+        }
+        uint bucket = cellSpatialHash(
+            spatialHashCoordinate(cellCorpses[gid].worldPosition)
+        );
+        hashNext[gid] = atomic_exchange_explicit(
+            &hashHeads[bucket], gid, memory_order_relaxed
+        );
+        atomic_store_explicit(
+            &ownerCellNext[gid], emptySpatialHashEntry, memory_order_relaxed
+        );
+        return;
+    }
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u ||
+        occupancy != cellOccupancyAlive) {
+        hashNext[gid] = emptySpatialHashEntry;
+        atomic_store_explicit(
+            &ownerCellNext[gid], emptySpatialHashEntry, memory_order_relaxed
+        );
+        return;
+    }
+    float2 worldPosition = cellWorldPosition(agents[owner], cells[gid].position, uniforms);
+    uint bucket = cellSpatialHash(spatialHashCoordinate(worldPosition));
+    hashNext[gid] = atomic_exchange_explicit(&hashHeads[bucket], gid, memory_order_relaxed);
+    insertOwnedCellSorted(ownerCellHeads, ownerCellNext, gid, owner);
+}
+
+kernel void resetMembraneContactWork(
+    device atomic_uint* contactWorkState [[buffer(0)]],
+    device const atomic_uint* activeCellCount [[buffer(1)]],
+    constant SimulationUniforms& uniforms [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint livingCount = atomic_load_explicit(activeCellCount, memory_order_relaxed);
+    uint previousCount = atomic_load_explicit(&contactWorkState[3], memory_order_relaxed);
+    bool reconcile = atomic_load_explicit(
+        &contactWorkState[2], memory_order_relaxed
+    ) != 0u || livingCount != previousCount ||
+        uniforms.step % componentTopologyReconciliationStride == 0u;
+    atomic_store_explicit(&contactWorkState[0], 0u, memory_order_relaxed);
+    atomic_store_explicit(&contactWorkState[1], 0u, memory_order_relaxed);
+    atomic_store_explicit(&contactWorkState[2], reconcile ? 1u : 0u, memory_order_relaxed);
+}
+
+inline uint cellPairKey(uint indexA, uint indexB);
+inline uint cellPairFingerprint(
+    device const CellIdentity* identities,
+    uint indexA,
+    uint indexB
+);
+inline uint findCellJunction(
+    device const CellJunctionState* junctionStates,
+    uint pairKey,
+    uint fingerprint
+);
+
+inline uint nearestMembraneContactSector(float2 direction) {
+    float2 magnitude = abs(direction);
+    uint ordinal;
+    if (magnitude.y <= magnitude.x * 0.2679492) {
+        ordinal = 0u;
+    } else if (magnitude.y <= magnitude.x) {
+        ordinal = 1u;
+    } else if (magnitude.y <= magnitude.x * 3.7320508) {
+        ordinal = 2u;
+    } else {
+        ordinal = 3u;
+    }
+    if (direction.x >= 0.0) {
+        return direction.y >= 0.0
+            ? ordinal
+            : (ordinal == 0u ? 0u : 12u - ordinal);
+    }
+    return direction.y >= 0.0
+        ? 6u - ordinal
+        : 6u + ordinal;
+}
+
+kernel void buildMembraneContactPairs(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const atomic_uint* cellOccupancy [[buffer(3)]],
+    device const atomic_uint* hashHeads [[buffer(4)]],
+    device const uint* hashNext [[buffer(5)]],
+    device const CellIdentity* cellIdentities [[buffer(6)]],
+    device uint2* contactPairs [[buffer(7)]],
+    device atomic_uint* contactWorkState [[buffer(8)]],
+    constant SimulationUniforms& uniforms [[buffer(9)]],
+    device const CellCorpseState* cellCorpses [[buffer(10)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+            cellOccupancyAlive) { return; }
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+
+    float scale = max(cellWorldScale(uniforms), 0.0000001);
+    float2 worldPosition = cellWorldPosition(agents[owner], cells[gid].position, uniforms);
+    float ownRadius = clamp(
+        sqrt(max(cells[gid].membrane.x, 0.0001) / M_PI_F),
+        0.085, 0.30
+    );
+    uint nearestIndex[membraneVertexCount];
+    float nearestSurfaceGap[membraneVertexCount];
+    for (uint sector = 0u; sector < membraneVertexCount; ++sector) {
+        nearestIndex[sector] = emptySpatialHashEntry;
+        nearestSurfaceGap[sector] = INFINITY;
+    }
+    int2 baseCoordinate = int2(spatialHashCoordinate(worldPosition));
+    for (int offsetY = -2; offsetY <= 2; ++offsetY) {
+        for (int offsetX = -2; offsetX <= 2; ++offsetX) {
+            int2 candidateCoordinate = baseCoordinate + int2(offsetX, offsetY);
+            if (any(candidateCoordinate < int2(0)) ||
+                any(candidateCoordinate >= int2(cellSpatialHashAxisResolution))) { continue; }
+            uint bucket = cellSpatialHash(uint2(candidateCoordinate));
+            uint otherIndex = atomic_load_explicit(&hashHeads[bucket], memory_order_relaxed);
+            while (otherIndex != emptySpatialHashEntry) {
+                uint nextIndex = hashNext[otherIndex];
+                uint otherOccupancy = atomic_load_explicit(
+                    &cellOccupancy[otherIndex], memory_order_relaxed
+                );
+                bool livingPair = otherIndex > gid &&
+                    otherOccupancy == cellOccupancyAlive;
+                bool corpsePair = otherIndex != gid &&
+                    otherOccupancy == cellOccupancyCorpse;
+                if (livingPair || corpsePair) {
+                    uint otherOwner = cellIdentities[otherIndex].owner;
+                    bool validOther = corpsePair || (otherOwner < maxAgentCount &&
+                        atomic_load_explicit(
+                            &agentOccupancy[otherOwner], memory_order_relaxed
+                        ) != 0u);
+                    if (validOther) {
+                        float2 otherWorldPosition = corpsePair
+                            ? cellCorpses[otherIndex].worldPosition
+                            : cellWorldPosition(
+                                agents[otherOwner], cells[otherIndex].position, uniforms
+                            );
+                        float2 separationVector =
+                            otherWorldPosition - worldPosition;
+                        float separation = length(separationVector) / scale;
+                        if (separation <= 0.72) {
+                            uint sector = nearestMembraneContactSector(
+                                separationVector
+                            );
+                            float otherRadius = 0.12;
+                            if (!corpsePair) {
+                                otherRadius = clamp(
+                                    sqrt(max(
+                                        cells[otherIndex].membrane.x, 0.0001
+                                    ) / M_PI_F),
+                                    0.085, 0.30
+                                );
+                            }
+                            float surfaceGap =
+                                separation - ownRadius - otherRadius;
+                            if (surfaceGap < nearestSurfaceGap[sector] ||
+                                (surfaceGap == nearestSurfaceGap[sector] &&
+                                    otherIndex < nearestIndex[sector])) {
+                                nearestSurfaceGap[sector] = surfaceGap;
+                                nearestIndex[sector] = otherIndex;
+                            }
+                        }
+                    }
+                }
+                otherIndex = nextIndex;
+            }
+        }
+    }
+    for (uint sector = 0u; sector < membraneVertexCount; ++sector) {
+        uint otherIndex = nearestIndex[sector];
+        if (otherIndex == emptySpatialHashEntry) { continue; }
+        uint pairIndex = atomic_fetch_add_explicit(
+            &contactWorkState[0], 1u, memory_order_relaxed
+        );
+        if (pairIndex < membraneContactPairCapacity) {
+            contactPairs[pairIndex] = uint2(gid, otherIndex);
+        }
+    }
+}
+
+kernel void prepareMembraneContactDispatch(
+    device atomic_uint* contactWorkState [[buffer(0)]],
+    device uint* dispatchArguments [[buffer(1)]],
+    device atomic_uint* invariantState [[buffer(2)]],
+    constant SimulationUniforms& uniforms [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint rawCount = atomic_load_explicit(&contactWorkState[0], memory_order_relaxed);
+    uint pairCount = min(rawCount, membraneContactPairCapacity);
+    bool overflow = rawCount > membraneContactPairCapacity;
+    atomic_store_explicit(&contactWorkState[0], pairCount, memory_order_relaxed);
+    atomic_store_explicit(&contactWorkState[1], overflow ? 1u : 0u, memory_order_relaxed);
+    dispatchArguments[0] = (pairCount + 63u) / 64u;
+    dispatchArguments[1] = 1u;
+    dispatchArguments[2] = 1u;
+    if (overflow) {
+        atomic_fetch_or_explicit(
+            &invariantState[0], invariantContactPairOverflow, memory_order_relaxed
+        );
+        atomic_fetch_min_explicit(&invariantState[1], uniforms.step, memory_order_relaxed);
+        atomic_fetch_add_explicit(&invariantState[17], 1u, memory_order_relaxed);
+    }
+}
+
+inline uint cellPairKey(uint indexA, uint indexB) {
+    uint lower = min(indexA, indexB);
+    uint upper = max(indexA, indexB);
+    return lower * maxCellCount + upper + 1u;
+}
+
+inline uint cellPairFingerprint(
+    device const CellIdentity* identities,
+    uint indexA,
+    uint indexB
+) {
+    uint lowerID = min(identities[indexA].persistentID, identities[indexB].persistentID);
+    uint upperID = max(identities[indexA].persistentID, identities[indexB].persistentID);
+    return hash32(lowerID ^ hash32(upperID + 0x9e3779b9u));
+}
+
+inline uint findOrCreateCellJunction(
+    device CellJunctionState* junctionStates,
+    device uint* registeredJunctionIndices,
+    device atomic_uint* contactWorkState,
+    uint pairKey,
+    uint fingerprint,
+    uint step,
+    float restDistance,
+    float targetStrength
+) {
+    uint start = hash32(pairKey) & cellJunctionMask;
+    // Deletion leaves holes in this bounded open-addressed table. Always scan
+    // the complete probe window for an existing key before reusing a hole;
+    // otherwise a collision behind a cleared slot becomes unreachable and a
+    // duplicate junction can survive component reassignment.
+    for (uint probe = 0u; probe < 12u; ++probe) {
+        uint slot = (start + probe) & cellJunctionMask;
+        uint observedKey = atomic_load_explicit(
+            &junctionStates[slot].pairKey, memory_order_relaxed
+        );
+        if (observedKey == pairKey &&
+            junctionStates[slot].persistentFingerprint == fingerprint) {
+            atomic_store_explicit(
+                &junctionStates[slot].lastSeenStep, step, memory_order_relaxed
+            );
+            junctionStates[slot].age = min(junctionStates[slot].age + 1.0, 65535.0);
+            junctionStates[slot].strength = mix(
+                junctionStates[slot].strength, targetStrength, 0.08
+            );
+            return slot;
+        }
+    }
+    for (uint probe = 0u; probe < 12u; ++probe) {
+        uint slot = (start + probe) & cellJunctionMask;
+        uint observedKey = atomic_load_explicit(
+            &junctionStates[slot].pairKey, memory_order_relaxed
+        );
+        if (observedKey == reservedCellJunctionEntry) { continue; }
+        uint lastSeen = atomic_load_explicit(
+            &junctionStates[slot].lastSeenStep, memory_order_relaxed
+        );
+        bool stale = step > lastSeen && step - lastSeen > 180u;
+        if (observedKey == emptySpatialHashEntry || stale ||
+            (observedKey == pairKey &&
+                junctionStates[slot].persistentFingerprint != fingerprint)) {
+            uint expected = observedKey;
+            if (atomic_compare_exchange_weak_explicit(
+                &junctionStates[slot].pairKey, &expected, reservedCellJunctionEntry,
+                memory_order_relaxed, memory_order_relaxed
+            )) {
+                uint retainedFlags = junctionStates[slot].flags & registeredJunctionFlag;
+                if (retainedFlags == 0u) {
+                    uint registeredIndex = atomic_fetch_add_explicit(
+                        &contactWorkState[registeredJunctionCountIndex], 1u,
+                        memory_order_relaxed
+                    );
+                    if (registeredIndex < cellJunctionCapacity) {
+                        registeredJunctionIndices[registeredIndex] = slot;
+                        retainedFlags = registeredJunctionFlag;
+                    } else {
+                        atomic_store_explicit(
+                            &contactWorkState[registeredJunctionCountIndex],
+                            cellJunctionCapacity, memory_order_relaxed
+                        );
+                    }
+                }
+                junctionStates[slot].persistentFingerprint = fingerprint;
+                junctionStates[slot].flags = retainedFlags | 1u;
+                junctionStates[slot].restDistance = restDistance;
+                junctionStates[slot].strength = targetStrength;
+                junctionStates[slot].age = 1.0;
+                junctionStates[slot].load = 0.0;
+                junctionStates[slot].material = float4(
+                    max(targetStrength, 0.05), 0.35, 0.30, 0.25
+                );
+                junctionStates[slot].remodeling = float4(
+                    restDistance, 0.0, 0.0, 0.0
+                );
+                atomic_store_explicit(
+                    &junctionStates[slot].lastSeenStep, step, memory_order_relaxed
+                );
+                atomic_store_explicit(
+                    &junctionStates[slot].pairKey, pairKey, memory_order_relaxed
+                );
+                return slot;
+            }
+        }
+    }
+    return cellJunctionCapacity;
+}
+
+inline uint findCellJunction(
+    device const CellJunctionState* junctionStates,
+    uint pairKey,
+    uint fingerprint
+) {
+    uint start = hash32(pairKey) & cellJunctionMask;
+    for (uint probe = 0u; probe < 12u; ++probe) {
+        uint slot = (start + probe) & cellJunctionMask;
+        uint observedKey = atomic_load_explicit(
+            &junctionStates[slot].pairKey, memory_order_relaxed
+        );
+        if (observedKey == pairKey &&
+            junctionStates[slot].persistentFingerprint == fingerprint) {
+            return slot;
+        }
+    }
+    return cellJunctionCapacity;
+}
+
+inline void accumulateMembraneContactForce(
+    device atomic_int* membraneContactEffects,
+    uint cellIndex,
+    uint vertexIndex,
+    float2 worldForce,
+    float pressure
+) {
+    uint base = (cellIndex * membraneVertexCount + vertexIndex) * 3u;
+    int forceX = int(clamp(
+        worldForce.x * float(cellContactForceScale), -1048576.0, 1048576.0
+    ));
+    int forceY = int(clamp(
+        worldForce.y * float(cellContactForceScale), -1048576.0, 1048576.0
+    ));
+    int fixedPressure = int(clamp(
+        pressure * float(cellContactScalarScale), 0.0, 1048576.0
+    ));
+    atomic_fetch_add_explicit(
+        &membraneContactEffects[base], forceX, memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &membraneContactEffects[base + 1u], forceY, memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &membraneContactEffects[base + 2u], fixedPressure, memory_order_relaxed
+    );
+}
+
+inline void accumulateEmbodiedMemory(
+    device atomic_int* contactEffects,
+    uint cellIndex,
+    float4 episode,
+    float transmission
+) {
+    float weight = clamp(episode.w * transmission, 0.0, 0.24);
+    if (weight <= 0.0001) { return; }
+    uint base = cellIndex * cellContactEffectChannelCount + 6u;
+    atomic_fetch_add_explicit(
+        &contactEffects[base],
+        int(clamp(episode.x * weight * float(cellContactScalarScale),
+            -1048576.0, 1048576.0)), memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &contactEffects[base + 1u],
+        int(clamp(episode.y * weight * float(cellContactScalarScale),
+            -1048576.0, 1048576.0)), memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &contactEffects[base + 2u],
+        int(clamp(episode.z * weight * float(cellContactScalarScale),
+            -1048576.0, 1048576.0)), memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &contactEffects[base + 3u],
+        int(weight * float(cellContactScalarScale)), memory_order_relaxed
+    );
+}
+
+kernel void resolveMembraneContacts(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device atomic_uint* cellOccupancy [[buffer(3)]],
+    device const MembraneVertex* membraneVertices [[buffer(4)]],
+    device const uint2* contactPairs [[buffer(5)]],
+    device atomic_uint* contactWorkState [[buffer(6)]],
+    device atomic_int* contactEffects [[buffer(7)]],
+    constant SimulationUniforms& uniforms [[buffer(8)]],
+    device CellIdentity* cellIdentities [[buffer(9)]],
+    device const ProgramLineageRecord* programLineageRecords [[buffer(10)]],
+    device CellJunctionState* junctionStates [[buffer(11)]],
+    device atomic_int* membraneContactEffects [[buffer(12)]],
+    device const ProgramSlotState* programSlots [[buffer(13)]],
+    device atomic_int* energyAudit [[buffer(14)]],
+    device atomic_uint* identityCounters [[buffer(15)]],
+    device atomic_uint* topologySignatures [[buffer(16)]],
+    device const ProgramExpressionCache* programExpressionCaches [[buffer(17)]],
+    device const CellMemoryState* cellMemories [[buffer(18)]],
+    device CellCorpseState* cellCorpses [[buffer(19)]],
+    device uint* registeredJunctionIndices [[buffer(20)]],
+    uint pairIndex [[thread_position_in_grid]]
+) {
+    if (pairIndex >= atomic_load_explicit(&contactWorkState[0], memory_order_relaxed)) { return; }
+    uint2 pair = contactPairs[pairIndex];
+    uint gid = pair.x;
+    uint otherIndex = pair.y;
+    if (gid >= maxCellCount || otherIndex >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+            cellOccupancyAlive) { return; }
+    uint otherOccupancy = atomic_load_explicit(
+        &cellOccupancy[otherIndex], memory_order_relaxed
+    );
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) {
+        return;
+    }
+    if (otherOccupancy == cellOccupancyCorpse) {
+        float2 livePosition = cellWorldPosition(
+            agents[owner], cells[gid].position, uniforms
+        );
+        float scale = max(cellWorldScale(uniforms), 0.0000001);
+        float separation = length(
+            cellCorpses[otherIndex].worldPosition - livePosition
+        ) / scale;
+        if (separation > 0.72) { return; }
+        CellState scavenger = cells[gid];
+        float scavenging = saturate(
+            agents[owner].transportExpression.z * 0.52 + scavenger.regulationB.x * 0.20 +
+            scavenger.regulationB.w * 0.14 + scavenger.tissueGeometry.z * 0.08 +
+            scavenger.constructionFlux.z * 0.18 + scavenger.functionalActivity.z * 0.10
+        );
+        uint requested = uint(clamp(
+            (0.0035 + scavenging * 0.012) * float(corpseStructureScale),
+            1.0, float(corpseStructureScale)
+        ));
+        uint claimed = claimCorpseStructure(
+            &cellCorpses[otherIndex].structure, requested
+        );
+        if (claimed > 0u) {
+            CellMemoryState corpseMemory;
+            for (uint memoryIndex = 0u; memoryIndex < embodiedMemoryCount;
+                 ++memoryIndex) {
+                corpseMemory.episodes[memoryIndex] =
+                    cellCorpses[otherIndex].episodes[memoryIndex];
+            }
+            float4 episode;
+            strongestEmbodiedMemory(corpseMemory, episode);
+            float materialFraction = float(claimed) / float(corpseStructureScale);
+            accumulateEmbodiedMemory(
+                contactEffects, gid, episode,
+                scavenging * (0.24 + materialFraction * 9.0)
+            );
+            // The corpse's energetic fraction is already in local recycledMatter;
+            // structure consumption only improves access and reenactment.
+            if (atomic_load_explicit(
+                &cellCorpses[otherIndex].structure, memory_order_relaxed
+            ) == 0u) {
+                uint expectedCorpse = cellOccupancyCorpse;
+                atomic_compare_exchange_weak_explicit(
+                    &cellOccupancy[otherIndex], &expectedCorpse,
+                    cellOccupancyFree, memory_order_relaxed, memory_order_relaxed
+                );
+            }
+        }
+        return;
+    }
+    if (otherOccupancy != cellOccupancyAlive) { return; }
+    uint otherOwner = cellIdentities[otherIndex].owner;
+    if (otherOwner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[otherOwner], memory_order_relaxed) == 0u) { return; }
+
+    uint programIndex = cellIdentities[gid].programIndex;
+    uint otherProgramIndex = cellIdentities[otherIndex].programIndex;
+    if (!programSlotMatches(
+        programSlots, programIndex, cellIdentities[gid].programGeneration
+    ) || !programSlotMatches(
+        programSlots, otherProgramIndex, cellIdentities[otherIndex].programGeneration
+    )) { return; }
+    AgentState agent = agentWithCellProgram(
+        agents[owner], programIndex, programLineageRecords
+    );
+    AgentState otherAgent = agentWithCellProgram(
+        agents[otherOwner], otherProgramIndex, programLineageRecords
+    );
+    CellState cell = cells[gid];
+    CellState other = cells[otherIndex];
+    ProgramExpressionCache cellDevelopment = programExpressionCaches[programIndex];
+    ProgramExpressionCache otherDevelopment = programExpressionCaches[otherProgramIndex];
+    float4 inheritedJunctionMaterial = sqrt(max(
+        cellDevelopment.junctionMaterial * otherDevelopment.junctionMaterial,
+        float4(0.0001)
+    ));
+    float scale = cellWorldScale(uniforms);
+    float2 worldPosition = cellWorldPosition(agent, cell.position, uniforms);
+                        float2 otherWorldPosition = cellWorldPosition(
+                            otherAgent, other.position, uniforms
+                        );
+                        float2 delta = otherWorldPosition - worldPosition;
+                        float distance = max(length(delta), 0.0000001);
+                        float2 normalWorld = delta / distance;
+                        float2 localDirection = rotateWorldToTissue(normalWorld, agent);
+                        float2 otherLocalDirection = rotateWorldToTissue(-normalWorld, otherAgent);
+                        MembraneSupportSample supportA = membraneSupportSample(
+                            membraneVertices, gid, localDirection
+                        );
+                        MembraneSupportSample supportB = membraneSupportSample(
+                            membraneVertices, otherIndex, otherLocalDirection
+                        );
+                        float2 supportWorldA = worldPosition +
+                            rotateTissueToWorld(supportA.point, agent) * scale;
+                        float2 supportWorldB = otherWorldPosition +
+                            rotateTissueToWorld(supportB.point, otherAgent) * scale;
+                        float supportGap = dot(supportWorldB - supportWorldA, normalWorld);
+                        float localGap = supportGap / max(scale, 0.0000001);
+                        bool sameOwner = otherOwner == owner;
+                        float interactionRange = sameOwner ? 0.090 : 0.012;
+                        float topologyIntegrity = min(
+                            min(cell.physiology.w, other.physiology.w),
+                            min(supportA.integrity, supportB.integrity)
+                        );
+                        float topologyAdhesion = min(cell.phenotype.x, other.phenotype.x) *
+                            clamp(inheritedJunctionMaterial.x, 0.10, 1.50);
+                        uint topologyPairKey = cellPairKey(gid, otherIndex);
+                        uint topologyFingerprint = cellPairFingerprint(
+                            cellIdentities, gid, otherIndex
+                        );
+                        uint topologyJunction = sameOwner
+                            ? findCellJunction(
+                                junctionStates, topologyPairKey, topologyFingerprint
+                            )
+                            : cellJunctionCapacity;
+                        bool persistentTopologyJunction = false;
+                        if (topologyJunction < cellJunctionCapacity) {
+                            uint lastSeen = atomic_load_explicit(
+                                &junctionStates[topologyJunction].lastSeenStep,
+                                memory_order_relaxed
+                            );
+                            persistentTopologyJunction =
+                                uniforms.step >= lastSeen &&
+                                uniforms.step - lastSeen <= 180u &&
+                                junctionStates[topologyJunction].strength > 0.015;
+                        }
+                        float topologyMakeGap =
+                            0.050 * topologyAdhesion * topologyIntegrity;
+                        float topologyBreakGap =
+                            topologyMakeGap + 0.045 +
+                            (persistentTopologyJunction ? 0.020 : 0.0);
+                        bool topologyConnected = sameOwner &&
+                            topologyIntegrity > 0.08 &&
+                            (localGap <= topologyMakeGap ||
+                                (persistentTopologyJunction &&
+                                    localGap <= topologyBreakGap));
+                        if (topologyConnected) {
+                            uint topologyBase = gid * 4u;
+                            uint otherTopologyBase = otherIndex * 4u;
+                            atomic_fetch_add_explicit(
+                                &topologySignatures[topologyBase], 1u, memory_order_relaxed
+                            );
+                            atomic_fetch_xor_explicit(
+                                &topologySignatures[topologyBase + 1u],
+                                hash32(cellIdentities[otherIndex].persistentID ^ 0xa511e9b3u),
+                                memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &topologySignatures[otherTopologyBase], 1u, memory_order_relaxed
+                            );
+                            atomic_fetch_xor_explicit(
+                                &topologySignatures[otherTopologyBase + 1u],
+                                hash32(cellIdentities[gid].persistentID ^ 0xa511e9b3u),
+                                memory_order_relaxed
+                            );
+                        }
+                        bool newSameOwnerConnection = topologyConnected &&
+                            cellIdentities[gid].componentRoot !=
+                                cellIdentities[otherIndex].componentRoot;
+                        bool fusionCandidate = !sameOwner && localGap < 0.008 &&
+                            min(agent.junctionChemistry.x, otherAgent.junctionChemistry.x) > 0.20 &&
+                            receptorChemistryCompatibility(agent, otherAgent) > 0.35 &&
+                            max(agent.transportExpression.w, otherAgent.transportExpression.w) < 0.40;
+                        if (newSameOwnerConnection || fusionCandidate) {
+                            atomic_store_explicit(
+                                &contactWorkState[2], 1u, memory_order_relaxed
+                            );
+                        }
+                        if (localGap < interactionRange) {
+                            float transmissionCompatibility = sameOwner ? 1.0 :
+                                receptorChemistryCompatibility(agent, otherAgent);
+                            float4 episodeA;
+                            float4 episodeB;
+                            strongestEmbodiedMemory(cellMemories[gid], episodeA);
+                            strongestEmbodiedMemory(cellMemories[otherIndex], episodeB);
+                            float transmission = (sameOwner ? 0.085 : 0.035) *
+                                (0.30 + transmissionCompatibility * 0.70) *
+                                saturate(1.0 - localGap / max(interactionRange, 0.0001));
+                            float culturalExpression = sqrt(max(
+                                programExpressionCaches[programIndex].plasticityControl.w *
+                                programExpressionCaches[otherProgramIndex].plasticityControl.w,
+                                0.0
+                            ));
+                            culturalExpression *= sqrt(max(
+                                cells[gid].functionalActivity.z * cells[otherIndex].functionalActivity.z,
+                                0.0
+                            ));
+                            transmission *= 0.18 + saturate(culturalExpression) * 0.82;
+                            accumulateEmbodiedMemory(
+                                contactEffects, gid, episodeB, transmission
+                            );
+                            accumulateEmbodiedMemory(
+                                contactEffects, otherIndex, episodeA, transmission
+                            );
+                            if (!sameOwner) {
+                                atomic_fetch_add_explicit(
+                                    &identityCounters[5], 1u, memory_order_relaxed
+                                );
+                            }
+                            float localOverlap = max(-localGap, 0.0);
+                            float supportSpan = max(
+                                length(supportA.point) + length(supportB.point), 0.0001
+                            );
+                            float overlapFraction = saturate(localOverlap / supportSpan);
+                            float contactStrength = smoothstep(0.0, 0.20, overlapFraction);
+                            float pairDifference = saturate(
+                                length(agent.transportExpression - otherAgent.transportExpression) * 0.66 +
+                                length(agent.metabolicExpression - otherAgent.metabolicExpression) * 0.18
+                            );
+                            float reproductiveContributionA = 0.0;
+                            float reproductiveContributionB = 0.0;
+                            float reproductivePleasureA = 0.0;
+                            float reproductivePleasureB = 0.0;
+                            if (!sameOwner && programIndex != otherProgramIndex &&
+                                cellIdentities[gid].identityPadding2 == 0u &&
+                                cellIdentities[otherIndex].identityPadding2 == 0u) {
+                                float compatibility = receptorChemistryCompatibility(
+                                    agent, otherAgent
+                                );
+                                float reproductiveInvestment = min(
+                                    agent.junctionChemistry.w, otherAgent.junctionChemistry.w
+                                );
+                                float fusionInvestment = min(
+                                    agent.junctionChemistry.x, otherAgent.junctionChemistry.x
+                                );
+                                float nonAggression = 1.0 - saturate(
+                                    max(agent.transportExpression.w, otherAgent.transportExpression.w) * 1.8
+                                );
+                                float boundaryAccess = sqrt(max(
+                                    cell.tissueGeometry.z * other.tissueGeometry.z,
+                                    0.0
+                                ));
+                                float competenceA = smoothstep(
+                                    0.18, 0.34, cell.physiology.x
+                                ) * smoothstep(0.40, 0.68, cell.physiology.y) *
+                                    smoothstep(0.32, 0.76, cell.physiology.w) *
+                                    (1.0 - smoothstep(0.48, 0.72, cell.signals.z));
+                                float competenceB = smoothstep(
+                                    0.18, 0.34, other.physiology.x
+                                ) * smoothstep(0.40, 0.68, other.physiology.y) *
+                                    smoothstep(0.32, 0.76, other.physiology.w) *
+                                    (1.0 - smoothstep(0.48, 0.72, other.signals.z));
+                                float endocrineDriveA = reproductiveEndocrineDrive(
+                                    cell, cellDevelopment, agent
+                                );
+                                float endocrineDriveB = reproductiveEndocrineDrive(
+                                    other, otherDevelopment, otherAgent
+                                );
+                                float reciprocalEndocrineDrive = sqrt(max(
+                                    endocrineDriveA * endocrineDriveB, 0.0
+                                ));
+                                bool divisionReadyA = cell.physiology.z >= 1.0 &&
+                                    cell.physiology.x >= 0.22 &&
+                                    cell.physiology.y >= 0.46 && cell.signals.z <= 0.68;
+                                bool divisionReadyB = other.physiology.z >= 1.0 &&
+                                    other.physiology.x >= 0.22 &&
+                                    other.physiology.y >= 0.46 && other.signals.z <= 0.68;
+                                float gestationReadinessA = competenceA *
+                                    (0.48 + cell.tissueGeometry.z * 0.52);
+                                float gestationReadinessB = competenceB *
+                                    (0.48 + other.tissueGeometry.z * 0.52);
+                                bool gestateA = divisionReadyA && (!divisionReadyB ||
+                                    gestationReadinessA > gestationReadinessB ||
+                                    (gestationReadinessA == gestationReadinessB &&
+                                        cellIdentities[gid].persistentID <
+                                            cellIdentities[otherIndex].persistentID));
+                                bool gestateB = divisionReadyB && !gestateA;
+                                float gestatorCompetence = gestateA
+                                    ? competenceA : competenceB;
+                                float donorCompetence = gestateA
+                                    ? competenceB : competenceA;
+                                float strategyGate = smoothstep(
+                                    fusionInvestment * 0.62,
+                                    fusionInvestment * 0.62 + 0.18,
+                                    reproductiveInvestment
+                                );
+                                strategyGate = max(
+                                    strategyGate,
+                                    smoothstep(0.62, 1.0, max(
+                                        cell.physiology.z, other.physiology.z
+                                    )) * 0.72
+                                );
+                                float differenceGate = smoothstep(
+                                    0.018, 0.20, pairDifference
+                                );
+                                // Positive valence is the continuously rising
+                                // completion signal itself. It grows as compatible,
+                                // reproductively ready membranes close the remaining
+                                // physical gap and one cell approaches division.
+                                float spatialProgress = 1.0 - smoothstep(
+                                    -0.006, interactionRange, localGap
+                                );
+                                float divisionProgress = max(
+                                    smoothstep(0.24, 1.0, cell.physiology.z),
+                                    smoothstep(0.24, 1.0, other.physiology.z)
+                                );
+                                float pairPermission =
+                                    smoothstep(0.22, 0.62, compatibility) *
+                                    smoothstep(0.12, 0.46, reproductiveInvestment) *
+                                    smoothstep(0.18, 0.72, nonAggression) *
+                                    strategyGate * differenceGate;
+                                float pairReadiness = sqrt(max(
+                                    competenceA * competenceB, 0.0
+                                ));
+                                float completionProgress = saturate(
+                                    reciprocalEndocrineDrive * 0.28 +
+                                    pairReadiness * 0.20 +
+                                    divisionProgress * 0.24 +
+                                    spatialProgress * 0.28
+                                );
+                                float sharedPleasure = saturate(
+                                    pairPermission * boundaryAccess *
+                                    completionProgress
+                                );
+                                reproductivePleasureA = sharedPleasure *
+                                    (0.42 + endocrineDriveA * 0.58);
+                                reproductivePleasureB = sharedPleasure *
+                                    (0.42 + endocrineDriveB * 0.58);
+                                float combinedSuitability = compatibility *
+                                    reproductiveInvestment * nonAggression *
+                                    boundaryAccess * gestatorCompetence * donorCompetence *
+                                    strategyGate * differenceGate *
+                                    reciprocalEndocrineDrive;
+                                float sexualScore = (gestateA || gestateB) &&
+                                    compatibility > 0.35 &&
+                                    reproductiveInvestment > 0.20 &&
+                                    nonAggression > 0.35 && boundaryAccess > 0.08 &&
+                                    strategyGate > 0.05 && pairDifference > 0.02 &&
+                                    reciprocalEndocrineDrive > 0.06
+                                    ? pow(max(combinedSuitability, 0.000000000001), 0.11111111)
+                                    : 0.0;
+                                bool conceived = sexualScore > 0.0;
+                                if (conceived) {
+                                    reproductivePleasureA = 1.0;
+                                    reproductivePleasureB = 1.0;
+                                    uint gestatorIndex = gestateA ? gid : otherIndex;
+                                    uint donorIndex = gestateA ? otherIndex : gid;
+                                    nominateSexualPartner(
+                                        cellIdentities, gestatorIndex, donorIndex,
+                                        sexualScore
+                                    );
+
+                                    CellState gestator = gestateA ? cell : other;
+                                    CellState donor = gestateA ? other : cell;
+                                    float donorCapacity = min(
+                                        max(donor.physiology.x - 0.08, 0.0) / 0.64,
+                                        max(donor.physiology.y - 0.18, 0.0) / 0.40
+                                    );
+                                    float gestatorCapacity = min(
+                                        max(1.16 - gestator.physiology.x, 0.0) / 0.64,
+                                        max(1.08 - gestator.physiology.y, 0.0) / 0.40
+                                    );
+                                    float contributedMaterial = min(
+                                        0.018 + sexualScore * 0.034,
+                                        min(donorCapacity, gestatorCapacity) * 0.38
+                                    );
+                                    if (gestateA) {
+                                        reproductiveContributionA += contributedMaterial;
+                                        reproductiveContributionB -= contributedMaterial;
+                                    } else {
+                                        reproductiveContributionA -= contributedMaterial;
+                                        reproductiveContributionB += contributedMaterial;
+                                    }
+                                }
+                            }
+                            float2 boundaryA = length(cell.tissueGeometry.xy) > 0.0001
+                                ? normalize(cell.tissueGeometry.xy) : localDirection;
+                            float2 boundaryB = length(other.tissueGeometry.xy) > 0.0001
+                                ? normalize(other.tissueGeometry.xy) : otherLocalDirection;
+                            float attackConstructionA = cell.tissueGeometry.z *
+                                saturate(cell.membraneProperties.x) *
+                                pow(saturate(dot(localDirection, boundaryA)), 6.0);
+                            float attackConstructionB = other.tissueGeometry.z *
+                                saturate(other.membraneProperties.x) *
+                                pow(saturate(dot(otherLocalDirection, boundaryB)), 6.0);
+                            float contactToughnessA = cell.tissueGeometry.z *
+                                saturate(cell.membraneProperties.y) *
+                                pow(saturate(dot(localDirection, boundaryA)), 2.0);
+                            float contactToughnessB = other.tissueGeometry.z *
+                                saturate(other.membraneProperties.y) *
+                                pow(saturate(dot(otherLocalDirection, boundaryB)), 2.0);
+                            float collectiveDefenseA = saturate(
+                                cell.boundaryDynamics.x *
+                                (0.38 + cell.boundaryDynamics.y * 0.62) *
+                                pow(saturate(dot(localDirection, boundaryA)), 2.0)
+                            );
+                            float collectiveDefenseB = saturate(
+                                other.boundaryDynamics.x *
+                                (0.38 + other.boundaryDynamics.y * 0.62) *
+                                pow(saturate(dot(otherLocalDirection, boundaryB)), 2.0)
+                            );
+                            float attackA = sameOwner ? 0.0 :
+                                attackConstructionA * (0.20 + pairDifference * 0.80);
+                            float attackB = sameOwner ? 0.0 :
+                                attackConstructionB * (0.20 + pairDifference * 0.80);
+                            float defenseA = saturate(
+                                supportA.integrity * (0.50 + cell.phenotype.x * 0.24 +
+                                    contactToughnessA * 0.62 +
+                                    collectiveDefenseA * 0.88)
+                            );
+                            float defenseB = saturate(
+                                supportB.integrity * (0.50 + other.phenotype.x * 0.24 +
+                                    contactToughnessB * 0.62 +
+                                    collectiveDefenseB * 0.88)
+                            );
+                            float damageToA = contactStrength * attackB * (1.12 - defenseA) * 0.010;
+                            float damageToB = contactStrength * attackA * (1.12 - defenseB) * 0.010;
+                            // Digestion follows failure at the contacted membrane support.
+                            // Whole-cell integrity limits stores but is not a prerequisite
+                            // for beginning a local breach.
+                            float localFailureA = 1.0 - smoothstep(
+                                0.42, 0.90, supportA.integrity
+                            );
+                            float localFailureB = 1.0 - smoothstep(
+                                0.42, 0.90, supportB.integrity
+                            );
+                            float freshDamageA = smoothstep(0.0000001, 0.000004, damageToA);
+                            float freshDamageB = smoothstep(0.0000001, 0.000004, damageToB);
+                            float breachA = saturate(
+                                localFailureA * 0.78 + freshDamageA * 0.42
+                            ) * cell.tissueGeometry.z *
+                                (1.0 - collectiveDefenseA * 0.84);
+                            float breachB = saturate(
+                                localFailureB * 0.78 + freshDamageB * 0.42
+                            ) * other.tissueGeometry.z *
+                                (1.0 - collectiveDefenseB * 0.84);
+                            float availableFromA = min(
+                                cell.physiology.x * 0.012 / 0.82,
+                                max(cell.physiology.y - 0.16, 0.0) * 0.004 / 0.30
+                            );
+                            float availableFromB = min(
+                                other.physiology.x * 0.012 / 0.82,
+                                max(other.physiology.y - 0.16, 0.0) * 0.004 / 0.30
+                            );
+                            float transferFromA = min(
+                                contactStrength * attackB * breachA * 0.012,
+                                availableFromA
+                            );
+                            float transferFromB = min(
+                                contactStrength * attackA * breachB * 0.012,
+                                availableFromB
+                            );
+                            if (!sameOwner && attackA + attackB > 0.000001) {
+                                bool breached = (attackB > 0.0 && breachA > 0.05) ||
+                                    (attackA > 0.0 && breachB > 0.05);
+                                atomic_fetch_add_explicit(
+                                    &identityCounters[breached ? 6 : 7],
+                                    1u, memory_order_relaxed
+                                );
+                                float transferred = transferFromA + transferFromB;
+                                if (transferred > 0.0000001) {
+                                    atomic_fetch_add_explicit(
+                                        &identityCounters[8], 1u, memory_order_relaxed
+                                    );
+                                    atomic_fetch_add_explicit(
+                                        &identityCounters[9],
+                                        uint(min(transferred * 1048576.0, 4294967295.0)),
+                                        memory_order_relaxed
+                                    );
+                                }
+                                float deflected = contactStrength *
+                                    (attackB * defenseA + attackA * defenseB);
+                                atomic_fetch_add_explicit(
+                                    &identityCounters[10],
+                                    uint(min(deflected * 1048576.0, 4294967295.0)),
+                                    memory_order_relaxed
+                                );
+                            }
+                            float trophicA = transferFromB * 0.68 - transferFromA;
+                            float trophicB = transferFromA * 0.68 - transferFromB;
+                            float trophicLossHeat = max(
+                                -(trophicA + trophicB) * (0.82 + 0.30 * 0.18), 0.0
+                            );
+                            addEnergyAudit(energyAudit, 6u, trophicLossHeat);
+                            addEnergyAudit(energyAudit, 9u, -trophicLossHeat);
+                            float impulseMagnitude = localOverlap *
+                                (0.006 + min(defenseA, defenseB) * 0.010);
+                            if (!sameOwner) {
+                                // The valence gradient is causal: increasing
+                                // reproductive completion produces a bounded
+                                // reciprocal attraction that closes the gap.
+                                impulseMagnitude -= min(
+                                    reproductivePleasureA, reproductivePleasureB
+                                ) * (0.00012 + contactStrength * 0.00012);
+                            }
+
+                            if (sameOwner) {
+                                float2 polarityA = length(cell.development.xy) > 0.0001
+                                    ? normalize(cell.development.xy) : localDirection;
+                                float2 polarityB = length(other.development.xy) > 0.0001
+                                    ? normalize(other.development.xy) : otherLocalDirection;
+                                float polarityAlignment = clamp(
+                                    0.5 * (dot(polarityA, localDirection) +
+                                        dot(polarityB, otherLocalDirection)),
+                                    -1.0, 1.0
+                                );
+                                float sexualNurtureA = sexualBudNurture(
+                                    cellIdentities[gid], uniforms.step,
+                                    cellDevelopment.mechanochemistryB.w
+                                );
+                                float sexualNurtureB = sexualBudNurture(
+                                    cellIdentities[otherIndex], uniforms.step,
+                                    otherDevelopment.mechanochemistryB.w
+                                );
+                                float sexualReleaseA = sexualBudRelease(
+                                    cellIdentities[gid], uniforms.step,
+                                    cellDevelopment.mechanochemistryB.w,
+                                    cell.physiology.x, cell.physiology.w
+                                );
+                                float sexualReleaseB = sexualBudRelease(
+                                    cellIdentities[otherIndex], uniforms.step,
+                                    otherDevelopment.mechanochemistryB.w,
+                                    other.physiology.x, other.physiology.w
+                                );
+                                float localNurture = max(
+                                    sexualNurtureA, sexualNurtureB
+                                );
+                                float sexualPhysiologicalRelease = max(
+                                    sexualReleaseA, sexualReleaseB
+                                );
+                                float localRelease = saturate(max(max(
+                                    cell.tissueGeometry.w + cell.signals.w * 0.42,
+                                    other.tissueGeometry.w + other.signals.w * 0.42
+                                ), sexualPhysiologicalRelease));
+                                bool sexualNursery =
+                                    cellIdentities[gid].identityPadding2 != 0u ||
+                                    cellIdentities[otherIndex].identityPadding2 != 0u;
+                                if (sexualNursery) {
+                                    localNurture = max(
+                                        localNurture, 1.0 - sexualPhysiologicalRelease
+                                    );
+                                    localRelease = sexualPhysiologicalRelease;
+                                }
+                                float metabolicInvestment = sqrt(max(
+                                    cell.physiology.x * other.physiology.x, 0.0
+                                ));
+                                float collectiveCohesion = max(
+                                    cell.boundaryDynamics.x * cell.boundaryDynamics.y,
+                                    other.boundaryDynamics.x * other.boundaryDynamics.y
+                                );
+                                float pairAdhesion = min(cell.phenotype.x, other.phenotype.x) *
+                                    sqrt(max(cell.physiology.w * other.physiology.w, 0.0)) *
+                                    inheritedJunctionMaterial.x *
+                                    (1.0 - localRelease * 0.94) *
+                                    (1.0 + localNurture * 0.32) *
+                                    (1.0 + collectiveCohesion * 1.18);
+                                float pairDamping = inheritedJunctionMaterial.z *
+                                    (0.28 + topologyIntegrity * 0.72) *
+                                    (1.0 + collectiveCohesion * 0.46);
+                                float pairPermeability = inheritedJunctionMaterial.w *
+                                    (0.22 + min(cell.regulationB.x, other.regulationB.x) * 0.78) *
+                                    topologyIntegrity * (1.0 + localNurture * 0.72);
+                                float pairCorticalTension = inheritedJunctionMaterial.y *
+                                    (0.24 + 0.38 * (cell.regulation.z + other.regulation.z)) *
+                                    (1.0 - localRelease * 0.58) *
+                                    (1.0 + collectiveCohesion * 1.32);
+                                float4 targetMaterial = clamp(float4(
+                                    pairAdhesion * (0.42 + metabolicInvestment * 0.76),
+                                    pairDamping,
+                                    pairPermeability,
+                                    pairCorticalTension
+                                ), float4(0.015), float4(1.80));
+                                uint pairKey = topologyPairKey;
+                                uint fingerprint = topologyFingerprint;
+                                uint junction = topologyJunction;
+                                if (junction == cellJunctionCapacity && localGap < 0.038 &&
+                                    pairAdhesion > 0.16) {
+                                    junction = findOrCreateCellJunction(
+                                        junctionStates, registeredJunctionIndices,
+                                        contactWorkState, pairKey, fingerprint, uniforms.step,
+                                        distance / max(scale, 0.0000001), pairAdhesion
+                                    );
+                                } else if (junction < cellJunctionCapacity) {
+                                    atomic_store_explicit(
+                                        &junctionStates[junction].lastSeenStep,
+                                        uniforms.step, memory_order_relaxed
+                                    );
+                                    junctionStates[junction].age = min(
+                                        junctionStates[junction].age + 1.0, 65535.0
+                                    );
+                                    junctionStates[junction].strength = mix(
+                                        junctionStates[junction].strength,
+                                        pairAdhesion, 0.08
+                                    );
+                                }
+                                if (junction < cellJunctionCapacity) {
+                                    float localCenterDistance = distance / max(scale, 0.0000001);
+                                    float investmentRate = 0.018 + metabolicInvestment * 0.065;
+                                    float4 updatedMaterial = mix(
+                                        junctionStates[junction].material,
+                                        targetMaterial, investmentRate
+                                    );
+                                    float remodelingTarget = localCenterDistance * (
+                                        1.0 - updatedMaterial.w *
+                                            (0.006 + max(polarityAlignment, 0.0) * 0.010)
+                                    );
+                                    float4 updatedRemodeling = junctionStates[junction].remodeling;
+                                    updatedRemodeling.x = mix(
+                                        max(updatedRemodeling.x, 0.001),
+                                        remodelingTarget,
+                                        0.004 + metabolicInvestment * 0.018
+                                    );
+                                    float materialStrain = localCenterDistance -
+                                        updatedRemodeling.x;
+                                    updatedRemodeling.y = mix(
+                                        updatedRemodeling.y, materialStrain, 0.045
+                                    );
+                                    updatedRemodeling.z = mix(
+                                        updatedRemodeling.z,
+                                        saturate(metabolicInvestment * pairAdhesion),
+                                        0.025
+                                    );
+                                    updatedRemodeling.w = mix(
+                                        updatedRemodeling.w, polarityAlignment, 0.040
+                                    );
+                                    float updatedStrength = mix(
+                                        junctionStates[junction].strength, pairAdhesion,
+                                        0.025 + metabolicInvestment * 0.055
+                                    );
+                                    float stretch = localCenterDistance -
+                                        updatedRemodeling.x;
+                                    float2 velocityA = rotateTissueToWorld(cell.velocity, agent);
+                                    float2 velocityB = rotateTissueToWorld(other.velocity, otherAgent);
+                                    float relativeNormalVelocity = dot(
+                                        velocityB - velocityA, normalWorld
+                                    );
+                                    float junctionMagnitude = -stretch *
+                                        updatedStrength * updatedMaterial.x * 0.0080 -
+                                        relativeNormalVelocity *
+                                            (0.018 + updatedMaterial.y * 0.070) -
+                                        updatedMaterial.w *
+                                            max(updatedRemodeling.w, 0.0) * 0.000035;
+                                    junctionMagnitude = clamp(junctionMagnitude, -0.0028, 0.0028);
+                                    impulseMagnitude += junctionMagnitude;
+                                    junctionStates[junction].material = updatedMaterial;
+                                    junctionStates[junction].remodeling = updatedRemodeling;
+                                    junctionStates[junction].restDistance = updatedRemodeling.x;
+                                    junctionStates[junction].strength = updatedStrength;
+                                    junctionStates[junction].load = abs(junctionMagnitude);
+                                } else if (localGap > 0.0) {
+                                    impulseMagnitude -= pairAdhesion *
+                                        (1.0 - saturate(localGap / interactionRange)) * 0.00022;
+                                }
+                            }
+                            float2 impulse = normalWorld * impulseMagnitude;
+                            int impulseX = int(clamp(
+                                impulse.x * float(cellContactForceScale), -1048576.0, 1048576.0
+                            ));
+                            int impulseY = int(clamp(
+                                impulse.y * float(cellContactForceScale), -1048576.0, 1048576.0
+                            ));
+                            atomic_fetch_add_explicit(
+                                &contactEffects[gid * cellContactEffectChannelCount],
+                                -impulseX, memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[gid * cellContactEffectChannelCount + 1u],
+                                -impulseY, memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[gid * cellContactEffectChannelCount + 2u],
+                                int(damageToA * float(cellContactScalarScale)), memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[gid * cellContactEffectChannelCount + 3u],
+                                int(trophicA * float(cellContactScalarScale)), memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[gid * cellContactEffectChannelCount + 4u],
+                                int(reproductiveContributionA * float(cellContactScalarScale)),
+                                memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[gid * cellContactEffectChannelCount + 5u],
+                                int(reproductivePleasureA * float(cellContactScalarScale)),
+                                memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount],
+                                impulseX, memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 1u],
+                                impulseY, memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 2u],
+                                int(damageToB * float(cellContactScalarScale)), memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 3u],
+                                int(trophicB * float(cellContactScalarScale)), memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 4u],
+                                int(reproductiveContributionB * float(cellContactScalarScale)),
+                                memory_order_relaxed
+                            );
+                            atomic_fetch_add_explicit(
+                                &contactEffects[otherIndex * cellContactEffectChannelCount + 5u],
+                                int(reproductivePleasureB * float(cellContactScalarScale)),
+                                memory_order_relaxed
+                            );
+                            float pressure = localOverlap *
+                                (0.10 + min(defenseA, defenseB) * 0.18) +
+                                abs(impulseMagnitude) * 2.0;
+                            accumulateMembraneContactForce(
+                                membraneContactEffects, gid, supportA.vertexIndex,
+                                -impulse, pressure
+                            );
+                            accumulateMembraneContactForce(
+                                membraneContactEffects, otherIndex, supportB.vertexIndex,
+                                impulse, pressure
+                            );
+                        }
+}
+
+kernel void detectCellTopologyChanges(
+    device atomic_uint* topologySignatures [[buffer(0)]],
+    device atomic_uint* contactWorkState [[buffer(1)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint cellIndex = activeCellIndices[compactIndex];
+    if (cellIndex >= maxCellCount) { return; }
+    uint base = cellIndex * 4u;
+    uint currentCount = atomic_load_explicit(
+        &topologySignatures[base], memory_order_relaxed
+    );
+    uint currentHash = atomic_load_explicit(
+        &topologySignatures[base + 1u], memory_order_relaxed
+    );
+    uint previousCount = atomic_load_explicit(
+        &topologySignatures[base + 2u], memory_order_relaxed
+    );
+    // Component identity depends on reachability, not every remodeling edge.
+    // New bridges are detected during contact resolution. A cell losing every
+    // supporting edge is an immediate cut; nonlocal graph cuts are caught by
+    // the exact periodic reconciliation.
+    if (previousCount > 0u && currentCount == 0u) {
+        atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
+    }
+    atomic_store_explicit(
+        &topologySignatures[base + 2u], currentCount, memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &topologySignatures[base + 3u], currentHash, memory_order_relaxed
+    );
+}
+
+kernel void applyCellContactEffects(
+    device const AgentState* agents [[buffer(0)]],
+    device CellState* cells [[buffer(1)]],
+    device const atomic_uint* cellOccupancy [[buffer(2)]],
+    device MembraneVertex* membraneVertices [[buffer(3)]],
+    device atomic_int* contactEffects [[buffer(4)]],
+    device const CellIdentity* cellIdentities [[buffer(5)]],
+    device atomic_int* membraneContactEffects [[buffer(6)]],
+    device atomic_int* energyAudit [[buffer(7)]],
+    device CellMemoryState* cellMemories [[buffer(8)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount) { return; }
+    uint contactBase = gid * cellContactEffectChannelCount;
+    int rawX = atomic_exchange_explicit(&contactEffects[contactBase], 0, memory_order_relaxed);
+    int rawY = atomic_exchange_explicit(&contactEffects[contactBase + 1u], 0, memory_order_relaxed);
+    int rawDamage = atomic_exchange_explicit(&contactEffects[contactBase + 2u], 0, memory_order_relaxed);
+    int rawTrophic = atomic_exchange_explicit(&contactEffects[contactBase + 3u], 0, memory_order_relaxed);
+    int rawReproductiveContribution = atomic_exchange_explicit(
+        &contactEffects[contactBase + 4u], 0, memory_order_relaxed
+    );
+    int rawReproductivePleasure = atomic_exchange_explicit(
+        &contactEffects[contactBase + 5u], 0, memory_order_relaxed
+    );
+    int rawMemoryCue = atomic_exchange_explicit(
+        &contactEffects[contactBase + 6u], 0, memory_order_relaxed
+    );
+    int rawMemoryAction = atomic_exchange_explicit(
+        &contactEffects[contactBase + 7u], 0, memory_order_relaxed
+    );
+    int rawMemoryConsequence = atomic_exchange_explicit(
+        &contactEffects[contactBase + 8u], 0, memory_order_relaxed
+    );
+    int rawMemoryWeight = atomic_exchange_explicit(
+        &contactEffects[contactBase + 9u], 0, memory_order_relaxed
+    );
+    if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+        cellOccupancyAlive) { return; }
+
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount) { return; }
+    CellState cell = cells[gid];
+    float2 worldImpulse = float2(rawX, rawY) / float(cellContactForceScale);
+    float2 localImpulse = rotateWorldToTissue(worldImpulse, agents[owner]);
+    float damage = max(float(rawDamage) / float(cellContactScalarScale), 0.0);
+    float trophic = float(rawTrophic) / float(cellContactScalarScale);
+    float reproductiveContribution =
+        float(rawReproductiveContribution) / float(cellContactScalarScale);
+    float reproductivePleasure = saturate(
+        float(rawReproductivePleasure) / float(cellContactScalarScale)
+    );
+    if (rawMemoryWeight > 0) {
+        float inverseWeight = 1.0 / float(rawMemoryWeight);
+        float4 receivedMemory = float4(
+            float(rawMemoryCue) * inverseWeight,
+            float(rawMemoryAction) * inverseWeight,
+            float(rawMemoryConsequence) * inverseWeight,
+            clamp(float(rawMemoryWeight) / float(cellContactScalarScale), 0.0, 0.24)
+        );
+        CellMemoryState memory = cellMemories[gid];
+        receiveEmbodiedEpisode(memory, receivedMemory);
+        cellMemories[gid] = memory;
+    }
+    // The gradient is continuous, but the final reciprocal material exchange
+    // creates a distinct local climax at the participating membrane cells.
+    float conceptionPeak = saturate(abs(reproductiveContribution) * 96.0);
+    float previousATP = cell.physiology.x;
+    float previousBiomass = cell.physiology.y;
+    cell.physiology.z = clamp(
+        cell.physiology.z + reproductivePleasure *
+            (1.0 - saturate(cell.physiology.z)) * 0.0032,
+        0.0, 1.2
+    );
+    cell.velocity += localImpulse;
+    float speed = length(cell.velocity);
+    if (speed > 0.0032) { cell.velocity *= 0.0032 / speed; }
+    cell.physiology.x = clamp(
+        cell.physiology.x + trophic * 0.82 + reproductiveContribution * 0.64,
+        0.0, 1.2
+    );
+    cell.physiology.y = clamp(
+        cell.physiology.y + trophic * 0.30 + reproductiveContribution * 0.40,
+        0.16, 1.12
+    );
+    cell.physiology.w = clamp(cell.physiology.w - damage, 0.0, 1.0);
+    cell.signals.z = saturate(
+        cell.signals.z + damage * 7.5 + max(-trophic, 0.0) * 4.0 -
+            reproductivePleasure * 0.080
+    );
+    float woundSignal = saturate(damage * 12.0);
+    cell.signaling.x = saturate(
+        cell.signaling.x + woundSignal * 0.48 + reproductivePleasure * 0.10
+    );
+    cell.signaling.y = saturate(
+        cell.signaling.y + woundSignal * 0.14 + reproductivePleasure * 0.16
+    );
+    cell.dynamics.x = clamp(
+        cell.dynamics.x + woundSignal * 0.16 + reproductivePleasure * 0.055,
+        -1.8, 1.8
+    );
+    applyLocalReproductiveClimax(cell, conceptionPeak);
+    cell.tissueForce.xy += localImpulse;
+    cell.tissueForce.z = length(localImpulse) + damage;
+    cell.tissueForce.w = trophic;
+
+    float contactStorageDelta = cell.physiology.x - previousATP +
+        (cell.physiology.y - previousBiomass) * 0.18;
+    addEnergyAudit(energyAudit, 2u, contactStorageDelta);
+    addEnergyAudit(energyAudit, 9u, -contactStorageDelta);
+
+    uint membraneBase = gid * membraneVertexCount;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint effectBase = (gid * membraneVertexCount + vertexIndex) * 3u;
+        int vertexRawX = atomic_exchange_explicit(
+            &membraneContactEffects[effectBase], 0, memory_order_relaxed
+        );
+        int vertexRawY = atomic_exchange_explicit(
+            &membraneContactEffects[effectBase + 1u], 0, memory_order_relaxed
+        );
+        int vertexRawPressure = atomic_exchange_explicit(
+            &membraneContactEffects[effectBase + 2u], 0, memory_order_relaxed
+        );
+        MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
+        float2 vertexWorldForce = float2(vertexRawX, vertexRawY) /
+            float(cellContactForceScale);
+        float2 vertexLocalForce = rotateWorldToTissue(vertexWorldForce, agents[owner]);
+        membranePoint.velocity += vertexLocalForce * 0.72;
+        float vertexSpeed = length(membranePoint.velocity);
+        if (vertexSpeed > 0.0075) {
+            membranePoint.velocity *= 0.0075 / vertexSpeed;
+        }
+        membranePoint.mechanics.z = mix(
+            membranePoint.mechanics.z,
+            max(float(vertexRawPressure) / float(cellContactScalarScale), 0.0),
+            0.72
+        );
+        membraneVertices[membraneBase + vertexIndex] = membranePoint;
+    }
+
+    if (damage > 0.0 && length(localImpulse) > 0.000001) {
+        float2 impactDirection = -normalize(localImpulse);
+        for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+            MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
+            float2 radial = length(membranePoint.position) > 0.0001
+                ? normalize(membranePoint.position) : impactDirection;
+            float localization = smoothstep(0.05, 0.82, dot(radial, impactDirection));
+            membranePoint.mechanics.y = clamp(
+                membranePoint.mechanics.y - damage * (0.35 + localization * 1.65), 0.0, 1.0
+            );
+            membranePoint.mechanics.z += damage * localization;
+            membraneVertices[membraneBase + vertexIndex] = membranePoint;
+        }
+    }
+    cells[gid] = cell;
+}
+
+inline void recordInvariantFailure(
+    device atomic_uint* invariantState,
+    uint flag,
+    uint counter,
+    uint step
+) {
+    atomic_fetch_or_explicit(&invariantState[0], flag, memory_order_relaxed);
+    atomic_fetch_min_explicit(&invariantState[1], step, memory_order_relaxed);
+    atomic_fetch_add_explicit(&invariantState[counter], 1u, memory_order_relaxed);
+}

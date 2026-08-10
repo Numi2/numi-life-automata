@@ -1,0 +1,882 @@
+vertex RasterData fullscreenVertex(uint vertexID [[vertex_id]]) {
+    const float2 positions[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
+    const float2 coordinates[3] = { float2(0.0, 1.0), float2(2.0, 1.0), float2(0.0, -1.0) };
+    RasterData output;
+    output.position = float4(positions[vertexID], 0.0, 1.0);
+    output.uv = coordinates[vertexID];
+    return output;
+}
+
+inline float3 hsvToRGB(float3 hsv) {
+    float3 p = abs(fract(hsv.xxx + float3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return hsv.z * mix(float3(1.0), clamp(p - 1.0, 0.0, 1.0), hsv.y);
+}
+
+inline float visualNoise(float2 position) {
+    float2 base = floor(position);
+    float2 fraction = fract(position);
+    fraction = fraction * fraction * (3.0 - 2.0 * fraction);
+    uint2 p = uint2(base);
+    float a = random01(p.x * 1597334677u ^ p.y * 3812015801u);
+    float b = random01((p.x + 1u) * 1597334677u ^ p.y * 3812015801u);
+    float c = random01(p.x * 1597334677u ^ (p.y + 1u) * 3812015801u);
+    float d = random01((p.x + 1u) * 1597334677u ^ (p.y + 1u) * 3812015801u);
+    return mix(mix(a, b, fraction.x), mix(c, d, fraction.x), fraction.y);
+}
+
+inline float complexCurrent(float2 amplitude, float2 neighbor) {
+    return amplitude.x * neighbor.y - amplitude.y * neighbor.x;
+}
+
+inline float spinorPhase(float4 spinor) {
+    float2 amplitude = spinor.xy + spinor.zw;
+    return fract(atan2(amplitude.y, amplitude.x) / (2.0 * M_PI_F) + 1.0);
+}
+
+inline float wrappedPhaseDelta(float from, float to) {
+    return fract(to - from + 0.5) - 0.5;
+}
+
+inline float3 quantumPhaseColor(float phase) {
+    float3 cycle = 0.5 + 0.5 * cos(2.0 * M_PI_F * (phase + float3(0.00, 0.67, 0.33)));
+    return mix(float3(0.05, 0.13, 0.24), pow(cycle, float3(0.72)), 0.88);
+}
+
+kernel void bloomPrefilter(
+    texture2d<half, access::sample> source [[texture(0)]],
+    texture2d<half, access::write> destination [[texture(1)]],
+    constant PostProcessUniforms& uniforms [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= destination.get_width() || gid.y >= destination.get_height()) { return; }
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5) / float2(destination.get_width(), destination.get_height());
+    float2 sourceTexel = 1.0 / max(uniforms.sourceSize, float2(1.0));
+    float2 outer = sourceTexel * 6.0;
+    float2 inner = sourceTexel * 3.0;
+    float3 center = float3(source.sample(linearSampler, uv).rgb);
+    float3 axial =
+        float3(source.sample(linearSampler, uv + float2( outer.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-outer.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0,  outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0, -outer.y)).rgb);
+    float3 outerCorners =
+        float3(source.sample(linearSampler, uv + float2( outer.x,  outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-outer.x,  outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2( outer.x, -outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-outer.x, -outer.y)).rgb);
+    float3 innerCorners =
+        float3(source.sample(linearSampler, uv + float2( inner.x,  inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-inner.x,  inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2( inner.x, -inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-inner.x, -inner.y)).rgb);
+    float3 color = center * 0.125 + axial * 0.0625 +
+        outerCorners * 0.03125 + innerCorners * 0.125;
+    color = all(isfinite(color)) ? clamp(color, 0.0, 16.0) : float3(0.0);
+
+    const float threshold = 0.92;
+    const float knee = 0.38;
+    float brightness = max(max(color.r, color.g), color.b);
+    float soft = clamp(brightness - threshold + knee, 0.0, 2.0 * knee);
+    soft = soft * soft / (4.0 * knee + 0.0001);
+    float contribution = max(brightness - threshold, soft) / max(brightness, 0.0001);
+    destination.write(half4(half3(color * contribution), half(1.0)), gid);
+}
+
+inline float3 mapToDisplay(
+    float3 linearScene,
+    float3 linearBloom,
+    constant PostProcessUniforms& uniforms,
+    uint2 pixel
+) {
+    if (!all(isfinite(linearScene))) { linearScene = float3(0.0); }
+    if (!all(isfinite(linearBloom))) { linearBloom = float3(0.0); }
+    linearScene = clamp(linearScene, 0.0, 16.0);
+    linearBloom = clamp(linearBloom, 0.0, 16.0);
+    float3 hdr = linearScene * uniforms.exposure + linearBloom * uniforms.bloomIntensity;
+
+    float peak = max(max(hdr.r, hdr.g), hdr.b);
+    float peakScale = (1.0 - exp(-peak)) / max(peak, 0.0001);
+    float3 mapped = hdr * peakScale;
+    float luminance = dot(mapped, float3(0.2126, 0.7152, 0.0722));
+    float saturation = uniforms.observationZoom >= 420.0 ? 1.02 :
+        (uniforms.observationZoom >= 160.0 ? 1.18 :
+            (uniforms.observationZoom >= 64.0 ? 1.15 : 1.08));
+    mapped = mix(float3(luminance), mapped, saturation);
+
+    float dither = random01(pixel.x * 1597334677u ^ pixel.y * 3812015801u ^
+        uniforms.frameIndex * 2246822519u) - 0.5;
+    return saturate(mapped + dither / 1023.0);
+}
+
+inline float4 finiteHDRColor(float3 color, float gain) {
+    color *= gain;
+    if (!all(isfinite(color))) {
+        return float4(0.0015, 0.003, 0.006, 1.0);
+    }
+    return float4(clamp(color, 0.0, 16.0), 1.0);
+}
+
+fragment float4 compositeFragment(
+    RasterData input [[stage_in]],
+    texture2d<half, access::sample> scene [[texture(0)]],
+    texture2d<half, access::sample> bloom [[texture(1)]],
+    constant PostProcessUniforms& uniforms [[buffer(0)]]
+) {
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float3 linearScene = float3(scene.sample(linearSampler, input.uv).rgb);
+    float3 linearBloom = uniforms.bloomIntensity > 0.001
+        ? float3(bloom.sample(linearSampler, input.uv).rgb)
+        : float3(0.0);
+    return float4(mapToDisplay(
+        linearScene, linearBloom, uniforms, uint2(input.position.xy)
+    ), 1.0);
+}
+
+inline float segmentDistance(float2 point, float2 start, float2 end) {
+    float2 segment = end - start;
+    float position = saturate(dot(point - start, segment) / max(dot(segment, segment), 0.000001));
+    return length(point - (start + segment * position));
+}
+
+inline float taperedSegmentMask(
+    float2 point,
+    float2 start,
+    float2 end,
+    float startWidth,
+    float endWidth,
+    float antialiasWidth
+) {
+    float2 segment = end - start;
+    float position = saturate(dot(point - start, segment) / max(dot(segment, segment), 0.000001));
+    float distance = length(point - (start + segment * position));
+    float width = mix(startWidth, endWidth, position);
+    return 1.0 - smoothstep(width - antialiasWidth, width + antialiasWidth, distance);
+}
+
+inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStrength) {
+    float2 quantumCell = fract(uv * float(quantumGridSize));
+    bool positiveComponent = quantumCell.x < 0.5;
+    float2 componentPosition = positiveComponent
+        ? float2(quantumCell.x * 2.0 - 0.5, quantumCell.y * 2.0 - 1.0)
+        : float2((quantumCell.x - 0.5) * 2.0 - 0.5, quantumCell.y * 2.0 - 1.0);
+    float2 positiveAmplitude = wave.xy;
+    float2 negativeAmplitude = wave.zw;
+    float probabilityA = dot(positiveAmplitude, positiveAmplitude);
+    float probabilityB = dot(negativeAmplitude, negativeAmplitude);
+    float totalProbability = probabilityA + probabilityB;
+    float componentProbability = positiveComponent ? probabilityA : probabilityB;
+    float scaledProbability = componentProbability * 900000.0;
+    float componentDensity = scaledProbability / (1.0 + scaledProbability);
+    float2 componentAmplitude = positiveComponent ? positiveAmplitude : negativeAmplitude;
+    float inverseComponentMagnitude = rsqrt(max(componentProbability, 0.0000000001));
+    float2 phasor = componentAmplitude * inverseComponentMagnitude;
+    float componentCosine = phasor.x;
+    float componentSine = phasor.y;
+    float crossMagnitude = sqrt(max(probabilityA * probabilityB, 0.0));
+    float balance = 2.0 * crossMagnitude / max(totalProbability, 0.0000000001);
+    float phaseAlignment = saturate(0.5 + 0.5 * dot(positiveAmplitude, negativeAmplitude) /
+        max(crossMagnitude, 0.0000000001));
+    float localCoherence = balance * phaseAlignment;
+
+    float3 componentBase = positiveComponent ? float3(0.02, 0.82, 1.0) : float3(1.0, 0.25, 0.035);
+    float3 phaseCycle = 0.5 + 0.5 * float3(
+        componentCosine,
+        -0.481754 * componentCosine + 0.876307 * componentSine,
+        -0.481754 * componentCosine - 0.876307 * componentSine
+    );
+    float3 phaseColor = mix(float3(0.05, 0.13, 0.24),
+        mix(phaseCycle, sqrt(max(phaseCycle, 0.0)), 0.56), 0.88);
+    float3 componentColor = mix(componentBase, phaseColor, 0.44);
+    float radius = length(componentPosition);
+    float antialiasWidth = max(fwidth(radius) * 1.25, 0.0015);
+    float componentMask = 1.0 - smoothstep(0.46 - antialiasWidth, 0.46 + antialiasWidth, radius);
+    float componentEdge = 1.0 - smoothstep(antialiasWidth * 0.8, antialiasWidth * 2.6,
+        abs(radius - 0.46));
+
+    float phasorDistance = abs(componentPosition.x * phasor.y - componentPosition.y * phasor.x);
+    float forwardProjection = dot(componentPosition, phasor);
+    float phasorLine = (1.0 - smoothstep(0.008, 0.008 + antialiasWidth * 2.2, phasorDistance)) *
+        smoothstep(-0.03, 0.03, forwardProjection) *
+        (1.0 - smoothstep(0.31, 0.36, forwardProjection));
+    float2 arrowTip = phasor * 0.34;
+    float2 arrowNormal = float2(-phasor.y, phasor.x);
+    float arrowHead = max(
+        taperedSegmentMask(componentPosition, arrowTip, arrowTip - phasor * 0.085 + arrowNormal * 0.060,
+            0.014, 0.004, antialiasWidth),
+        taperedSegmentMask(componentPosition, arrowTip, arrowTip - phasor * 0.085 - arrowNormal * 0.060,
+            0.014, 0.004, antialiasWidth)
+    );
+
+    float probabilityRadius = 0.10 + componentDensity * 0.24;
+    float probabilityRing = 1.0 - smoothstep(antialiasWidth * 1.2, antialiasWidth * 3.2,
+        abs(radius - probabilityRadius));
+    float latticeDistance = min(min(quantumCell.x, 1.0 - quantumCell.x),
+        min(quantumCell.y, 1.0 - quantumCell.y));
+    float latticeAA = max(fwidth(latticeDistance) * 1.5, 0.001);
+    float latticeEdge = 1.0 - smoothstep(latticeAA, latticeAA * 3.0, latticeDistance);
+    float componentDivider = 1.0 - smoothstep(latticeAA, latticeAA * 2.8, abs(quantumCell.x - 0.5));
+    float coherenceBridge = (1.0 - smoothstep(0.010, 0.010 + latticeAA * 3.0,
+        abs(quantumCell.y - 0.5))) *
+        smoothstep(0.19, 0.27, quantumCell.x) *
+        (1.0 - smoothstep(0.73, 0.81, quantumCell.x));
+
+    float radialShading = 0.38 + 0.62 * sqrt(saturate(1.0 - radius * radius / 0.22));
+    float3 color = float3(0.0015, 0.003, 0.009);
+    color += componentColor * componentMask * componentDensity * radialShading;
+    color += componentBase * componentEdge * (0.38 + componentDensity * 0.42);
+    color += componentColor * probabilityRing * componentMask * 0.72;
+    color += float3(0.94, 0.985, 1.0) * max(phasorLine, arrowHead) * componentMask *
+        (0.54 + componentDensity * 0.72);
+    color += mix(float3(0.12, 0.52, 0.96), float3(0.96, 0.28, 0.48), phaseAlignment) *
+        coherenceBridge * localCoherence * (0.42 + currentStrength * 0.46);
+    color += float3(0.08, 0.18, 0.27) * latticeEdge * 0.72;
+    color += float3(0.18, 0.38, 0.50) * componentDivider * 0.44;
+    return color;
+}
+
+
+struct JunctionRasterData {
+    float4 position [[position]];
+    float2 ribbonCoordinate;
+    float4 mechanics;
+    float4 transport;
+    float4 lineageA;
+    float4 lineageB;
+    float collectiveCohesion;
+    float visibility;
+};
+
+vertex JunctionRasterData junctionVertex(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cells [[buffer(2)]],
+    device const atomic_uint* cellOccupancy [[buffer(3)]],
+    device const MembraneVertex* membraneVertices [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device const uint* visibleJunctionIndices [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    device const ProgramLineageRecord* programLineageRecords [[buffer(8)]],
+    device const float4* programInteractions [[buffer(9)]],
+    device const ProgramSlotState* programSlots [[buffer(10)]],
+    device const CellJunctionState* junctionStates [[buffer(11)]],
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]]
+) {
+    JunctionRasterData output = {};
+    output.position = float4(3.0, 3.0, 0.0, 1.0);
+    if (instanceID >= cellJunctionCapacity || vertexID >= 6u) { return output; }
+    uint junctionIndex = visibleJunctionIndices[instanceID];
+    if (junctionIndex >= cellJunctionCapacity) { return output; }
+    uint pairKey = atomic_load_explicit(
+        &junctionStates[junctionIndex].pairKey, memory_order_relaxed
+    );
+    if (pairKey == emptySpatialHashEntry || pairKey == 0u) { return output; }
+    uint packedPair = pairKey - 1u;
+    uint cellA = packedPair / maxCellCount;
+    uint cellB = packedPair % maxCellCount;
+    if (cellA >= maxCellCount || cellB >= maxCellCount || cellA >= cellB ||
+        atomic_load_explicit(&cellOccupancy[cellA], memory_order_relaxed) !=
+            cellOccupancyAlive ||
+        atomic_load_explicit(&cellOccupancy[cellB], memory_order_relaxed) !=
+            cellOccupancyAlive) { return output; }
+    CellIdentity identityA = cellIdentities[cellA];
+    CellIdentity identityB = cellIdentities[cellB];
+    uint owner = identityA.owner;
+    if (owner >= maxAgentCount || identityB.owner != owner ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return output; }
+    if (!isfinite(junctionStates[junctionIndex].restDistance) ||
+        !isfinite(junctionStates[junctionIndex].strength) ||
+        !isfinite(junctionStates[junctionIndex].age) ||
+        !isfinite(junctionStates[junctionIndex].load) ||
+        !all(isfinite(junctionStates[junctionIndex].material)) ||
+        !all(isfinite(junctionStates[junctionIndex].remodeling))) { return output; }
+
+    AgentState agent = agents[owner];
+    CellState stateA = cells[cellA];
+    CellState stateB = cells[cellB];
+    float2 centerA = cellWorldPosition(agent, stateA.position, uniforms);
+    float2 centerB = cellWorldPosition(agent, stateB.position, uniforms);
+    float2 centerDelta = centerB - centerA;
+    if (!all(isfinite(centerA)) || !all(isfinite(centerB)) ||
+        length(centerDelta) < 0.0000001) { return output; }
+    float2 directionAB = normalize(centerDelta);
+    MembraneSupportSample supportA = membraneSupportSample(
+        membraneVertices, cellA, rotateWorldToTissue(directionAB, agent)
+    );
+    MembraneSupportSample supportB = membraneSupportSample(
+        membraneVertices, cellB, rotateWorldToTissue(-directionAB, agent)
+    );
+    bool finiteSupport = all(isfinite(supportA.point)) && all(isfinite(supportB.point)) &&
+        isfinite(supportA.integrity) && isfinite(supportB.integrity) &&
+        length(supportA.point) >= 0.025 && length(supportB.point) >= 0.025 &&
+        length(supportA.point) <= 0.30 && length(supportB.point) <= 0.30;
+    if (!finiteSupport) { return output; }
+    float worldUnit = cellWorldScale(uniforms);
+    float2 membraneA = centerA + rotateTissueToWorld(supportA.point, agent) * worldUnit;
+    float2 membraneB = centerB + rotateTissueToWorld(supportB.point, agent) * worldUnit;
+    // The path enters each cytoplasm before crossing the measured support arcs so
+    // directional transport remains legible while the junction stays physically anchored.
+    float2 pathA = mix(centerA, membraneA, 0.72);
+    float2 pathB = mix(centerB, membraneB, 0.72);
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0
+        ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float2 screenA = 0.5 + (pathA - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    float2 screenB = 0.5 + (pathB - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    float2 clipA = float2(screenA.x * 2.0 - 1.0, 1.0 - screenA.y * 2.0);
+    float2 clipB = float2(screenB.x * 2.0 - 1.0, 1.0 - screenB.y * 2.0);
+    float2 clipDelta = clipB - clipA;
+    if (!all(isfinite(clipA)) || !all(isfinite(clipB)) ||
+        !all(isfinite(clipDelta)) || length(clipDelta) < 0.00001 ||
+        any(abs(clipA) > float2(2.5)) || any(abs(clipB) > float2(2.5))) {
+        return output;
+    }
+
+    const float2 quad[6] = {
+        float2(0.0, -1.0), float2(1.0, -1.0), float2(0.0, 1.0),
+        float2(0.0, 1.0), float2(1.0, -1.0), float2(1.0, 1.0)
+    };
+    float2 coordinate = quad[vertexID % 6u];
+    float load = saturate(junctionStates[junctionIndex].load / 0.0028);
+    float strain = clamp(junctionStates[junctionIndex].remodeling.y * 18.0, -1.0, 1.0);
+    float strength = saturate(junctionStates[junctionIndex].strength);
+    float corticalTension = saturate(junctionStates[junctionIndex].material.w);
+    float collectiveCohesion = saturate(max(
+        stateA.boundaryDynamics.y, stateB.boundaryDynamics.y
+    ));
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    float overviewLOD = 1.0 - smoothstep(4.0, 8.0, observationZoom);
+    float detailThickness = clamp(
+        worldUnit * uniforms.cameraZoom * (
+            0.010 + load * 0.012 + corticalTension * 0.004 +
+            collectiveCohesion * 0.014
+        ),
+        0.0018, 0.020
+    );
+    float overviewThickness = overviewLOD * clamp(
+        worldUnit * uniforms.cameraZoom * (
+            0.048 + strength * 0.020 + collectiveCohesion * 0.024
+        ),
+        0.0024, 0.0064
+    );
+    float thickness = max(detailThickness, overviewThickness);
+    float2 normal = normalize(float2(-clipDelta.y, clipDelta.x));
+    float2 clipPosition = mix(clipA, clipB, coordinate.x) +
+        normal * coordinate.y * thickness;
+    if (!all(isfinite(clipPosition))) { return output; }
+    output.position = float4(clipPosition, 0.0, 1.0);
+    output.ribbonCoordinate = coordinate;
+    output.mechanics = float4(load, strain, strength, corticalTension);
+    output.collectiveCohesion = collectiveCohesion;
+
+    float4 interactionA = programInteractions[cellA];
+    float4 interactionB = programInteractions[cellB];
+    float signedATPTransport = clamp(
+        0.5 * (interactionB.x - interactionA.x) * 5000.0, -1.0, 1.0
+    );
+    float conductance = saturate(
+        strength * junctionStates[junctionIndex].material.z *
+        min(stateA.physiology.w, stateB.physiology.w)
+    );
+    float signalAvailability = max(stateA.signaling.w, stateB.signaling.w);
+    float signedCalciumTransport = clamp(
+        (stateA.signaling.x - stateB.signaling.x) * conductance *
+            signalAvailability * 2.4,
+        -1.0, 1.0
+    );
+    float signedERKTransport = clamp(
+        (stateA.signaling.y - stateB.signaling.y) * conductance *
+            signalAvailability * 2.8,
+        -1.0, 1.0
+    );
+    bool mixedPrograms = identityA.programIndex != identityB.programIndex ||
+        identityA.programGeneration != identityB.programGeneration;
+    output.transport = float4(
+        signedATPTransport, signedCalciumTransport, signedERKTransport,
+        mixedPrograms ? 1.0 : 0.0
+    );
+
+    float hueA = fract(float(hash32(identityA.persistentID)) / 4294967296.0);
+    float hueB = fract(float(hash32(identityB.persistentID)) / 4294967296.0);
+    if (programSlotMatches(programSlots, identityA.programIndex, identityA.programGeneration)) {
+        hueA = fract(programLineageRecords[identityA.programIndex].dynamicExpression.w);
+    }
+    if (programSlotMatches(programSlots, identityB.programIndex, identityB.programGeneration)) {
+        hueB = fract(programLineageRecords[identityB.programIndex].dynamicExpression.w);
+    }
+    output.lineageA = float4(hsvToRGB(float3(hueA, 0.82, 0.92)), 1.0);
+    output.lineageB = float4(hsvToRGB(float3(hueB, 0.82, 0.92)), 1.0);
+    float overviewVisibility = smoothstep(0.35, 0.85, observationZoom) *
+        (1.0 - smoothstep(5.5, 9.0, observationZoom));
+    float detailVisibility = smoothstep(2.0, 8.0, observationZoom);
+    output.visibility = max(overviewVisibility, detailVisibility) *
+        (1.0 - smoothstep(112.0, 180.0, observationZoom));
+    return output;
+}
+
+fragment float4 junctionFragment(
+    JunctionRasterData input [[stage_in]],
+    constant SimulationUniforms& uniforms [[buffer(0)]]
+) {
+    float along = saturate(input.ribbonCoordinate.x);
+    float side = abs(input.ribbonCoordinate.y);
+    float edgeAA = max(fwidth(side) * 1.2, 0.018);
+    float ribbon = 1.0 - smoothstep(0.90, 0.90 + edgeAA, side);
+    if (ribbon <= 0.001 || input.visibility <= 0.001) { discard_fragment(); }
+
+    float load = saturate(input.mechanics.x);
+    float signedStrain = clamp(input.mechanics.y, -1.0, 1.0);
+    float strength = saturate(input.mechanics.z);
+    float corticalTension = saturate(input.mechanics.w);
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    if (observationZoom < 6.0) {
+        float3 lineageColor = mix(
+            input.lineageA.rgb, input.lineageB.rgb, along
+        );
+        float centerFill = 1.0 - smoothstep(0.18, 0.86, side);
+        float3 tissueColor = mix(
+            float3(0.012, 0.090, 0.076), lineageColor, 0.42
+        );
+        tissueColor = mix(
+            tissueColor, float3(0.48, 1.0, 0.78),
+            input.collectiveCohesion * 0.22
+        );
+        float3 overviewColor = tissueColor * ribbon *
+            (0.34 + centerFill * 0.42 + strength * 0.24);
+        float overviewAlpha = ribbon * input.visibility *
+            saturate(0.46 + strength * 0.18 +
+                input.collectiveCohesion * 0.30);
+        if (!all(isfinite(overviewColor)) || !isfinite(overviewAlpha)) {
+            discard_fragment();
+        }
+        return float4(
+            clamp(overviewColor * input.visibility, 0.0, 16.0),
+            saturate(overviewAlpha)
+        );
+    }
+    float3 compressionColor = float3(0.04, 0.62, 1.0);
+    float3 tensionColor = float3(1.0, 0.24, 0.025);
+    float3 mechanicalColor = mix(
+        compressionColor, tensionColor, saturate(signedStrain * 0.5 + 0.5)
+    );
+    float centerRail = 1.0 - smoothstep(0.18, 0.52, side);
+    float3 color = mechanicalColor * ribbon * centerRail *
+        (0.10 + load * 0.62 + corticalTension * 0.12);
+
+    float time = float(uniforms.step);
+    float atpFlux = input.transport.x;
+    float atpDirection = atpFlux >= 0.0 ? 1.0 : -1.0;
+    float atpCoordinate = atpDirection > 0.0 ? along : 1.0 - along;
+    float atpPacket = 1.0 - smoothstep(0.045, 0.15,
+        abs(fract(atpCoordinate * 3.0 - time * 0.025) - 0.5));
+    float atpLane = 1.0 - smoothstep(0.12, 0.38, abs(side - 0.12));
+    color += float3(1.0, 0.72, 0.025) * atpPacket * atpLane *
+        saturate(abs(atpFlux)) * 1.42;
+
+    float calciumFlux = input.transport.y;
+    float calciumCoordinate = calciumFlux >= 0.0 ? along : 1.0 - along;
+    float calciumWave = 1.0 - smoothstep(0.035, 0.13,
+        abs(fract(calciumCoordinate * 2.0 - time * 0.017 + 0.18) - 0.5));
+    float calciumLane = 1.0 - smoothstep(0.10, 0.30, abs(side - 0.46));
+    color += float3(0.02, 0.88, 1.0) * calciumWave * calciumLane *
+        saturate(abs(calciumFlux)) * 1.26;
+
+    float erkFlux = input.transport.z;
+    float erkCoordinate = erkFlux >= 0.0 ? along : 1.0 - along;
+    float erkWave = 1.0 - smoothstep(0.040, 0.14,
+        abs(fract(erkCoordinate * 2.0 - time * 0.013 + 0.61) - 0.5));
+    float erkLane = 1.0 - smoothstep(0.10, 0.30, abs(side - 0.70));
+    color += float3(0.98, 0.07, 0.62) * erkWave * erkLane *
+        saturate(abs(erkFlux)) * 1.18;
+
+    float mixedPrograms = saturate(input.transport.w);
+    float lineageRail = smoothstep(0.62, 0.80, side) *
+        (1.0 - smoothstep(0.88, 1.0, side));
+    float3 lineageColor = mix(input.lineageA.rgb, input.lineageB.rgb, along);
+    color += mix(lineageColor, float3(0.84, 1.0, 0.94), 0.34) *
+        ribbon * input.collectiveCohesion *
+        (0.30 + centerRail * 0.42);
+    float lineagePacket = 0.72 + 0.28 * sin(
+        along * 14.0 - time * 0.018 + signedStrain * 2.0
+    );
+    color += lineageColor * lineageRail * mixedPrograms * lineagePacket * 0.92;
+    float mixingInterface = (1.0 - smoothstep(0.015, 0.070, abs(along - 0.5))) *
+        mixedPrograms * (1.0 - smoothstep(0.0, 0.48, side));
+    color += float3(0.94, 0.98, 1.0) * mixingInterface * 0.70;
+
+    float activity = max(
+        load, max(abs(atpFlux), max(abs(calciumFlux), abs(erkFlux)))
+    );
+    float alpha = ribbon * input.visibility * saturate(
+        0.16 + strength * 0.18 + load * 0.28 + activity * 0.34 +
+        mixedPrograms * 0.18 + input.collectiveCohesion * 0.32
+    );
+    color *= input.visibility;
+    if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
+    return float4(clamp(color, 0.0, 16.0), saturate(alpha));
+}
+
+struct CellRasterData {
+    float4 position [[position]];
+    float2 local;
+    float4 physiology;
+    float4 phenotype;
+    float4 signals;
+    float4 interaction;
+    float4 dynamics;
+    float4 mechanics;
+    float4 energetics;
+    float4 regulation;
+    float4 regulationB;
+    float4 resonance;
+    float4 signaling;
+    float4 signalCausality;
+    float4 tissueGeometry;
+    float4 tissueForce;
+    float4 environment;
+    float4 development;
+    float4 boundaryDynamics;
+    float4 programEcology;
+    float4 construction;
+    float4 lifeHistory;
+    float4 functionalActivity;
+    float4 learning;
+    float4 constructionFlux;
+    float lineageHue;
+    float closureSignal;
+    float visibility;
+    float tracked;
+    float radialCoordinate;
+    float edgeExposure;
+    float2 footState;
+    float organism;
+    float4 localMembrane;
+};
+
+inline float4 organismOverviewCellColor(
+    CellRasterData input,
+    float body,
+    float radius
+) {
+    float organism = saturate(input.organism);
+    float integrity = saturate(input.localMembrane.x);
+    float atp = saturate(input.physiology.x);
+    float exposure = saturate(input.edgeExposure);
+    float membrane = body * smoothstep(0.74, 0.985, radius);
+    float cytoplasm = body * (1.0 - smoothstep(0.68, 0.94, radius));
+    float3 lineage = hsvToRGB(float3(input.lineageHue, 0.68, 0.78));
+    float3 cytoplasmColor = mix(
+        mix(float3(0.015, 0.16, 0.13), lineage, 0.58),
+        mix(float3(0.025, 0.22, 0.16), lineage, 0.42),
+        organism
+    );
+    float2 nucleusOffset = normalize(input.development.xy + float2(0.0001)) * 0.16;
+    float nucleus = (1.0 - smoothstep(
+        0.18, 0.29, length(input.local - nucleusOffset)
+    )) * cytoplasm;
+    float vacuole = (1.0 - smoothstep(
+        0.10, 0.19, length(input.local + nucleusOffset * 1.7)
+    )) * cytoplasm;
+    float polarity = saturate(
+        0.5 + dot(input.local, normalize(input.development.xy + float2(0.0001))) * 0.5
+    );
+    float calcium = saturate(input.signaling.x);
+    float erk = saturate(input.signaling.y);
+    float3 color = cytoplasmColor * cytoplasm * (0.54 + atp * 0.58);
+    color += mix(float3(0.90, 0.28, 0.72), lineage, 0.28) * nucleus *
+        (0.54 + erk * 0.52);
+    color += float3(0.06, 0.78, 1.0) * vacuole * (0.34 + calcium * 0.66);
+    color += mix(float3(0.05, 0.72, 1.0), float3(1.0, 0.18, 0.62), polarity) *
+        cytoplasm * (calcium + erk) * 0.20;
+    float membraneFailure = saturate(1.0 - integrity);
+    float3 membraneColor = mix(
+        float3(1.0, 0.12, 0.035),
+        mix(lineage, float3(0.30, 1.0, 0.70), 0.62),
+        integrity
+    );
+    color += membraneColor * membrane * (0.64 + exposure * 0.30);
+    float collectiveSurface = membrane * organism * exposure *
+        saturate(
+            0.26 + input.boundaryDynamics.x * 0.48 +
+            input.boundaryDynamics.y * 0.26
+        );
+    color += float3(0.72, 1.0, 0.88) * collectiveSurface * 0.54;
+    float lifecycleBand = membrane * saturate(
+        input.lifeHistory.y * 0.34 + input.lifeHistory.w * 0.66
+    );
+    color += mix(
+        float3(1.0, 0.58, 0.08), float3(0.08, 1.0, 0.54),
+        saturate(input.lifeHistory.w)
+    ) * lifecycleBand * 0.34;
+    color += float3(0.52, 0.16, 0.72) * cytoplasm *
+        saturate(input.lifeHistory.z) * 0.26;
+    color += float3(1.0, 0.08, 0.025) * membrane * membraneFailure * 0.82;
+    float footPad = membrane * saturate(input.footState.x);
+    float footSole = footPad * saturate(input.footState.y);
+    color = mix(color, float3(0.006, 0.050, 0.038), footPad * 0.82);
+    color += float3(0.06, 1.0, 0.50) * footSole * 0.92;
+    color += float3(0.10, 0.92, 1.0) * input.tracked *
+        membrane * 0.48;
+    float alpha = body * input.visibility * mix(0.88, 0.97, organism);
+    color *= input.visibility;
+    if (!all(isfinite(color)) || !isfinite(alpha)) {
+        return float4(0.0);
+    }
+    return float4(clamp(color, 0.0, 16.0), saturate(alpha));
+}
+
+inline float2 smoothMembranePosition(
+    device const MembraneVertex* membraneVertices,
+    uint cellIndex,
+    uint renderSample
+) {
+    uint wrappedSample = renderSample % membraneRenderSegmentCount;
+    uint vertexIndex = wrappedSample / membraneRenderSubdivision;
+    uint subdivisionIndex = wrappedSample % membraneRenderSubdivision;
+    uint previous = (vertexIndex + membraneVertexCount - 1u) % membraneVertexCount;
+    uint next = (vertexIndex + 1u) % membraneVertexCount;
+    uint base = cellIndex * membraneVertexCount;
+    float2 previousPosition = membraneVertices[base + previous].position;
+    float2 currentPosition = membraneVertices[base + vertexIndex].position;
+    float2 nextPosition = membraneVertices[base + next].position;
+    float2 curveStart = (previousPosition + currentPosition) * 0.5;
+    float2 curveEnd = (currentPosition + nextPosition) * 0.5;
+    float t = float(subdivisionIndex) / float(membraneRenderSubdivision);
+    float oneMinusT = 1.0 - t;
+    return curveStart * (oneMinusT * oneMinusT) +
+        currentPosition * (2.0 * oneMinusT * t) + curveEnd * (t * t);
+}
+
+inline CellRasterData makeCellRasterData(
+    device const AgentState* agents,
+    device const uint* agentOccupancy,
+    device const CellState* cells,
+    device const uint* cellOccupancy,
+    device const MembraneVertex* membraneVertices,
+    constant SimulationUniforms& uniforms,
+    device const uint* visibleCellIndices,
+    device const CellIdentity* cellIdentities,
+    device const ProgramLineageRecord* programLineageRecords,
+    device const float4* programInteractions,
+    device const ProgramSlotState* programSlots,
+    uint rasterStep,
+    uint vertexID,
+    uint instanceID
+) {
+    CellRasterData output = {};
+    output.position = float4(3.0, 3.0, 0.0, 1.0);
+    uint safeRasterStep = clamp(rasterStep, 1u, membraneRenderSubdivision);
+    uint rasterSegmentCount = membraneRenderSegmentCount / safeRasterStep;
+    if (instanceID >= maxCellCount || vertexID >= rasterSegmentCount * 3u) {
+        return output;
+    }
+    uint cellIndex = visibleCellIndices[instanceID];
+    if (cellIndex >= maxCellCount) { return output; }
+    uint owner = cellIdentities[cellIndex].owner;
+    if (owner >= maxAgentCount) { return output; }
+    AgentState agent = agents[owner];
+    CellState cell = cells[cellIndex];
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    float scaleVisibility = smoothstep(0.35, 1.10, observationZoom) *
+        (1.0 - smoothstep(128.0, 240.0, observationZoom));
+    float trackingVisibility = uniforms.trackedAgentID == 0xffffffffu ||
+        uniforms.trackedAgentID == owner ? 1.0 : 1.0 - smoothstep(16.0, 34.0, observationZoom);
+    float visibility = scaleVisibility * trackingVisibility;
+
+    float2 heading = tissueHeading(agent);
+    float2 lateral = float2(-heading.y, heading.x);
+    float worldUnit = cellWorldScale(uniforms);
+    float2 cellCenter = cellWorldPosition(agent, cell.position, uniforms);
+    uint triangle = vertexID / 3u;
+    uint triangleVertex = vertexID % 3u;
+    uint membraneStartSample = triangle * safeRasterStep;
+    uint membraneEndSample = membraneStartSample + safeRasterStep;
+    float2 membraneStart = smoothMembranePosition(
+        membraneVertices, cellIndex, membraneStartSample
+    );
+    float2 membraneEnd = smoothMembranePosition(
+        membraneVertices, cellIndex, membraneEndSample
+    );
+    uint membraneSample = triangleVertex == 2u
+        ? membraneEndSample : membraneStartSample;
+    float2 membranePosition = triangleVertex == 0u
+        ? float2(0.0)
+        : (triangleVertex == 1u ? membraneStart : membraneEnd);
+    float startRadius = length(membraneStart);
+    float endRadius = length(membraneEnd);
+    uint physicalEdge = (membraneSample / membraneRenderSubdivision) % membraneVertexCount;
+    MembraneVertex localVertex = membraneVertices[
+        cellIndex * membraneVertexCount + physicalEdge
+    ];
+    // measureCellMembraneExposure encodes physical union-boundary membership in
+    // the sign while retaining the strain magnitude. Only a maintained exposed
+    // arc can project the supracellular surface beyond the cellular membrane.
+    float edgeExposure = localVertex.mechanics.w > 0.0 ? 1.0 : 0.0;
+    float multicellularBody =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    float renderProtrusionGrowth = multicellularBody *
+        saturate(cell.boundaryDynamics.z);
+    float renderedFootPad = 0.0;
+    float renderFootStance = 0.0;
+    float2 renderedFootDirection = float2(0.0);
+    if (triangleVertex != 0u && edgeExposure > 0.0 &&
+        renderProtrusionGrowth > 0.001) {
+        float2 membraneDirection = membranePosition / max(
+            triangleVertex == 1u ? startRadius : endRadius, 0.000001
+        );
+        float2 componentBoundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
+            ? normalize(cell.tissueGeometry.xy) : membraneDirection;
+        float footSidePhase = componentBoundaryNormal.y >= 0.0 ? 0.0 : 0.5;
+        float renderFootCycle = fract(cell.boundaryDynamics.w + footSidePhase);
+        renderFootStance = smoothstep(0.04, 0.24, renderFootCycle) *
+            (1.0 - smoothstep(0.62, 0.94, renderFootCycle));
+        renderedFootDirection = normalize(
+            componentBoundaryNormal +
+            float2((renderFootCycle * 2.0 - 1.0) * 0.26, 0.0) +
+            componentBoundaryNormal * 0.0001
+        );
+        float footAlignment = saturate(dot(
+            membraneDirection, renderedFootDirection
+        ));
+        float focusedFootAlignment = footAlignment * footAlignment;
+        focusedFootAlignment *= focusedFootAlignment;
+        focusedFootAlignment *= focusedFootAlignment;
+        renderedFootPad = renderProtrusionGrowth *
+            smoothstep(0.30, 0.76, abs(componentBoundaryNormal.y)) *
+            focusedFootAlignment;
+    }
+    float constructedSurface = edgeExposure *
+        saturate(cell.boundaryDynamics.x) *
+        (0.34 + saturate(cell.boundaryDynamics.y) * 0.66) *
+        mix(0.38, 1.0, saturate(localVertex.mechanics.y));
+    float surfaceExtension = constructedSurface * (
+        0.006 + saturate(cell.boundaryDynamics.x) * 0.014 +
+        saturate(cell.boundaryDynamics.y) * 0.006
+    );
+    float2 renderMembranePosition = membranePosition;
+    float overviewBodyLOD = 1.0 - smoothstep(4.0, 8.0, observationZoom);
+    if (triangleVertex != 0u) {
+        // Preserve the measured contour while giving its existing membrane a
+        // bounded overview footprint; this closes sub-pixel gaps without an
+        // organism sprite or a second geometry path.
+        renderMembranePosition *= 1.0 + overviewBodyLOD * 2.8;
+    }
+    if (triangleVertex != 0u && surfaceExtension > 0.000001) {
+        float membraneRadius = triangleVertex == 1u ? startRadius : endRadius;
+        float2 outwardNormal = membraneRadius > 0.000001
+            ? membranePosition / membraneRadius : float2(0.0);
+        renderMembranePosition += outwardNormal * surfaceExtension;
+    }
+    float membraneEdgeLength = length(membraneEnd - membraneStart);
+    float signedTriangleArea = membraneStart.x * membraneEnd.y -
+        membraneStart.y * membraneEnd.x;
+    bool finiteGeometry = all(isfinite(cellCenter)) &&
+        all(isfinite(membraneStart)) && all(isfinite(membraneEnd)) &&
+        all(cellCenter >= float2(-0.05)) && all(cellCenter <= float2(1.05)) &&
+        startRadius >= 0.025 && endRadius >= 0.025 &&
+        startRadius <= 0.30 && endRadius <= 0.30 &&
+        membraneEdgeLength <= 0.08 * float(safeRasterStep) &&
+        signedTriangleArea > 0.0000001;
+    float2 worldPosition = cellCenter +
+        heading * renderMembranePosition.x * worldUnit +
+        lateral * renderMembranePosition.y * worldUnit;
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0 ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float2 screenUV = 0.5 + (worldPosition - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    float footOverviewProjection = renderedFootPad *
+        (1.0 - smoothstep(4.0, 8.0, observationZoom));
+    if (footOverviewProjection > 0.001 &&
+        length(renderedFootDirection) > 0.001) {
+        float2 worldFootDirection =
+            heading * renderedFootDirection.x +
+            lateral * renderedFootDirection.y;
+        float2 screenFootDirection = worldFootDirection / viewScale;
+        screenUV += normalize(screenFootDirection) *
+            footOverviewProjection * 0.0032;
+    }
+    // Do not reject one vertex of an otherwise valid triangle by screen position.
+    // Mixed valid/sentinel vertices form a giant clipped primitive and were able to
+    // overwrite large display tiles. The earlier physical bounds make finiteness a
+    // triangle-wide decision; normal raster clipping handles offscreen coordinates.
+    finiteGeometry = finiteGeometry && all(isfinite(heading)) &&
+        all(isfinite(worldPosition)) && all(isfinite(screenUV));
+    bool occupied = agentOccupancy[owner] != 0u &&
+        cellOccupancy[cellIndex] == cellOccupancyAlive &&
+        finiteGeometry && visibility > 0.001;
+
+    output.position = occupied
+        ? float4(screenUV.x * 2.0 - 1.0, 1.0 - screenUV.y * 2.0, 0.0, 1.0)
+        : float4(3.0, 3.0, 0.0, 1.0);
+    float membraneArea = isfinite(cell.membrane.x) ? max(cell.membrane.x, 0.010) : 0.010;
+    float nominalRadius = clamp(sqrt(membraneArea / M_PI_F), 0.085, 0.18);
+    output.local = membranePosition / nominalRadius;
+    output.physiology = cell.physiology;
+    output.phenotype = cell.phenotype;
+    output.signals = cell.signals;
+    output.interaction = cell.interaction;
+    output.dynamics = cell.dynamics;
+    output.mechanics = cell.mechanics;
+    output.energetics = cell.energetics;
+    output.regulation = cell.regulation;
+    output.regulationB = cell.regulationB;
+    output.resonance = cell.resonance;
+    output.signaling = cell.signaling;
+    output.signalCausality = cell.signalCausality;
+    output.tissueGeometry = cell.tissueGeometry;
+    output.tissueForce = cell.tissueForce;
+    output.environment = cell.environment;
+    output.development = cell.development;
+    output.boundaryDynamics = cell.boundaryDynamics;
+    output.programEcology = programInteractions[cellIndex];
+    uint programIndex = cellIdentities[cellIndex].programIndex;
+    output.construction = saturate(cell.tissueGeometry.z) *
+        saturate(cell.membraneProperties);
+    output.lifeHistory = cell.lifeHistory;
+    output.functionalActivity = cell.functionalActivity;
+    output.learning = cell.learning;
+    output.constructionFlux = cell.constructionFlux;
+    output.lineageHue = programSlotMatches(
+        programSlots, programIndex, cellIdentities[cellIndex].programGeneration
+    ) &&
+        programIndex != agent.dominantProgramIndex
+        ? programLineageRecords[programIndex].dynamicExpression.w : agent.dynamicExpression.w;
+    float boundaryMaintenance = saturate(
+        cell.physiology.x * cell.physiology.w * cell.regulation.w *
+        (0.35 + saturate(cell.tissueGeometry.z) * 0.65)
+    );
+    float mechanochemicalLoop = pow(max(
+        cell.signalCausality.x * cell.signalCausality.y *
+        cell.signalCausality.z * length(cell.tissueForce.xy), 0.0
+    ), 0.25);
+    output.closureSignal = saturate(sqrt(
+        boundaryMaintenance * saturate(mechanochemicalLoop * 160.0)
+    ));
+    output.visibility = visibility;
+    output.tracked = uniforms.trackedAgentID == owner ? 1.0 : 0.0;
+    output.radialCoordinate = triangleVertex == 0u ? 0.0 : 1.0;
+    output.edgeExposure = triangleVertex == 0u
+        ? saturate(cell.tissueGeometry.z)
+        : edgeExposure;
+    output.footState = float2(renderedFootPad, renderFootStance);
+    output.organism = multicellularBody;
+    float localIntegrity = triangleVertex == 0u
+        ? saturate(cell.physiology.w) : saturate(localVertex.mechanics.y);
+    float localPressure = triangleVertex == 0u
+        ? saturate(cell.tissueForce.z * 900.0)
+        : saturate(localVertex.mechanics.z * 120.0);
+    float localStrain = triangleVertex == 0u
+        ? saturate(cell.mechanics.y)
+        : saturate(abs(localVertex.mechanics.w) * 18.0);
+    float paidRepair = saturate(
+        cell.regulation.w * cell.physiology.x *
+        (0.45 + saturate(cell.energetics.y * 2400.0) * 0.55)
+    );
+    output.localMembrane = float4(
+        localIntegrity, localPressure, localStrain, paidRepair
+    );
+    return output;
+}

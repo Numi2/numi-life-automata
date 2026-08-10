@@ -16,8 +16,6 @@ final class InteractiveMetalView: MTKView {
     private var pendingZoomAnchor = SIMD2<Float>(repeating: 0.5)
     private var pendingZoomAspect: Float = 1
     private var zoomFlushTimer: Timer?
-    private var lastAppliedZoomDirection = 0.0
-    private var lastZoomApplicationTime = 0.0
     private var horizontalGestureConsumed = false
     private var lastHorizontalCycleTime = 0.0
 
@@ -60,17 +58,19 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        if abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY), abs(event.scrollingDeltaX) > 1.5 {
+        if event.modifierFlags.contains(.shift),
+           abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY),
+           abs(event.scrollingDeltaX) > 1.5 {
             handleHorizontalScroll(event)
             return
         }
         guard event.scrollingDeltaY.isFinite else { return }
-        let sensitivity = event.hasPreciseScrollingDeltas ? 0.0024 : 0.018
-        let momentumScale = event.momentumPhase.isEmpty ? 1.0 : 0.32
-        let rawLogDelta = Double(-event.scrollingDeltaY) * sensitivity * momentumScale
-        let eventLimit = event.hasPreciseScrollingDeltas ? 0.020 : 0.030
+        let sensitivity = event.hasPreciseScrollingDeltas ? 0.0075 : 0.10
+        let momentumScale = event.momentumPhase.isEmpty ? 1.0 : 0.55
+        let rawLogDelta = Double(event.scrollingDeltaY) * sensitivity * momentumScale
+        let eventLimit = event.hasPreciseScrollingDeltas ? 0.085 : 0.16
         enqueueZoom(
-            logDelta: tanh(rawLogDelta / eventLimit) * eventLimit,
+            logDelta: min(max(rawLogDelta, -eventLimit), eventLimit),
             anchor: normalizedPosition(for: event),
             aspect: aspect
         )
@@ -78,9 +78,9 @@ final class InteractiveMetalView: MTKView {
 
     override func magnify(with event: NSEvent) {
         guard event.magnification.isFinite else { return }
-        let boundedMagnification = min(max(Double(event.magnification), -0.20), 0.20)
+        let boundedMagnification = min(max(Double(event.magnification), -0.25), 0.25)
         enqueueZoom(
-            logDelta: log1p(boundedMagnification) * 0.72,
+            logDelta: log1p(boundedMagnification),
             anchor: normalizedPosition(for: event),
             aspect: aspect
         )
@@ -99,22 +99,13 @@ final class InteractiveMetalView: MTKView {
 
     private func enqueueZoom(logDelta initialLogDelta: Double, anchor: SIMD2<Float>, aspect: Float) {
         guard initialLogDelta.isFinite, abs(initialLogDelta) >= 0.000_05 else { return }
-        var logDelta = min(max(initialLogDelta, -0.025), 0.025)
-        let now = ProcessInfo.processInfo.systemUptime
-        let direction = logDelta.sign == .minus ? -1.0 : 1.0
-
-        if lastAppliedZoomDirection != 0,
-           direction != lastAppliedZoomDirection,
-           now - lastZoomApplicationTime < 0.14 {
-            logDelta *= 0.35
-            pendingZoomLog *= 0.25
-        } else if pendingZoomLog * logDelta < 0 {
-            pendingZoomLog *= 0.25
-            logDelta *= 0.50
+        let logDelta = min(max(initialLogDelta, -0.16), 0.16)
+        if pendingZoomLog * logDelta < 0 {
+            pendingZoomLog = 0
         }
 
         // Log-space accumulation keeps equal inward and outward impulses reciprocal.
-        pendingZoomLog = min(max(pendingZoomLog + logDelta, -0.022), 0.022)
+        pendingZoomLog = min(max(pendingZoomLog + logDelta, -0.14), 0.14)
         pendingZoomAnchor = anchor
         pendingZoomAspect = aspect
         guard zoomFlushTimer == nil else { return }
@@ -136,8 +127,6 @@ final class InteractiveMetalView: MTKView {
         pendingZoomLog = 0
         guard abs(logDelta) >= 0.000_05 else { return }
 
-        lastAppliedZoomDirection = logDelta.sign == .minus ? -1.0 : 1.0
-        lastZoomApplicationTime = ProcessInfo.processInfo.systemUptime
         zoomHandler?(exp(logDelta), pendingZoomAnchor, pendingZoomAspect)
     }
 

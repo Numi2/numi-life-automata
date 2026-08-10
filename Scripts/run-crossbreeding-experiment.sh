@@ -7,7 +7,7 @@ cd "$root"
 swift build -c release --product NumiAutomata --jobs "${NUMI_SWIFT_JOBS:-1}"
 
 # Sixteen separated pairs selected from the ordinary founder generator. Each
-# pair has convergent initial motion, reciprocal recognition, low predatory
+# pair has convergent initial motion, reciprocal receptor chemistry, low breach
 # investment, and no forced biological outcome. Fusion, junction persistence,
 # division, and crossover remain decisions of the causal simulation.
 exec .build/release/NumiAutomata experiment \

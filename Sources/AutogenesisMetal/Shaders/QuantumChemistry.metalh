@@ -1,0 +1,519 @@
+kernel void initializeQuantumField(
+    texture2d<float, access::write> quantumOut [[texture(0)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= quantumGridSize || gid.y >= quantumGridSize) { return; }
+
+    float2 uv = (float2(gid) + 0.5) / float(quantumGridSize);
+    float sigma = 0.065;
+    float2 leftCenter = float2(0.445, 0.5);
+    float2 rightCenter = float2(0.555, 0.5);
+    float leftPacket = exp(-dot(uv - leftCenter, uv - leftCenter) / (2.0 * sigma * sigma));
+    float rightPacket = exp(-dot(uv - rightCenter, uv - rightCenter) / (2.0 * sigma * sigma));
+    float normalization = 1.0 / (sqrt(2.0 * M_PI_F) * sigma * float(quantumGridSize));
+    float seedPhase = random01(hash32(uniforms.seed ^ 0x7f4a7c15u)) * 2.0 * M_PI_F;
+    float carrier = (uv.x * 31.0 + uv.y * 17.0) * M_PI_F + seedPhase;
+    float relativePhase = (uv.y - 0.5) * 22.0 * M_PI_F;
+    float2 leftAmplitude = leftPacket * float2(cos(carrier), sin(carrier));
+    float2 rightAmplitude = rightPacket * float2(
+        cos(carrier + relativePhase),
+        sin(carrier + relativePhase)
+    );
+    float2 superposition = (leftAmplitude + rightAmplitude) * normalization;
+    quantumOut.write(float4(superposition * 0.9238795, superposition * 0.3826834), gid);
+}
+
+kernel void prepareQuantumCoupling(
+    texture2d_array<float, access::read> basisA [[texture(0)]],
+    texture2d_array<float, access::read> basisB [[texture(1)]],
+    texture2d_array<float, access::read> material [[texture(2)]],
+    texture2d<float, access::write> coupling [[texture(3)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) { return; }
+    float4 localA = basisA.read(gid, 0);
+    float4 localB = basisB.read(gid, 0);
+    float4 localMaterial = material.read(gid, 0);
+    float theta = 0.18 + 0.12 * saturate(localMaterial.x) +
+        0.08 * saturate(localMaterial.z) + 0.04 * saturate(localA.w);
+    float potential = 0.012 * (
+        localA.x + localA.y * 0.8 + localA.z * 0.6 + localA.w * 1.1 +
+        localB.x * 0.9 + localB.y * 0.7 + localB.z * 1.2 +
+        localB.w * 2.4 + localMaterial.x * 0.5
+    );
+    coupling.write(float4(cos(theta), sin(theta), cos(potential), sin(potential)), gid);
+}
+
+kernel void evolveQuantumField(
+    texture2d<float, access::read> quantumIn [[texture(0)]],
+    texture2d<float, access::read> coupling [[texture(1)]],
+    texture2d<float, access::write> quantumOut [[texture(2)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    constant uint& quantumStep [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= quantumGridSize || gid.y >= quantumGridSize) { return; }
+
+    uint2 direction = (quantumStep & 1u) == 0u ? uint2(1, 0) : uint2(0, 1);
+    uint2 quantumMask = uint2(quantumGridSize - 1u);
+    uint2 sourceA = (gid - direction) & quantumMask;
+    uint2 sourceB = (gid + direction) & quantumMask;
+    uint2 biologicalSize = uint2(uniforms.width, uniforms.height);
+    uint2 biologicalMax = biologicalSize - 1u;
+    uint2 bioA = min(
+        sourceA * biologicalSize / quantumGridSize,
+        biologicalMax
+    );
+    uint2 bioB = min(
+        sourceB * biologicalSize / quantumGridSize,
+        biologicalMax
+    );
+    float4 couplingA = coupling.read(bioA);
+    float4 couplingB = coupling.read(bioB);
+    float4 coinA = quantumCoinPrepared(quantumIn.read(sourceA), couplingA.xy);
+    float4 coinB = quantumCoinPrepared(quantumIn.read(sourceB), couplingB.xy);
+    float4 shifted = float4(coinA.xy, coinB.zw);
+
+    uint2 bio = min(
+        gid * biologicalSize / quantumGridSize,
+        biologicalMax
+    );
+    float2 phase = coupling.read(bio).zw;
+    float phaseCosine = phase.x;
+    float phaseSine = phase.y;
+    shifted = float4(
+        phaseCosine * shifted.x + phaseSine * shifted.y,
+        phaseCosine * shifted.y - phaseSine * shifted.x,
+        phaseCosine * shifted.z + phaseSine * shifted.w,
+        phaseCosine * shifted.w - phaseSine * shifted.z
+    );
+    quantumOut.write(shifted, gid);
+}
+
+kernel void measureQuantumField(
+    texture2d<float, access::read> quantum [[texture(0)]],
+    device atomic_uint* norm [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= quantumGridSize || gid.y >= quantumGridSize) { return; }
+    float4 wave = quantum.read(gid);
+    float probability = dot(wave.xy, wave.xy) + dot(wave.zw, wave.zw);
+    uint fixedProbability = uint(min(max(probability, 0.0) * 1000000000.0, 1000000.0));
+    atomic_fetch_add_explicit(norm, fixedProbability, memory_order_relaxed);
+}
+
+inline float4 geologyAt(float2 uv, uint geologicalEpoch) {
+    float epoch = float(geologicalEpoch % 97u);
+    float nutrientDeposit = 0.0;
+    float mineralDeposit = 0.0;
+    float toxicVent = 0.0;
+    float rock = 0.0;
+    for (uint objectIndex = 0; objectIndex < 30u; ++objectIndex) {
+        float index = float(objectIndex + 1u);
+        float2 center = fract(float2(
+            index * 0.61803398875 + epoch * 0.071,
+            index * 0.41421356237 + epoch * 0.113
+        ));
+        float radius = 0.032 + 0.034 * (0.5 + 0.5 * sin(index * 2.39996323 + epoch));
+        float distance = length(toroidalDelta(uv, center));
+        float influence = 1.0 - smoothstep(radius * 0.44, radius, distance);
+        uint objectType = objectIndex % 6u;
+        if (objectType == 0u) {
+            nutrientDeposit = max(nutrientDeposit, influence);
+            mineralDeposit = max(mineralDeposit, influence * 0.78);
+        } else if (objectType == 1u || objectType == 2u) {
+            nutrientDeposit = max(nutrientDeposit, influence);
+        } else if (objectType == 3u) {
+            mineralDeposit = max(mineralDeposit, influence);
+        } else if (objectType == 4u) {
+            mineralDeposit = max(mineralDeposit, influence * 0.64);
+            toxicVent = max(toxicVent, influence);
+        } else {
+            rock = max(rock, influence);
+        }
+    }
+
+    // Continuous strata connect the existing local deposits into ridges,
+    // channels, pockets, and broad transition zones without biome labels.
+    float warp = sin(2.0 * M_PI_F * (
+        uv.x * 1.17 - uv.y * 0.83 + epoch * 0.0061
+    )) * 0.18;
+    float ridgeCarrier = sin(2.0 * M_PI_F * (
+        uv.x * 2.15 + uv.y * 1.31 + warp + epoch * 0.0037
+    ));
+    float channelCarrier = sin(2.0 * M_PI_F * (
+        uv.x * 1.42 - uv.y * 2.24 + warp * 0.61 - epoch * 0.0049
+    ));
+    float pocketCarrier = 0.5 + 0.5 * sin(2.0 * M_PI_F * (
+        uv.x * 0.73 + uv.y * 0.91 + epoch * 0.0023
+    ));
+    float ridge = smoothstep(0.78, 0.98, abs(ridgeCarrier));
+    float channel = 1.0 - smoothstep(0.055, 0.30, abs(channelCarrier));
+    float softPocket = smoothstep(0.30, 0.82, pocketCarrier) * (1.0 - ridge);
+    nutrientDeposit = max(
+        nutrientDeposit,
+        channel * (0.24 + softPocket * 0.58) * (1.0 - ridge * 0.42)
+    );
+    mineralDeposit = max(
+        mineralDeposit,
+        ridge * (0.34 + (1.0 - softPocket) * 0.46)
+    );
+    toxicVent = max(
+        toxicVent,
+        ridge * channel * (0.16 + (1.0 - softPocket) * 0.30)
+    );
+    rock = max(rock, ridge * ridge * (0.44 + (1.0 - channel) * 0.34));
+
+    float centralDeposit = exp(-dot(uv - 0.5, uv - 0.5) / 0.0018);
+    nutrientDeposit = max(nutrientDeposit, centralDeposit * 0.88);
+    mineralDeposit = max(mineralDeposit, centralDeposit * 0.62);
+    toxicVent *= 1.0 - centralDeposit;
+    rock *= (1.0 - centralDeposit) * (1.0 - saturate(max(nutrientDeposit, mineralDeposit) * 0.82));
+    return saturate(float4(nutrientDeposit, mineralDeposit, toxicVent, rock));
+}
+
+inline float2 environmentalDisturbanceCenter(uint eventEpoch) {
+    float eventIndex = float(eventEpoch + 1u);
+    return fract(float2(
+        sin(eventIndex * 12.9898 + 0.37),
+        sin(eventIndex * 78.233 + 1.91)
+    ) * 43758.5453);
+}
+
+inline float environmentalDisturbance(float2 uv, uint step) {
+    if (step < 24000u) { return 0.0; }
+    uint eventTime = step - 24000u;
+    uint eventPhase = eventTime % 48000u;
+    if (eventPhase >= 1200u) { return 0.0; }
+    uint eventEpoch = eventTime / 48000u;
+    float distance = length(toroidalDelta(
+        uv, environmentalDisturbanceCenter(eventEpoch)
+    ));
+    float spatialEnvelope = 1.0 - smoothstep(0.025, 0.080, distance);
+    float temporalEnvelope = sin(
+        M_PI_F * float(eventPhase) / 1200.0
+    );
+    return spatialEnvelope * temporalEnvelope * temporalEnvelope;
+}
+
+inline float environmentalPhase(float2 uv, float4 geology) {
+    float2 stratum = floor(uv * 29.0);
+    float stratumNoise = fract(
+        sin(dot(stratum + float2(geology.x, geology.y) * 7.0,
+            float2(12.9898, 78.233))) * 43758.5453
+    );
+    return fract(
+        stratumNoise * 0.47 + uv.x * 0.31 + uv.y * 0.23 +
+        dot(geology, float4(0.17, 0.29, 0.41, 0.11))
+    );
+}
+
+inline float environmentalFrequency(float2 uv, float4 geology) {
+    float spectralCoordinate = saturate(
+        0.08 + geology.x * 0.16 + geology.y * 0.42 +
+        geology.z * 0.62 + geology.w * 0.24 + environmentalPhase(uv, geology) * 0.28
+    );
+    return mix(0.0010, 0.0084, spectralCoordinate);
+}
+
+inline float2 substrateForcing(float2 uv, float4 geology, uint step) {
+    float phase = environmentalPhase(uv, geology);
+    float frequency = environmentalFrequency(uv, geology);
+    float time = float(step);
+    float pulseA = 0.5 + 0.5 * sin(
+        2.0 * M_PI_F * (time * frequency * 0.43 + phase + uv.x * 1.7)
+    );
+    float pulseB = 0.5 + 0.5 * sin(
+        2.0 * M_PI_F * (time * frequency * 0.61 + phase * 1.37 - uv.y * 1.9)
+    );
+    float envelopeA = smoothstep(0.18, 0.82, 0.5 + 0.5 * sin(
+        2.0 * M_PI_F * (time * frequency * 0.071 + phase * 0.61)
+    ));
+    float envelopeB = smoothstep(0.16, 0.84, 0.5 + 0.5 * sin(
+        2.0 * M_PI_F * (time * frequency * 0.053 + phase * 0.83 + 0.31)
+    ));
+    float2 burst = pow(float2(pulseA, pulseB), float2(1.45)) *
+        mix(float2(0.20), float2(1.0), float2(envelopeA, envelopeB));
+    float2 season = 0.70 + 0.30 * float2(
+        sin(2.0 * M_PI_F * (time / 24000.0 + phase)),
+        sin(2.0 * M_PI_F * (time / 24000.0 + phase + 0.43))
+    );
+    float disturbance = environmentalDisturbance(uv, step);
+    return (0.045 + 0.955 * burst) * season * mix(1.0, 0.64, disturbance);
+}
+
+inline float environmentalMechanicalAmplitude(float4 geology) {
+    float source = saturate(
+        geology.y * 0.48 + geology.z * 0.92 + geology.w * 0.20 * (1.0 - geology.x)
+    );
+    return 0.000004 + source * 0.00017;
+}
+
+inline float2 environmentalMechanicalDrive(
+    float2 uv,
+    float4 geology,
+    uint step
+) {
+    float phase = environmentalPhase(uv, geology);
+    float frequency = environmentalFrequency(uv, geology);
+    float angle = 2.0 * M_PI_F * fract(phase + geology.z * 0.23 + geology.w * 0.11);
+    float2 direction = float2(cos(angle), sin(angle));
+    float carrier = sin(2.0 * M_PI_F * (float(step) * frequency + phase));
+    float envelope = 0.58 + 0.42 * sin(
+        2.0 * M_PI_F * (float(step) * frequency * 0.13 + phase * 0.73)
+    );
+    float disturbance = environmentalDisturbance(uv, step);
+    uint eventEpoch = step >= 24000u ? (step - 24000u) / 48000u : 0u;
+    float2 eventDelta = toroidalDelta(
+        uv, environmentalDisturbanceCenter(eventEpoch)
+    );
+    float2 eventDirection = length(eventDelta) > 0.000001
+        ? normalize(float2(-eventDelta.y, eventDelta.x) + eventDelta * 0.36)
+        : direction;
+    return direction * carrier * envelope * environmentalMechanicalAmplitude(geology) +
+        eventDirection * disturbance * 0.00012;
+}
+
+kernel void initializeWorld(
+    texture2d_array<float, access::write> stateOut [[texture(0)]],
+    texture2d_array<float, access::write> ecologyOut [[texture(1)]],
+    texture2d_array<float, access::write> eventOut [[texture(2)]],
+    texture2d_array<float, access::write> environmentOut [[texture(3)]],
+    texture2d_array<float, access::write> developmentalOut [[texture(4)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
+
+    float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
+    float4 geology = geologyAt(uv, uniforms.seed ^ gid.z * 13u);
+    float4 basisA = float4(
+        0.045 + geology.x * 0.88,
+        0.032 + geology.y * 0.72,
+        0.024 + (1.0 - geology.z) * 0.64,
+        0.012 + geology.x * geology.y * 0.42
+    );
+    float4 basisB = float4(
+        0.010 + geology.y * 0.34,
+        0.008 + geology.z * 0.24,
+        0.020 + geology.w * 0.78,
+        0.012 + geology.x * (1.0 - geology.w) * 0.055
+    );
+
+    stateOut.write(basisA, gid.xy, gid.z);
+    ecologyOut.write(basisB, gid.xy, gid.z);
+    eventOut.write(float4(0.0), gid.xy, gid.z);
+    environmentOut.write(float4(
+        geology.x,
+        saturate(geology.w * 0.82 + geology.y * 0.18),
+        saturate(0.18 + geology.y * 0.68),
+        saturate(0.20 + geology.z * 0.62)
+    ), gid.xy, gid.z);
+    developmentalOut.write(float4(0.04, 0.94, 0.01, 0.0), gid.xy, gid.z);
+}
+
+kernel void expandWorld(
+    texture2d_array<float, access::read> stateIn [[texture(0)]],
+    texture2d_array<float, access::read> ecologyIn [[texture(1)]],
+    texture2d_array<float, access::read> eventIn [[texture(2)]],
+    texture2d_array<float, access::write> stateOut [[texture(3)]],
+    texture2d_array<float, access::write> ecologyOut [[texture(4)]],
+    texture2d_array<float, access::write> eventOut [[texture(5)]],
+    texture2d_array<float, access::read> environmentIn [[texture(6)]],
+    texture2d_array<float, access::write> environmentOut [[texture(7)]],
+    texture2d_array<float, access::read> developmentalIn [[texture(8)]],
+    texture2d_array<float, access::write> developmentalOut [[texture(9)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    constant uint& expansionLevel [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
+
+    float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
+    bool containsPreviousWorld = all(uv >= float2(0.25)) && all(uv < float2(0.75));
+    if (containsPreviousWorld) {
+        float2 oldUV = (uv - 0.25) * 2.0;
+        uint2 source = min(
+            uint2(oldUV * float2(uniforms.width, uniforms.height)),
+            uint2(uniforms.width - 1u, uniforms.height - 1u)
+        );
+        stateOut.write(stateIn.read(source, gid.z), gid.xy, gid.z);
+        ecologyOut.write(ecologyIn.read(source, gid.z), gid.xy, gid.z);
+        eventOut.write(eventIn.read(source, gid.z) * 0.72, gid.xy, gid.z);
+        environmentOut.write(environmentIn.read(source, gid.z), gid.xy, gid.z);
+        developmentalOut.write(
+            developmentalIn.read(source, gid.z) * float4(0.82, 0.82, 0.94, 0.76),
+            gid.xy, gid.z
+        );
+        return;
+    }
+
+    float4 geology = geologyAt(
+        uv, uniforms.seed ^ expansionLevel * 17u ^ gid.z * 13u
+    );
+    float4 basisA = float4(
+        0.045 + geology.x * 0.88,
+        0.032 + geology.y * 0.72,
+        0.024 + (1.0 - geology.z) * 0.64,
+        0.012 + geology.x * geology.y * 0.42
+    );
+    float4 basisB = float4(
+        0.010 + geology.y * 0.34,
+        0.008 + geology.z * 0.24,
+        0.020 + geology.w * 0.78,
+        0.012 + geology.x * (1.0 - geology.w) * 0.055
+    );
+    stateOut.write(basisA, gid.xy, gid.z);
+    ecologyOut.write(basisB, gid.xy, gid.z);
+    eventOut.write(float4(0.0), gid.xy, gid.z);
+    environmentOut.write(float4(
+        geology.x,
+        saturate(geology.w * 0.82 + geology.y * 0.18),
+        saturate(0.18 + geology.y * 0.68),
+        saturate(0.20 + geology.z * 0.62)
+    ), gid.xy, gid.z);
+    developmentalOut.write(float4(0.04, 0.94, 0.01, 0.0), gid.xy, gid.z);
+}
+
+kernel void initializeMechanicalField(
+    texture2d_array<float, access::write> mechanicalOut [[texture(0)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
+    mechanicalOut.write(float4(0.0), gid.xy, gid.z);
+}
+
+kernel void expandMechanicalField(
+    texture2d_array<float, access::read> mechanicalIn [[texture(0)]],
+    texture2d_array<float, access::write> mechanicalOut [[texture(1)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
+    float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
+    bool containsPreviousWorld = all(uv >= float2(0.25)) && all(uv < float2(0.75));
+    if (!containsPreviousWorld) {
+        mechanicalOut.write(float4(0.0), gid.xy, gid.z);
+        return;
+    }
+    float2 oldUV = (uv - 0.25) * 2.0;
+    uint2 source = min(
+        uint2(oldUV * float2(uniforms.width, uniforms.height)),
+        uint2(uniforms.width - 1u, uniforms.height - 1u)
+    );
+    mechanicalOut.write(mechanicalIn.read(source, gid.z) * float4(0.5, 0.5, 0.5, 0.5), gid.xy, gid.z);
+}
+
+kernel void evolveMechanicalField(
+    texture2d_array<float, access::read> mechanicalIn [[texture(0)]],
+    texture2d_array<float, access::write> mechanicalOut [[texture(1)]],
+    texture2d_array<float, access::read> environment [[texture(2)]],
+    texture2d_array<float, access::read> developmentalField [[texture(3)]],
+    device atomic_int* forcing [[buffer(0)]],
+    constant SimulationUniforms& uniforms [[buffer(1)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
+    int2 p = int2(gid.xy);
+    int2 size = int2(uniforms.width, uniforms.height);
+    int2 cardinal[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+    float4 center = mechanicalIn.read(gid.xy, gid.z);
+    float2 displacementLaplacian = float2(0.0);
+    for (uint index = 0u; index < 4u; ++index) {
+        int2 neighbor = clamp(p + cardinal[index], int2(0), size - 1);
+        displacementLaplacian += mechanicalIn.read(uint2(neighbor), gid.z).xy - center.xy;
+    }
+
+    uint forceIndex = ((gid.z * uniforms.height + gid.y) * uniforms.width + gid.x) * 2u;
+    float2 activeForce = float2(
+        atomic_exchange_explicit(&forcing[forceIndex], 0, memory_order_relaxed),
+        atomic_exchange_explicit(&forcing[forceIndex + 1u], 0, memory_order_relaxed)
+    ) / float(mechanicalForceScale);
+    float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
+    float4 geology = environment.read(gid.xy, gid.z);
+    float4 extracellular = developmentalField.read(gid.xy, gid.z);
+    float obstacle = smoothstep(0.45, 0.88, geology.w);
+    float mineralSupport = smoothstep(0.18, 0.82, geology.y);
+    float matrixSupport = smoothstep(0.025, 0.42, extracellular.z);
+    float stiffness = clamp(
+        0.082 + obstacle * 0.036 + mineralSupport * 0.020 + matrixSupport * 0.026,
+        0.075, 0.158
+    );
+    float damping = clamp(
+        0.968 - obstacle * 0.120 - mineralSupport * 0.035 - matrixSupport * 0.055,
+        0.76, 0.97
+    );
+    float2 geologicalDrive = environmentalMechanicalDrive(uv, geology, uniforms.step);
+    float2 velocity = (
+        center.zw + displacementLaplacian * stiffness +
+        activeForce * mix(0.24, 0.31, matrixSupport) +
+        geologicalDrive
+    ) * damping;
+    float edgeDistance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    velocity *= mix(0.72, 1.0, smoothstep(0.0, 0.055, edgeDistance));
+    velocity = clamp(velocity, float2(-0.018), float2(0.018));
+    float2 displacement = clamp((center.xy + velocity) * 0.9975, float2(-0.070), float2(0.070));
+    mechanicalOut.write(float4(displacement, velocity), gid.xy, gid.z);
+}
+
+kernel void expandQuantumField(
+    texture2d<float, access::read> quantumIn [[texture(0)]],
+    texture2d<float, access::write> quantumOut [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= quantumGridSize || gid.y >= quantumGridSize) { return; }
+    bool containsPreviousWorld = gid.x >= quantumGridSize / 4u && gid.x < quantumGridSize * 3u / 4u &&
+        gid.y >= quantumGridSize / 4u && gid.y < quantumGridSize * 3u / 4u;
+    if (!containsPreviousWorld) {
+        quantumOut.write(float4(0.0), gid);
+        return;
+    }
+    uint2 source = min(
+        (gid - quantumGridSize / 4u) * 2u,
+        uint2(quantumGridSize - 1u)
+    );
+    quantumOut.write(quantumIn.read(source) * 2.0, gid);
+}
+
+inline float2 damageCenter(uint world, uint generation) {
+    uint seed = hash32(world * 0x9e3779b9u + generation * 0x85ebca6bu + 71u);
+    return float2(0.2 + 0.6 * random01(seed + 1u), 0.2 + 0.6 * random01(seed + 2u));
+}
+
+kernel void damageWorld(
+    texture2d_array<float, access::read_write> state [[texture(0)]],
+    texture2d_array<float, access::read_write> ecology [[texture(1)]],
+    texture2d_array<float, access::read_write> events [[texture(2)]],
+    texture2d_array<float, access::read_write> developmentalField [[texture(3)]],
+    constant SimulationUniforms& uniforms [[buffer(0)]],
+    uint3 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
+    float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
+    float radius = 0.065 + 0.025 * random01(hash32(gid.z + uniforms.generation * 31u));
+    float impact = 1.0 - smoothstep(
+        radius * 0.55, radius,
+        length(toroidalDelta(uv, damageCenter(gid.z, uniforms.generation)))
+    );
+    if (impact <= 0.0) { return; }
+    float4 value = state.read(gid.xy, gid.z);
+    float removed = value.y * impact * 0.82;
+    value.x = min(2.0, value.x + removed * 0.35);
+    value.y -= removed;
+    value.z *= 1.0 - impact * 0.85;
+    value.w *= 1.0 - impact;
+    float4 chemistry = ecology.read(gid.xy, gid.z);
+    chemistry.y = min(2.0, chemistry.y + removed * 0.88);
+    state.write(value, gid.xy, gid.z);
+    ecology.write(chemistry, gid.xy, gid.z);
+    float4 visibleEvents = events.read(gid.xy, gid.z);
+    visibleEvents.w = max(visibleEvents.w, saturate(impact));
+    events.write(visibleEvents, gid.xy, gid.z);
+    float4 extracellular = developmentalField.read(gid.xy, gid.z);
+    extracellular.z *= 1.0 - impact * 0.72;
+    extracellular.w = max(extracellular.w, impact);
+    developmentalField.write(extracellular, gid.xy, gid.z);
+}

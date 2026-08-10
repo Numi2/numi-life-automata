@@ -1,0 +1,1951 @@
+kernel void evolveOrganismCells(
+    device const AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device const CellState* cellsIn [[buffer(2)]],
+    device CellState* cellsOut [[buffer(3)]],
+    device atomic_uint* cellOccupancy [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device atomic_int* mechanicalForcing [[buffer(6)]],
+    device const ProgramExpressionCache* programExpressionCaches [[buffer(7)]],
+    device const GenomeHeader* genomeHeaders [[buffer(8)]],
+    device const GenomePage* genomePages [[buffer(9)]],
+    device float* regulatoryStates [[buffer(10)]],
+    device const ResonanceExpressionCache* resonanceExpressionCaches [[buffer(11)]],
+    device CellIdentity* cellIdentities [[buffer(12)]],
+    device const atomic_uint* ownerCellHeads [[buffer(13)]],
+    device const uint* ownerCellNext [[buffer(14)]],
+    device const ProgramLineageRecord* programLineageRecords [[buffer(15)]],
+    device float4* programInteractions [[buffer(16)]],
+    device const CellAggregate* cellAggregates [[buffer(17)]],
+    device ProgramSlotState* programSlots [[buffer(18)]],
+    device atomic_uint* identityCounters [[buffer(19)]],
+    device atomic_uint* cellEnergyExchange [[buffer(20)]],
+    device atomic_int* energyAudit [[buffer(21)]],
+    device CellJunctionState* cellJunctions [[buffer(22)]],
+    device atomic_uint* contactWorkState [[buffer(23)]],
+    device CellMemoryState* cellMemories [[buffer(24)]],
+    device CellCorpseState* cellCorpses [[buffer(25)]],
+    device const CellChemistrySettlement* chemistrySettlements [[buffer(26)]],
+    device const MoleculePacket* molecules [[buffer(27)]],
+    device const SpeciesDefinition* speciesRegistry [[buffer(28)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    texture2d_array<float, access::read> state [[texture(0)]],
+    texture2d_array<float, access::read> ecology [[texture(1)]],
+    texture2d_array<float, access::read> environment [[texture(2)]],
+    texture2d_array<float, access::read> events [[texture(3)]],
+    texture2d_array<float, access::read> mechanicalField [[texture(4)]],
+    texture2d_array<float, access::read> developmentalField [[texture(5)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount) { return; }
+    CellIdentity cellIdentity = cellIdentities[gid];
+    uint owner = cellIdentity.owner;
+    if (owner >= maxAgentCount) { return; }
+    if (atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) {
+        if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) ==
+            cellOccupancyAlive) {
+            CellState abandonedCell = cellsIn[gid];
+            float2 abandonedPosition = cellWorldPosition(
+                agents[owner], abandonedCell.position, uniforms
+            );
+            uint abandonedGenomeHash = cellIdentity.programIndex < maxGenomeHeaderCount
+                ? programLineageRecords[cellIdentity.programIndex].genomeHash : 0u;
+            invalidateCellJunctions(
+                cellJunctions, cellOccupancy, cellIdentities,
+                ownerCellHeads, ownerCellNext, owner, gid, emptySpatialHashEntry
+            );
+            releaseGenomeHeaderSlot(
+                programSlots, identityCounters,
+                cellIdentity.programIndex, cellIdentity.programGeneration
+            );
+            publishCellCorpse(
+                cellCorpses, gid, cellMemories[gid], abandonedPosition,
+                abandonedGenomeHash, abandonedCell.physiology.y,
+                abandonedCell.physiology.w, uniforms.step
+            );
+            atomic_store_explicit(
+                &cellOccupancy[gid], cellOccupancyCorpse, memory_order_relaxed
+            );
+            atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
+            cellIdentity.owner = maxAgentCount;
+            cellIdentity.programIndex = maxGenomeHeaderCount;
+            cellIdentity.componentRoot = emptySpatialHashEntry;
+            cellIdentity.programGeneration = 0u;
+            cellIdentities[gid] = cellIdentity;
+        }
+        return;
+    }
+    if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+        cellOccupancyAlive) {
+        return;
+    }
+
+    uint programIndex = cellIdentity.programIndex;
+    if (!programSlotMatches(programSlots, programIndex, cellIdentity.programGeneration)) {
+        CellState orphanedCell = cellsIn[gid];
+        float2 orphanedPosition = cellWorldPosition(
+            agents[owner], orphanedCell.position, uniforms
+        );
+        invalidateCellJunctions(
+            cellJunctions, cellOccupancy, cellIdentities,
+            ownerCellHeads, ownerCellNext, owner, gid, emptySpatialHashEntry
+        );
+        publishCellCorpse(
+            cellCorpses, gid, cellMemories[gid], orphanedPosition, 0u,
+            orphanedCell.physiology.y, orphanedCell.physiology.w, uniforms.step
+        );
+        atomic_store_explicit(
+            &cellOccupancy[gid], cellOccupancyCorpse, memory_order_relaxed
+        );
+        atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
+        cellIdentity.owner = maxAgentCount;
+        cellIdentity.programIndex = maxGenomeHeaderCount;
+        cellIdentity.componentRoot = emptySpatialHashEntry;
+        cellIdentity.programGeneration = 0u;
+        cellIdentities[gid] = cellIdentity;
+        return;
+    }
+    AgentState agent = agentWithCellProgram(
+        agents[owner], programIndex, programLineageRecords
+    );
+    CellState cell = cellsIn[gid];
+    float4 existingMembraneProperties = saturate(cell.membraneProperties);
+    float4 existingMembraneChemistry = saturate(cell.membraneChemistry);
+    float membraneThickness = existingMembraneProperties.x;
+    float membraneStiffness = existingMembraneProperties.y;
+    float membraneToughness = existingMembraneProperties.z;
+    float membraneAdhesion = existingMembraneProperties.w;
+    float membranePermeability = existingMembraneChemistry.x;
+    float membraneConductivity = existingMembraneChemistry.y;
+    float receptorDensity = existingMembraneChemistry.z;
+    float catalyticCoating = existingMembraneChemistry.w;
+    CellMemoryState embodiedMemory = cellMemories[gid];
+    ProgramExpressionCache development = programExpressionCaches[programIndex];
+    ResonanceExpressionCache resonanceExpression = resonanceExpressionCaches[programIndex];
+    float reproductiveDrive = reproductiveEndocrineDrive(
+        cell, development, agent
+    );
+    bool independentSexualFounder = cellIdentity.identityPadding2 != 0u &&
+        (agents[owner].componentFlags & componentSexualOffspringFlag) != 0u;
+    if (independentSexualFounder &&
+        agents[owner].componentPersistenceSteps > 96u) {
+        // Once the new body has persisted on its own, ordinary evolved adhesion
+        // resumes. The second-parent body ID remains in identityPadding1.
+        cellIdentity.identityPadding2 = 0u;
+        cellIdentities[gid] = cellIdentity;
+        independentSexualFounder = false;
+    }
+    float sexualNurture = sexualBudNurture(
+        cellIdentity, uniforms.step, development.mechanochemistryB.w
+    );
+    float sexualRelease = sexualBudRelease(
+        cellIdentity, uniforms.step, development.mechanochemistryB.w,
+        cell.physiology.x, cell.physiology.w
+    );
+    if (cellIdentity.identityPadding2 != 0u) {
+        sexualNurture = max(sexualNurture, 1.0 - sexualRelease);
+    }
+    // Reproductive positive valence is universal across programs and scales.
+    // Every viable cell feels rising completion as its own cytokinesis nears;
+    // exposed cells also feel an organism-level gradient as a viable propagule
+    // approaches physical release. Sexual proximity adds through contact below.
+    float reproductivePhysiology =
+        smoothstep(0.10, 0.40, cell.physiology.x) *
+        smoothstep(0.24, 0.70, cell.physiology.y) *
+        smoothstep(0.26, 0.72, cell.physiology.w) *
+        (1.0 - smoothstep(0.56, 0.82, cell.signals.z));
+    float cellularReproductivePleasure =
+        smoothstep(0.18, 1.0, cell.physiology.z) * reproductivePhysiology;
+    float organismReproductivePleasure =
+        smoothstep(0.08, 0.92, sexualRelease + cell.tissueGeometry.w) *
+        saturate(cell.tissueGeometry.z) * reproductivePhysiology;
+    float endogenousReproductivePleasure = saturate(max(
+        cellularReproductivePleasure, organismReproductivePleasure
+    ));
+    bool mixedProgramTissue = cellAggregates[owner].inheritance.y > 0.0001;
+    float preDetachmentProgram = saturate(
+        cell.tissueGeometry.z * cell.regulationB.w * development.mechanochemistryB.w *
+        mix(1.16, 0.28, cell.phenotype.x)
+    );
+    float detachmentRelease = saturate(
+        cell.tissueGeometry.w + preDetachmentProgram * 0.56 + sexualRelease * 0.94
+    ) * (1.0 - sexualNurture);
+    // The component origin is a coordinate frame, not a biological attractor.
+    // Cohesion is supplied by explicit membrane contacts and persistent junctions.
+    float2 mechanicalForce = float2(0.0);
+    float2 morphogenFlux = float2(0.0);
+    float2 morphogenGradient = float2(0.0);
+    float junctionConductance = 0.0;
+    float junctionMaterialDemand = 0.0;
+    float junctionStrainMemory = 0.0;
+    float junctionPolarityAlignment = 0.0;
+    float neighborIntegument = 0.0;
+    float integumentTransmission = 0.0;
+    float2 nearestContact = float2(0.0);
+    float nearestDistance = 10.0;
+    float contactCount = 0.0;
+    float neighborVoltage = 0.0;
+    float phaseCoupling = 0.0;
+    float2 phaseVector = float2(0.0);
+    float neighborCalcium = 0.0;
+    float neighborERK = 0.0;
+    float2 erkGradient = float2(0.0);
+    float sharingContactWeight = 0.0;
+    float mixedContactWeight = 0.0;
+    float atpSharingPotential = 0.0;
+    float incomingRejectionTotal = 0.0;
+    float outgoingRejectionTotal = 0.0;
+    float receptorChemistryCompatibilityTotal = 0.0;
+    float cellJunctionRepairUrgency = cellularRepairUrgency(
+        cell.physiology.w,
+        cell.signals.z,
+        0.0,
+        saturate(cell.tissueForce.z * 520.0)
+    );
+    float cellSupportPotential = repairAdjustedATPPotential(
+        cell.physiology.x, cellJunctionRepairUrgency
+    );
+    uint otherIndex = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
+    while (otherIndex != emptySpatialHashEntry) {
+        uint nextIndex = ownerCellNext[otherIndex];
+        if (otherIndex == gid ||
+            atomic_load_explicit(&cellOccupancy[otherIndex], memory_order_relaxed) !=
+                cellOccupancyAlive) {
+            otherIndex = nextIndex;
+            continue;
+        }
+        CellState other = cellsIn[otherIndex];
+        float2 delta = other.position - cell.position;
+        float distance = max(length(delta), 0.0001);
+        float2 direction = delta / distance;
+        if (distance < 0.58) {
+            float weight = 1.0 - distance / 0.58;
+            uint pairKey = cellPairKey(gid, otherIndex);
+            uint fingerprint = cellPairFingerprint(cellIdentities, gid, otherIndex);
+            uint junctionIndex = findCellJunction(cellJunctions, pairKey, fingerprint);
+            if (junctionIndex < cellJunctionCapacity) {
+                uint lastSeen = atomic_load_explicit(
+                    &cellJunctions[junctionIndex].lastSeenStep, memory_order_relaxed
+                );
+                bool recent = uniforms.step >= lastSeen && uniforms.step - lastSeen <= 2u;
+                if (recent) {
+                    float junctionReadiness = smoothstep(
+                        2.0, 36.0, cellJunctions[junctionIndex].age
+                    );
+                    float integrityGate = min(cell.physiology.w, other.physiology.w);
+                    float loadGate = 1.0 / (
+                        1.0 + max(cellJunctions[junctionIndex].load, 0.0) * 18.0
+                    );
+                    float4 junctionMaterial = max(
+                        cellJunctions[junctionIndex].material, float4(0.0)
+                    );
+                    float conductance = max(
+                        cellJunctions[junctionIndex].strength, 0.0
+                    ) * junctionMaterial.z * junctionReadiness * integrityGate * loadGate * weight;
+                    float2 difference = other.signals.xy - cell.signals.xy;
+                    float2 transportedDifference = difference *
+                        development.morphogenTransport.zw;
+                    morphogenFlux += transportedDifference * conductance;
+                    float receptorDifference =
+                        difference.x * development.morphogenTransport.x -
+                        difference.y * development.morphogenTransport.y;
+                    morphogenGradient += direction * receptorDifference * conductance;
+                    junctionConductance += conductance;
+                    junctionMaterialDemand += junctionReadiness * weight * (
+                        junctionMaterial.x * 0.30 + junctionMaterial.z * 0.24 +
+                        junctionMaterial.w * 0.20
+                    );
+                    junctionStrainMemory += abs(
+                        cellJunctions[junctionIndex].remodeling.y
+                    ) * weight;
+                    junctionPolarityAlignment +=
+                        cellJunctions[junctionIndex].remodeling.w * weight;
+                    neighborIntegument += max(
+                        other.boundaryDynamics.x,
+                        other.boundaryDynamics.y
+                    ) * conductance;
+                    integumentTransmission += conductance;
+                    uint transportProgramIndex = cellIdentities[otherIndex].programIndex;
+                    AgentState transportProgram = agent;
+                    float transportCompatibility = 1.0;
+                    if (transportProgramIndex < maxGenomeHeaderCount &&
+                        transportProgramIndex != programIndex) {
+                        transportProgram = agentWithCellProgram(
+                            agents[owner], transportProgramIndex, programLineageRecords
+                        );
+                        transportCompatibility = receptorChemistryCompatibility(
+                            agent, transportProgram
+                        );
+                    }
+                    float sharingGain = min(agent.junctionChemistry.y, transportProgram.junctionChemistry.y) *
+                        transportCompatibility;
+                    float otherRepairUrgency = cellularRepairUrgency(
+                        other.physiology.w,
+                        other.signals.z,
+                        0.0,
+                        saturate(other.tissueForce.z * 520.0)
+                    );
+                    float otherSupportPotential = repairAdjustedATPPotential(
+                        other.physiology.x, otherRepairUrgency
+                    );
+                    atpSharingPotential +=
+                        (otherSupportPotential - cellSupportPotential) *
+                            sharingGain * conductance;
+                    sharingContactWeight += conductance;
+                }
+            }
+            neighborVoltage += other.dynamics.x * weight;
+            float otherAngle = other.dynamics.z * 2.0 * M_PI_F;
+            phaseVector += float2(cos(otherAngle), sin(otherAngle)) * weight;
+            neighborCalcium += other.signaling.x * weight;
+            neighborERK += other.signaling.y * weight;
+            erkGradient += direction * (other.signaling.y - cell.signaling.y) * weight;
+            float senderInfluence = 0.52 + other.phenotype.y * 0.72;
+            float receiverSusceptibility = 0.48 + cell.phenotype.x * 0.62;
+            float directedPhaseLag = (other.signals.y - cell.signals.y) * 0.52 +
+                (other.phenotype.z - cell.phenotype.z) * 0.24;
+            phaseCoupling += sin(
+                (other.dynamics.z - cell.dynamics.z) * 2.0 * M_PI_F - directedPhaseLag
+            ) * weight * senderInfluence * receiverSusceptibility;
+            uint otherProgramIndex = mixedProgramTissue
+                ? cellIdentities[otherIndex].programIndex : programIndex;
+            if (otherProgramIndex < maxGenomeHeaderCount && otherProgramIndex != programIndex) {
+                AgentState otherProgram = agentWithCellProgram(
+                    agents[owner], otherProgramIndex, programLineageRecords
+                );
+                float compatibility = receptorChemistryCompatibility(agent, otherProgram);
+                float incompatibility = 1.0 - compatibility;
+                incomingRejectionTotal += otherProgram.junctionChemistry.z * incompatibility * weight;
+                outgoingRejectionTotal += agent.junctionChemistry.z * incompatibility * weight;
+                receptorChemistryCompatibilityTotal += compatibility * weight;
+                mixedContactWeight += weight;
+            }
+            contactCount += weight;
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestContact = direction;
+            }
+        }
+        otherIndex = nextIndex;
+    }
+
+    float inverseMixedContactWeight = 1.0 / max(mixedContactWeight, 0.0001);
+    float atpSharingFlux = sharingContactWeight > 0.0001
+        ? clamp(atpSharingPotential / sharingContactWeight * 0.00034, -0.0014, 0.0014)
+        : 0.0;
+    float incomingRejection = mixedContactWeight > 0.0001
+        ? saturate(incomingRejectionTotal * inverseMixedContactWeight) : 0.0;
+    float outgoingRejection = mixedContactWeight > 0.0001
+        ? saturate(outgoingRejectionTotal * inverseMixedContactWeight) : 0.0;
+    float meanReceptorChemistryCompatibility = mixedContactWeight > 0.0001
+        ? saturate(receptorChemistryCompatibilityTotal * inverseMixedContactWeight) : -1.0;
+    float transmittedIntegument = integumentTransmission > 0.0001
+        ? saturate(neighborIntegument / integumentTransmission) : 0.0;
+
+    float2 heading = tissueHeading(agent);
+    float2 lateral = float2(-heading.y, heading.x);
+    float2 worldPosition = clamp(
+        cellWorldPosition(agent, cell.position, uniforms),
+        float2(0.0), float2(1.0)
+    );
+    uint2 coordinate = min(
+        uint2(worldPosition * float2(uniforms.width, uniforms.height)),
+        uint2(uniforms.width - 1u, uniforms.height - 1u)
+    );
+    float4 localState = state.read(coordinate, 0);
+    float4 localEcology = ecology.read(coordinate, 0);
+    float4 localEnvironment = environment.read(coordinate, 0);
+    float4 localEvents = events.read(coordinate, 0);
+    float4 localMechanical = mechanicalField.read(coordinate, 0);
+    float4 localDevelopmentalField = developmentalField.read(coordinate, 0);
+    uint chemistryTile = coordinate.y * uniforms.width + coordinate.x;
+    float reactiveMolecularLoad = 0.0;
+    float counterReactiveCapacity = 0.0;
+    for (uint moleculeSlot = 0u; moleculeSlot < moleculeSlotsPerTile; ++moleculeSlot) {
+        MoleculePacket packet = molecules[
+            chemistryTile * moleculeSlotsPerTile + moleculeSlot
+        ];
+        if (packet.speciesID == 0u || packet.speciesID >= speciesRegistryCapacity) {
+            continue;
+        }
+        SpeciesDefinition species = speciesRegistry[packet.speciesID];
+        float membraneAccess = species.behavior.y *
+            (0.35 + species.physical.w * 0.65);
+        float reactionPressure = packet.amount * membraneAccess *
+            (0.20 + packet.freeEnergy * 5.0);
+        bool catalyticCountermeasure =
+            (species.flags & moleculeFlagCatalytic) != 0u && species.physical.z > 0.0;
+        if (catalyticCountermeasure) {
+            counterReactiveCapacity += reactionPressure * species.behavior.z;
+        } else if (species.physical.z < -0.20 || species.behavior.y > 0.90) {
+            reactiveMolecularLoad += reactionPressure;
+        }
+    }
+    reactiveMolecularLoad = saturate(
+        reactiveMolecularLoad * 16.0 - counterReactiveCapacity * 9.0
+    );
+    uint2 coordinateLeft = uint2(max(int(coordinate.x) - 1, 0), coordinate.y);
+    uint2 coordinateRight = uint2(min(coordinate.x + 1u, uniforms.width - 1u), coordinate.y);
+    uint2 coordinateDown = uint2(coordinate.x, max(int(coordinate.y) - 1, 0));
+    uint2 coordinateUp = uint2(coordinate.x, min(coordinate.y + 1u, uniforms.height - 1u));
+    float2 nutrientGradientWorld = float2(
+        state.read(coordinateRight, 0).x - state.read(coordinateLeft, 0).x,
+        state.read(coordinateUp, 0).x - state.read(coordinateDown, 0).x
+    );
+    float2 mineralGradientWorld = float2(
+        ecology.read(coordinateRight, 0).x - ecology.read(coordinateLeft, 0).x,
+        ecology.read(coordinateUp, 0).x - ecology.read(coordinateDown, 0).x
+    );
+    float2 secondaryFeedstockGradientWorld = float2(
+        ecology.read(coordinateRight, 0).y - ecology.read(coordinateLeft, 0).y,
+        ecology.read(coordinateUp, 0).y - ecology.read(coordinateDown, 0).y
+    );
+    float2 dangerGradientWorld = float2(
+        environment.read(coordinateRight, 0).z + environment.read(coordinateRight, 0).w -
+            environment.read(coordinateLeft, 0).z - environment.read(coordinateLeft, 0).w,
+        environment.read(coordinateUp, 0).z + environment.read(coordinateUp, 0).w -
+            environment.read(coordinateDown, 0).z - environment.read(coordinateDown, 0).w
+    );
+    float2 rockGradientWorld = float2(
+        environment.read(coordinateRight, 0).w - environment.read(coordinateLeft, 0).w,
+        environment.read(coordinateUp, 0).w - environment.read(coordinateDown, 0).w
+    );
+    float2 extracellularLigandGradientWorld = float2(
+        (developmentalField.read(coordinateRight, 0).x -
+            developmentalField.read(coordinateLeft, 0).x) *
+                development.morphogenTransport.x -
+            (developmentalField.read(coordinateRight, 0).y -
+                developmentalField.read(coordinateLeft, 0).y) *
+                development.morphogenTransport.y,
+        (developmentalField.read(coordinateUp, 0).x -
+            developmentalField.read(coordinateDown, 0).x) *
+                development.morphogenTransport.x -
+            (developmentalField.read(coordinateUp, 0).y -
+                developmentalField.read(coordinateDown, 0).y) *
+                development.morphogenTransport.y
+    );
+    morphogenGradient += rotateWorldToTissue(
+        extracellularLigandGradientWorld, agent
+    ) * (0.42 + cell.tissueGeometry.z * 0.58);
+    float barrierLoad = smoothstep(0.30, 0.82, localEnvironment.w) *
+        saturate(uniforms.intervention.y);
+    float2 barrierNormalWorld = length(rockGradientWorld) > 0.00001
+        ? -normalize(rockGradientWorld)
+        : -normalize(agent.velocity + heading * 0.000001);
+    float2 barrierForceLocal = rotateWorldToTissue(
+        barrierNormalWorld * barrierLoad *
+            (0.000060 + saturate(length(agent.velocity) * 720.0) * 0.000115),
+        agent
+    );
+    float2 localSubstrateForcing = substrateForcing(
+        worldPosition, localEnvironment, uniforms.step
+    );
+    float localEnvironmentalFrequency = environmentalFrequency(
+        worldPosition, localEnvironment
+    );
+    float environmentalDrive = environmentalMechanicalAmplitude(localEnvironment);
+    float2 ecologicalGradientLocal = rotateWorldToTissue(
+        nutrientGradientWorld * agent.transportExpression.x + mineralGradientWorld * agent.transportExpression.y +
+            secondaryFeedstockGradientWorld * agent.transportExpression.z -
+            dangerGradientWorld * (0.72 + agent.metabolicExpression.w * 1.18),
+        agent
+    );
+    float2 displacementX = mechanicalField.read(coordinateRight, 0).xy -
+        mechanicalField.read(coordinateLeft, 0).xy;
+    float2 displacementY = mechanicalField.read(coordinateUp, 0).xy -
+        mechanicalField.read(coordinateDown, 0).xy;
+    float fieldStrain = saturate((length(displacementX) + length(displacementY)) * 18.0);
+    float fieldWaveSpeed = saturate(length(localMechanical.zw) * 85.0);
+    // The cue is a compressed physical context. Matrix and catalyticMolecule therefore
+    // act as durable external traces without becoming a new memory texture.
+    float embodiedCue = clamp(
+        (localState.x - reactiveMolecularLoad) * 0.58 +
+        (counterReactiveCapacity - reactiveMolecularLoad) * 0.34 +
+        (localDevelopmentalField.z - localDevelopmentalField.w) * 0.32 +
+        fieldStrain * 0.22 +
+        clamp((localEnvironmentalFrequency - cell.dynamics.w) * 90.0, -0.20, 0.20),
+        -1.0, 1.0
+    );
+    float embodiedReplay = recallEmbodiedAction(embodiedMemory, embodiedCue);
+    // This is acquired state, not a genome edit. The inherited program controls
+    // how strongly neural-like cells predict, habituate, and reuse experience.
+    float previousPrediction = clamp(cell.learning.x, -1.0, 1.0);
+    float predictionError = clamp(embodiedCue - previousPrediction, -1.0, 1.0);
+    float previousHabituation = saturate(cell.learning.z);
+    float inheritedNeuralCompetence = saturate(
+        cell.functionalActivity.z * development.plasticityControl.x
+    );
+    float learningEnergy = smoothstep(0.10, 0.42, cell.physiology.x) *
+        smoothstep(0.30, 0.74, cell.physiology.w);
+    float acquiredLearningRate = clamp(
+        development.plasticityControl.y * inheritedNeuralCompetence *
+            learningEnergy * (1.0 - previousHabituation) * 0.020,
+        0.0, 0.035
+    );
+    float cuePrediction = mix(
+        previousPrediction, embodiedCue, acquiredLearningRate
+    );
+    float habituationTarget = 1.0 - smoothstep(0.035, 0.42, abs(predictionError));
+    float habituation = clamp(
+        mix(
+            previousHabituation, habituationTarget,
+            0.0012 + development.plasticityControl.z * inheritedNeuralCompetence * 0.006
+        ),
+        0.0, 1.0
+    );
+    float acquiredBehavior = clamp(
+        cell.learning.w * (0.9992 - habituation * 0.0003) +
+            acquiredLearningRate * (embodiedReplay - cell.learning.w) +
+            predictionError * inheritedNeuralCompetence * 0.0008,
+        -1.0, 1.0
+    );
+
+    float oldVoltage = cell.dynamics.x;
+    float recovery = cell.dynamics.y;
+    float meanNeighborVoltage = contactCount > 0.001 ? neighborVoltage / contactCount : oldVoltage;
+    float gapCoupling = (meanNeighborVoltage - oldVoltage) * (0.10 + cell.phenotype.x * 0.16);
+    float phaseDrive = sin(cell.dynamics.z * 2.0 * M_PI_F);
+    float directionalInput = dot(localMechanical.zw, heading) * resonanceExpression.tuning.w;
+    float strainInput = fieldStrain + directionalInput * 4.2;
+    float strainVelocity = clamp((strainInput - cell.resonance.w) * 18.0, -1.0, 1.0);
+    float naturalFrequency = clamp(cell.dynamics.w, 0.0008, 0.0090);
+    float angularFrequency = 2.0 * M_PI_F * naturalFrequency * 6.0;
+    float resonatorDisplacement = cell.resonance.x;
+    float resonatorVelocity = cell.resonance.y;
+    float resonatorAcceleration = resonanceExpression.mechanics.z * strainVelocity +
+        embodiedReplay * 0.0028 + acquiredBehavior * inheritedNeuralCompetence * 0.0018 -
+        2.0 * resonanceExpression.mechanics.y * angularFrequency * resonatorVelocity -
+        angularFrequency * angularFrequency * resonatorDisplacement;
+    resonatorVelocity = clamp(resonatorVelocity + resonatorAcceleration * 0.055, -0.18, 0.18);
+    resonatorDisplacement = clamp(resonatorDisplacement + resonatorVelocity, -0.42, 0.42);
+    float resonantAmplitude = mix(
+        cell.resonance.z,
+        abs(resonatorVelocity) + abs(resonatorDisplacement) * angularFrequency,
+        0.075
+    );
+    float responseThreshold = resonanceExpression.mechanics.w;
+    float resonantResponse = sign(resonatorDisplacement) * smoothstep(
+        responseThreshold,
+        responseThreshold + max(resonanceExpression.tuning.x, 0.0004) * 18.0,
+        resonantAmplitude
+    );
+    naturalFrequency = clamp(
+        naturalFrequency * (1.0 + resonanceExpression.tuning.y * strainVelocity *
+            sign(resonatorVelocity) * 0.12),
+        max(resonanceExpression.mechanics.x - resonanceExpression.tuning.x, 0.0008),
+        min(resonanceExpression.mechanics.x + resonanceExpression.tuning.x, 0.0090)
+    );
+    float tuningBandwidth = max(resonanceExpression.tuning.x, 0.0004);
+    float frequencyMismatch = abs(naturalFrequency - localEnvironmentalFrequency);
+    float frequencyMatch = 1.0 - smoothstep(
+        tuningBandwidth, tuningBandwidth * 2.5, frequencyMismatch
+    );
+    float meanNeighborCalcium = contactCount > 0.001
+        ? neighborCalcium / contactCount
+        : cell.signaling.x;
+    float meanNeighborERK = contactCount > 0.001
+        ? neighborERK / contactCount
+        : cell.signaling.y;
+    float previousCalcium = saturate(cell.signaling.x);
+    float previousERK = saturate(cell.signaling.y);
+    float previousRefractory = saturate(cell.signaling.z);
+    float signalingAvailability = (1.0 - previousRefractory) * (1.0 - previousRefractory);
+    float junctionSignalGain = (0.30 + cell.phenotype.x * 0.54) *
+        development.mechanochemistryA.y;
+    float neighborCalciumDrive = max(meanNeighborCalcium - previousCalcium, 0.0) *
+        junctionSignalGain * (1.0 - previousRefractory);
+    float extrusionCalciumDrive = cell.signals.w * (0.10 + cell.physiology.w * 0.16);
+    float calciumLoss = previousCalcium * (0.0090 + previousRefractory * 0.0140);
+    float calciumWithoutMechanical = clamp(
+        previousCalcium + neighborCalciumDrive * 0.018 + extrusionCalciumDrive * 0.012 +
+            endogenousReproductivePleasure * 0.0048 +
+            max(embodiedReplay, 0.0) * 0.0024 - calciumLoss,
+        0.0, 1.0
+    );
+    float mechanicalCalciumGate = saturate(
+        abs(resonantResponse) * 0.58 + fieldStrain * 0.26 +
+        saturate(junctionStrainMemory * 3.2) * 0.34 +
+        saturate(cell.membrane.w * 8.0) * 0.14
+    ) * signalingAvailability * saturate(uniforms.intervention.x) *
+        development.mechanochemistryA.x;
+    float calcium = clamp(
+        calciumWithoutMechanical + mechanicalCalciumGate * (1.0 - previousCalcium) * 0.032,
+        0.0, 1.0
+    );
+    float mechanicsToCalciumEffect = max(calcium - calciumWithoutMechanical, 0.0);
+
+    float neighborERKDrive = max(meanNeighborERK - previousERK, 0.0) *
+        (0.22 + cell.phenotype.x * 0.42) * development.mechanochemistryA.y;
+    float erkLoss = previousERK * (0.0042 + previousRefractory * 0.010);
+    float erkWithoutCalcium = clamp(
+        previousERK + neighborERKDrive * 0.016 +
+            endogenousReproductivePleasure * 0.0036 +
+            max(embodiedReplay, 0.0) * 0.0018 - erkLoss,
+        0.0, 1.0
+    );
+    float calciumERKDrive = smoothstep(0.08, 0.46, calcium) * (1.0 - previousRefractory) *
+        development.mechanochemistryA.z;
+    float erk = clamp(
+        erkWithoutCalcium + calciumERKDrive * (1.0 - previousERK) * 0.026,
+        0.0, 1.0
+    );
+    float calciumToERKEffect = max(erk - erkWithoutCalcium, 0.0);
+    float refractory = clamp(
+        previousRefractory + erk * 0.0068 - previousRefractory * 0.0046 *
+            development.mechanochemistryA.w,
+        0.0, 1.0
+    );
+    float neighborSignalInput = saturate(max(meanNeighborCalcium, meanNeighborERK));
+    float mechanosensoryDrive = resonantResponse * (0.10 + agent.metabolicExpression.z * 0.26) *
+        saturate(uniforms.intervention.x);
+    float metabolicDrive = (cell.physiology.x - 0.46) * 0.22;
+    float calciumCurrent = max(calcium - 0.08, 0.0) * 0.065;
+    float voltageDerivative = (
+        oldVoltage - oldVoltage * oldVoltage * oldVoltage / 3.0 - recovery +
+        0.19 + metabolicDrive + gapCoupling + mechanosensoryDrive + calciumCurrent +
+        phaseDrive * 0.10 + endogenousReproductivePleasure * 0.040 +
+        embodiedReplay * 0.030 + acquiredBehavior * inheritedNeuralCompetence * 0.026
+    ) * 0.020;
+    float voltage = clamp(oldVoltage + voltageDerivative, -1.8, 1.8);
+    recovery = clamp(recovery + 0.0038 * (voltage + 0.56 - recovery * 0.78), -0.8, 1.8);
+    float phaseSynchronization = contactCount > 0.001 ? phaseCoupling / contactCount : 0.0;
+    float phaseAdvance = naturalFrequency * (0.72 + cell.physiology.x * 0.42) +
+        phaseSynchronization * (0.00035 + cell.phenotype.x * 0.0017) +
+        mechanosensoryDrive * 0.0008 + voltageDerivative * 0.0015;
+    float oscillatorPhase = fract(cell.dynamics.z + phaseAdvance + 1.0);
+    float localCoherence = contactCount > 0.001
+        ? saturate(length(phaseVector) / contactCount)
+        : 1.0;
+    float contractionPulse = pow(saturate(0.5 + 0.5 * sin(oscillatorPhase * 2.0 * M_PI_F)), 3.0);
+    float contractility = mix(cell.mechanics.x,
+        contractionPulse * cell.phenotype.y * saturate(cell.physiology.x) *
+        (0.72 + max(voltage, 0.0) * 0.20) * (0.68 + erk * 0.62), 0.11);
+
+    float membraneExposure = saturate(cell.tissueGeometry.z);
+    float multicellularExpression =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    float previousIntegumentCoverage = saturate(cell.boundaryDynamics.x);
+    float previousIntegumentTension = saturate(cell.boundaryDynamics.y);
+    float previousProtrusionGrowth = saturate(cell.boundaryDynamics.z);
+    float previousGaitPhase = fract(cell.boundaryDynamics.w + 1.0);
+    float uptakePotential = 0.00125 * (
+        localState.x * cell.phenotype.z + localEcology.x * cell.phenotype.w +
+        localEcology.y * agent.transportExpression.z * 0.34
+    );
+    float extracellularAccess = pow(membraneExposure, 0.70);
+    uptakePotential *= extracellularAccess * (0.35 + membranePermeability * 0.65);
+    float metabolicReadiness = smoothstep(0.12, 0.46, cell.physiology.x);
+    float maintenance = 0.000055 * (
+        0.62 + cell.physiology.y * 0.48 + cell.phenotype.y * 0.28
+    );
+    float extracellularMatrixSupport = smoothstep(
+        0.025, 0.42, localDevelopmentalField.z
+    );
+    float woundCue = saturate(localDevelopmentalField.w);
+    float externalStress = saturate((
+        localEnvironment.w * 0.36 + reactiveMolecularLoad * 0.58 +
+        localEvents.z * 0.24 + max(contactCount - 4.5, 0.0) * 0.08 +
+        incomingRejection * 0.44 + barrierLoad * 0.24 +
+        environmentalDrive * (1.0 - frequencyMatch) * 0.30
+    ) * mix(1.0, 0.78, extracellularMatrixSupport) + woundCue * 0.46);
+    float integumentProtection = multicellularExpression * previousIntegumentCoverage *
+        sqrt(saturate(cell.physiology.w)) *
+        (0.42 + previousIntegumentTension * 0.58);
+    externalStress = saturate(
+        externalStress * (1.0 - integumentProtection * 0.64) +
+        woundCue * integumentProtection * 0.30
+    );
+    float feedstockTotal = max(localState.x + localEcology.x + localEcology.y, 0.0001);
+    float extracellularReceptorBalance =
+        localDevelopmentalField.x * development.morphogenTransport.x -
+        localDevelopmentalField.y * development.morphogenTransport.y;
+    extracellularReceptorBalance *= 1.0 + receptorDensity * 0.65;
+    CellAggregate previousAggregate = cellAggregates[owner];
+    float2 bodyAxis = length(previousAggregate.geometryAxes.xy) > 0.001
+        ? normalize(previousAggregate.geometryAxes.xy)
+        : (length(cell.development.xy) > 0.001
+            ? normalize(cell.development.xy) : float2(1.0, 0.0));
+    float2 bodyLateral = float2(-bodyAxis.y, bodyAxis.x);
+    float axialExtent = max(previousAggregate.geometryAxes.z * 0.5, 0.12);
+    float lateralExtent = max(previousAggregate.geometryAxes.w * 0.5, 0.12);
+    float axialPosition = clamp(dot(cell.position, bodyAxis) / axialExtent, -1.0, 1.0);
+    float lateralPosition = clamp(dot(cell.position, bodyLateral) / lateralExtent, -1.0, 1.0);
+    float organizerPhase =
+        (cell.signals.x - cell.signals.y) * development.morphogenesisA.x * 0.18;
+    float segmentationWave = sin(2.0 * M_PI_F * (
+        axialPosition * development.morphogenesisA.y * 0.5 -
+        cell.dynamics.z + organizerPhase
+    ));
+    float localContactDamage = saturate(
+        cell.tissueForce.z * 520.0 * (1.0 - membraneToughness * 0.58)
+    );
+    float activeGrowth = saturate(
+        sin(cell.physiology.z * M_PI_F) * 0.58 +
+        max(cell.physiology.y - 0.42, 0.0) * 0.72
+    );
+    float injuryPlasticity = saturate(
+        woundCue * development.morphogenesisB.w +
+        localContactDamage * 0.72 +
+        (1.0 - saturate(cell.physiology.w)) * 0.64
+    );
+    float stableClosure = saturate(
+        previousIntegumentCoverage * 0.32 +
+        previousIntegumentTension * 0.22 +
+        junctionConductance * 0.26 +
+        saturate(cell.physiology.w) * 0.20 -
+        woundCue * 0.55
+    );
+    // Life history stores only causal accumulators: chronological age,
+    // replication burden, proteostasis burden, and injury-driven reopening.
+    // Observer labels are inferred later and never gate this update.
+    float chronologicalAge = max(cell.lifeHistory.x, 0.0) +
+        uniforms.dt * 0.00060;
+    float replicationBurden = max(cell.lifeHistory.y, 0.0);
+    float previousProteostasis = saturate(cell.lifeHistory.z);
+    float physiologicalSupport = smoothstep(0.10, 0.46, cell.physiology.x) *
+        smoothstep(0.30, 0.76, cell.physiology.w) *
+        (1.0 - smoothstep(0.58, 0.90, cell.signals.z));
+    float reopeningTarget = saturate(
+        injuryPlasticity * development.allocationControl.x *
+        (0.46 + saturate(
+            1.0 - cell.physiology.w + woundCue + localContactDamage
+        ) * 0.54)
+    );
+    float regenerativeReopening = clamp(
+        mix(cell.lifeHistory.w, reopeningTarget,
+            reopeningTarget > cell.lifeHistory.w
+                ? 0.038 : 0.0045 + stableClosure * 0.012),
+        0.0, 1.0
+    );
+    float damageProduction =
+        localContactDamage * 0.0022 +
+        saturate(cell.signals.z) * 0.00042 +
+        replicationBurden * 0.000018 +
+        max(1.0 - cell.physiology.w, 0.0) * 0.00065;
+    float repairClearance = saturate(cell.regulation.w) *
+        physiologicalSupport * development.allocationControl.z * 0.00072;
+    float proteostasisBurden = clamp(
+        previousProteostasis + damageProduction - repairClearance,
+        0.0, 1.0
+    );
+    float physicalReproductiveReadiness =
+        smoothstep(0.16, 0.44, cell.physiology.x) *
+        smoothstep(0.40, 0.82, cell.physiology.y) *
+        smoothstep(0.46, 0.82, cell.physiology.w) *
+        (1.0 - smoothstep(0.48, 0.86, cell.signals.z)) *
+        (1.0 - proteostasisBurden);
+    float regulatoryTransition = abs(
+        physicalReproductiveReadiness - saturate(cell.regulation.x)
+    ) * development.allocationControl.w;
+    float developmentalPlasticity = saturate(
+        (activeGrowth + injuryPlasticity + regenerativeReopening * 0.72 +
+            regulatoryTransition) * development.morphogenesisB.x -
+        stableClosure * development.morphogenesisB.y
+    );
+    float regulatorySensors[24] = {
+        clamp(cell.physiology.x * 2.0 - 1.0, -1.0, 1.0),
+        clamp(voltage / 1.8, -1.0, 1.0),
+        fieldStrain,
+        saturate(contactCount / 4.2),
+        clamp(
+            cell.signals.x * development.morphogenTransport.x -
+                cell.signals.y * development.morphogenTransport.y +
+                extracellularReceptorBalance * 0.46 +
+                (cell.development.z - 0.5) * 0.35,
+            -1.0, 1.0
+        ),
+        clamp(uptakePotential * 1350.0 - externalStress -
+            cell.signals.z * 0.35, -1.0, 1.0),
+        clamp(resonantResponse *
+            (1.0 + existingMembraneChemistry.z * 0.55), -1.0, 1.0),
+        saturate(cell.membrane.w * 8.0 + abs(cell.membrane.z - 1.0)),
+        clamp((cell.membrane.z - 1.0) * 1.8, -1.0, 1.0),
+        saturate(cell.membrane.w * 6.0 +
+            junctionStrainMemory * 2.0 + woundCue * 0.65),
+        saturate(localEnvironment.w * 0.22 +
+            reactiveMolecularLoad * 0.85 + localEcology.y * 0.12 +
+            woundCue * 0.72),
+        clamp((localState.x - localEcology.x) / feedstockTotal, -1.0, 1.0),
+        saturate(incomingRejection + mixedContactWeight * 0.16),
+        saturate(junctionConductance * 0.55 +
+            junctionStrainMemory * 2.4),
+        membraneExposure,
+        clamp((cell.development.z - 0.5) * 1.4 +
+            junctionPolarityAlignment / max(contactCount, 0.001),
+            -1.0, 1.0),
+        axialPosition,
+        lateralPosition,
+        segmentationWave,
+        developmentalPlasticity * 2.0 - 1.0,
+        physicalReproductiveReadiness * 2.0 - 1.0,
+        proteostasisBurden,
+        predictionError,
+        clamp(
+            localDevelopmentalField.z * 1.2 + localEcology.y * 0.35 -
+                reactiveMolecularLoad * 0.72 - 0.35,
+            -1.0, 1.0
+        )
+    };
+    bool regulatoryHot =
+        injuryPlasticity > 0.035 ||
+        junctionStrainMemory > 0.085 ||
+        incomingRejection > 0.025 ||
+        mixedContactWeight > 0.18 ||
+        abs(cell.tissueForce.w) > 0.000002 ||
+        cell.physiology.z > 0.82 ||
+        externalStress > 0.66 ||
+        max(abs(cell.signalCausality.x),
+            abs(cell.signalCausality.y)) > 0.012;
+    uint regulatoryCadence = regulatoryHot
+        ? 1u : (membraneExposure > 0.34 ? 2u : 4u);
+    bool regulatoryUpdateDue = regulatoryCadence == 1u ||
+        (uniforms.step + cellIdentity.persistentID) %
+            regulatoryCadence == 0u;
+    RegulatoryOutputs regulatoryOutput;
+    if (regulatoryUpdateDue) {
+        regulatoryOutput = evolveDevelopmentalProgram(
+            genomeHeaders, genomePages,
+            regulatoryStates, programIndex, gid, regulatorySensors,
+            regulatoryCadence
+        );
+    } else {
+        regulatoryOutput.a = cell.regulation;
+        regulatoryOutput.b = cell.regulationB;
+        regulatoryOutput.c = float4(0.0);
+    }
+    float4 regulation = regulatoryOutput.a;
+    float4 regulationB = regulatoryOutput.b;
+    float4 constructionProgram = regulatoryOutput.c;
+    float proliferationProgram = regulation.x;
+    float adhesiveProgram = regulation.y;
+    float contractileProgram = regulation.z;
+    float repairProgram = regulation.w;
+    float permeabilityProgram = regulationB.x;
+    float secretionProgram = regulationB.y;
+    float apoptosisSuppression = regulationB.z;
+    float motilityProgram = regulationB.w;
+
+    float replicationActivity = saturate(
+        proliferationProgram * physicalReproductiveReadiness *
+        (0.52 + development.allocationControl.y * 0.48)
+    );
+    float maintenanceActivity = saturate(
+        development.allocationControl.z *
+        (repairProgram * 0.48 + adhesiveProgram * 0.30 +
+            stableClosure * 0.14 + (1.0 - membraneExposure) * 0.08)
+    );
+    float signalActivity = saturate(
+        development.plasticityControl.x *
+        (existingMembraneChemistry.y * 0.28 +
+            saturate(junctionConductance) * 0.26 +
+            saturate(abs(voltage) * 0.22 +
+                calcium * 0.18 + erk * 0.16))
+    );
+    float constructionActivity = saturate(
+        dot(development.materialSynthesis, float4(0.25)) *
+        (secretionProgram * 0.34 + adhesiveProgram * 0.26 +
+            repairProgram * 0.20 + constructionProgram.y * 0.20) *
+        membraneExposure
+    );
+    float activityResponse = 0.0025 +
+        developmentalPlasticity * 0.010 +
+        regenerativeReopening * 0.012;
+    float4 functionalActivity = clamp(
+        mix(
+            saturate(cell.functionalActivity),
+            float4(
+                replicationActivity, maintenanceActivity,
+                signalActivity, constructionActivity
+            ),
+            activityResponse
+        ),
+        float4(0.0), float4(1.0)
+    );
+    replicationActivity = functionalActivity.x;
+    maintenanceActivity = functionalActivity.y;
+    signalActivity = functionalActivity.z;
+    constructionActivity = functionalActivity.w;
+    float growthOpportunity = saturate(
+        1.0 - replicationBurden * 0.08 - proteostasisBurden * 0.72
+    );
+    proliferationProgram = saturate(
+        proliferationProgram *
+        (0.68 + growthOpportunity * 0.34 +
+            replicationActivity * physicalReproductiveReadiness * 0.42) *
+        (1.0 - proteostasisBurden *
+            mix(0.34, 0.72, maintenanceActivity))
+    );
+    repairProgram = saturate(
+        repairProgram * (0.78 + maintenanceActivity * 0.34 +
+            regenerativeReopening * development.allocationControl.x * 0.36)
+    );
+    apoptosisSuppression = saturate(
+        apoptosisSuppression *
+            (1.0 - proteostasisBurden *
+                (0.28 + maintenanceActivity * 0.34)) +
+            regenerativeReopening * 0.16
+    );
+    motilityProgram = saturate(
+        motilityProgram + acquiredBehavior * signalActivity * 0.12
+    );
+    float integrityDeficit = max(1.0 - saturate(cell.physiology.w), 0.0);
+    float repairUrgency = cellularRepairUrgency(
+        cell.physiology.w, cell.signals.z, woundCue, localContactDamage
+    );
+    float repairCommitment = saturate(
+        repairProgram * (0.35 + repairUrgency * 0.85)
+    );
+    // Local damage reallocates activity rather than granting extra energy.
+    // The allocation disappears continuously when the wound resolves.
+    float recoveryAllocation = saturate(
+        repairUrgency * mix(0.46, 1.0, repairProgram)
+    );
+    float discretionaryActivityScale = 1.0 - recoveryAllocation * 0.78;
+    float ecologicalScarcity = 1.0 - smoothstep(0.035, 0.24, feedstockTotal);
+    float molecularDamageLoad = reactiveMolecularLoad;
+    float molecularCountermeasure = saturate(
+        development.chemicalResponse.x * repairProgram + counterReactiveCapacity * 4.0
+    );
+    float detritalScavenging = development.chemicalResponse.y * permeabilityProgram;
+    float shearAnchoring = development.chemicalResponse.z * adhesiveProgram;
+    float starvationQuiescence = development.chemicalResponse.w *
+        (1.0 - proliferationProgram) * ecologicalScarcity;
+    externalStress = saturate(
+        externalStress - molecularDamageLoad * molecularCountermeasure * 0.68 -
+            environmentalDrive * shearAnchoring * 720.0
+    );
+    float2 previousMorphogens = saturate(cell.signals.xy);
+    float activatorAutocatalysis = previousMorphogens.x * previousMorphogens.x /
+        max(0.08 + previousMorphogens.x * previousMorphogens.x, 0.0001);
+    float inhibitorSuppression = 1.0 / (
+        1.0 + previousMorphogens.y * development.morphogenTransport.y * 1.4
+    );
+    float2 morphogenProduction = float2(
+        development.morphogenKinetics.x * mix(0.34, 1.20, secretionProgram) *
+            mix(0.42, 1.0, activatorAutocatalysis) * inhibitorSuppression * 0.00155,
+        development.morphogenKinetics.y * mix(1.05, 0.46, secretionProgram) *
+            (0.48 + previousMorphogens.x * development.morphogenTransport.x * 0.52) *
+            0.00145
+    ) * mix(0.28, 1.0, metabolicReadiness);
+    float2 morphogenDecay = development.morphogenKinetics.zw *
+        previousMorphogens * 0.00135;
+    float2 morphogenDiffusion = clamp(
+        morphogenFlux * 0.010, float2(-0.018), float2(0.018)
+    );
+    float2 extracellularLigandCoupling = clamp(
+        (localDevelopmentalField.xy - previousMorphogens) *
+            development.morphogenTransport.xy * membraneExposure * 0.0032,
+        float2(-0.006), float2(0.006)
+    );
+    float2 nextMorphogens = clamp(
+        previousMorphogens + morphogenProduction - morphogenDecay +
+            morphogenDiffusion + extracellularLigandCoupling,
+        float2(0.0), float2(1.0)
+    );
+    float receptorBalance =
+        nextMorphogens.x * development.morphogenTransport.x -
+        nextMorphogens.y * development.morphogenTransport.y;
+    float fateTarget = saturate(
+        0.5 + receptorBalance * 0.42 +
+            (contractileProgram - adhesiveProgram) * 0.13 +
+            (motilityProgram - repairProgram) * 0.07 +
+            (membraneExposure - 0.5) * 0.18
+    );
+    float fateMemory = mix(
+        saturate(cell.development.z), fateTarget,
+        0.0035 + saturate(junctionConductance) * 0.0025
+    );
+    float2 previousPolarity = length(cell.development.xy) > 0.0001
+        ? normalize(cell.development.xy)
+        : float2(1.0, 0.0);
+    float2 polarityTarget = length(morphogenGradient) > 0.0001
+        ? normalize(morphogenGradient)
+        : previousPolarity;
+    float polarityResponse = 0.010 + saturate(length(morphogenGradient) * 4.0) * 0.035;
+    float2 developmentalPolarity = normalize(
+        mix(previousPolarity, polarityTarget, polarityResponse) + previousPolarity * 0.0001
+    );
+    float junctionTransport = abs(morphogenDiffusion.x) + abs(morphogenDiffusion.y);
+    float morphogenWork =
+        (morphogenProduction.x + morphogenProduction.y) * 0.018 +
+        (abs(morphogenDiffusion.x) + abs(morphogenDiffusion.y)) * 0.006;
+    float junctionTransportWork = abs(atpSharingFlux) * 0.040;
+    float allocationContrast = saturate(abs(receptorBalance) * 0.82 + abs(fateMemory - 0.5));
+    float axialPole = smoothstep(0.18, 0.92, abs(axialPosition));
+    float lateralEdge = smoothstep(0.16, 0.82, abs(lateralPosition));
+    float asymmetricSide = saturate(lateralPosition * 0.5 + 0.5);
+    float bilateralEdge = mix(
+        asymmetricSide, lateralEdge, development.morphogenesisA.z
+    );
+    float segmentedExpression = mix(
+        1.0, 0.50 + segmentationWave * 0.50,
+        saturate(development.morphogenesisA.x)
+    );
+    float4 constructionCompetence = float4(
+        secretionProgram * motilityProgram *
+            saturate((agent.transportExpression.w - 0.025) * 2.2),
+        adhesiveProgram * repairProgram * agent.metabolicExpression.w,
+        permeabilityProgram * secretionProgram *
+            (0.35 + saturate(resonantAmplitude * 5.0) * 0.65),
+        motilityProgram * (0.24 + erk * 0.76)
+    );
+    float4 positionalExpression = float4(
+        0.38 + axialPole * 0.62,
+        0.66 + (1.0 - axialPole) * 0.34,
+        0.42 + axialPole * 0.34 + bilateralEdge * 0.24,
+        (0.30 + bilateralEdge * 0.70) * segmentedExpression
+    );
+    float4 expressedMaterialTarget = saturate(
+        constructionProgram * constructionCompetence * positionalExpression *
+        membraneExposure * (0.42 + development.morphogenesisA.w * 0.72)
+    );
+    float4 materialTarget = regulatoryUpdateDue
+        ? expressedMaterialTarget : existingMembraneProperties;
+    float materialBuildRate = (
+        0.0018 + developmentalPlasticity * 0.014 +
+        injuryPlasticity * development.morphogenesisB.w * 0.004
+    ) * metabolicReadiness * discretionaryActivityScale *
+        (regulatoryUpdateDue ? float(regulatoryCadence) : 0.0);
+    float4 requestedSurfaceBuild =
+        max(materialTarget - existingMembraneProperties, float4(0.0)) *
+        materialBuildRate;
+    float materialRemodelingRate =
+        0.00018 + developmentalPlasticity * 0.0011 +
+        injuryPlasticity * development.morphogenesisB.w * 0.0015;
+    materialRemodelingRate *= regulatoryUpdateDue
+        ? float(regulatoryCadence) : 0.0;
+    float starvationErosion =
+        (1.0 - metabolicReadiness) * 0.0012 +
+        (1.0 - smoothstep(0.05, 0.20, cell.physiology.x)) * 0.0004;
+    float4 surfaceErosion =
+        existingMembraneProperties * (
+            (1.0 - development.morphogenesisB.z) * 0.00016 +
+            starvationErosion + localContactDamage * 0.0017
+        ) +
+        max(existingMembraneProperties - materialTarget, float4(0.0)) *
+            materialRemodelingRate;
+    float4 chemistryTarget = saturate(float4(
+        permeabilityProgram,
+        junctionConductance,
+        abs(extracellularReceptorBalance) + development.morphogenTransport.z * 0.35,
+        secretionProgram * agent.metabolicExpression.y
+    ));
+    float4 requestedChemistryBuild = max(
+        chemistryTarget - existingMembraneChemistry, float4(0.0)
+    ) * materialBuildRate;
+    float4 chemistryErosion = existingMembraneChemistry * (
+        0.00010 + localContactDamage * 0.0012 + starvationErosion * 0.72
+    );
+    float integumentSynthesisDrive = multicellularExpression * membraneExposure *
+        repairProgram * saturate(cell.physiology.x) * metabolicReadiness *
+        (adhesiveProgram * 0.58 + secretionProgram * 0.42) *
+        (0.62 + extracellularMatrixSupport * 0.38) * discretionaryActivityScale;
+    float integumentDamageDrive = saturate(
+        localContactDamage * 0.82 + woundCue * 0.48 + molecularDamageLoad * 0.18 +
+        max(cell.membrane.z - 1.28, 0.0) * 0.32
+    );
+    float boundarySupport = max(
+        previousIntegumentCoverage, transmittedIntegument * 0.78
+    );
+    float integumentTensionTarget = multicellularExpression * boundarySupport *
+        sqrt(max(adhesiveProgram * contractileProgram, 0.0)) *
+        (0.48 + saturate(junctionConductance) * 0.52) *
+        saturate(cell.physiology.w);
+    float appendageGrowthDrive = multicellularExpression * membraneExposure *
+        previousIntegumentCoverage * motilityProgram *
+        (0.24 + erk * 0.76) * (0.44 + fateMemory * 0.56) *
+        (0.18 + materialTarget.w * 0.82) *
+        metabolicReadiness * discretionaryActivityScale;
+    float appendageActuationWork = multicellularExpression *
+        previousProtrusionGrowth * membraneExposure * motilityProgram *
+        (0.000012 + abs(previousGaitPhase * 2.0 - 1.0) * 0.000018);
+    float boundaryMaintenance = multicellularExpression * (
+        previousIntegumentCoverage * 0.34 +
+        previousIntegumentTension *
+            (0.24 + previousIntegumentCoverage * 0.20) +
+        previousProtrusionGrowth *
+            (0.30 + motilityProgram * (0.18 + erk * 0.34))
+    );
+    float localMatrixNeed = 1.0 - extracellularMatrixSupport;
+    float stiffnessDeposition = constructionActivity * development.materialSynthesis.x *
+        adhesiveProgram * repairProgram * membraneExposure *
+        (0.24 + externalStress * 0.76) * metabolicReadiness;
+    float storageDeposition = constructionActivity * development.materialSynthesis.y *
+        secretionProgram * membraneExposure *
+        (0.22 + ecologicalScarcity * 0.78) * localMatrixNeed * metabolicReadiness;
+    float catalyticDeposition = constructionActivity * development.materialSynthesis.z *
+        detritalScavenging * membraneExposure *
+        smoothstep(0.015, 0.34, localEcology.y) * metabolicReadiness;
+    float reactiveBindingDeposition = constructionActivity * development.materialSynthesis.w *
+        repairProgram * membraneExposure * molecularDamageLoad * metabolicReadiness;
+    float4 materialActivity = saturate(float4(
+        stiffnessDeposition, storageDeposition,
+        catalyticDeposition, reactiveBindingDeposition
+    ));
+    float extracellularMatrixConstruction = membraneExposure * adhesiveProgram *
+        repairProgram * saturate(cell.physiology.x) *
+        (0.30 + woundCue * 0.74 + repairUrgency * 0.58) *
+        (0.62 + localMatrixNeed * 0.38) * metabolicReadiness +
+        stiffnessDeposition * 0.52 + storageDeposition * 0.46;
+    float extracellularMatrixRemodeling = membraneExposure * motilityProgram *
+        secretionProgram * extracellularMatrixSupport *
+        (0.20 + woundCue * 0.80) * metabolicReadiness;
+    float structuralDrag = 1.0 / (
+        1.0 + membraneStiffness * 1.50 + membraneThickness * 0.35 +
+            membraneToughness * 0.42 + previousIntegumentCoverage * 0.18
+    );
+    uint energyTileBase = (coordinate.y * uniforms.width + coordinate.x) *
+        worldExchangeChannelCount;
+    CellChemistrySettlement chemistrySettlement = chemistrySettlements[gid];
+    bool settlementIsCurrent = chemistrySettlement.settledStep == uniforms.step;
+    float4 settledAmounts = settlementIsCurrent
+        ? max(chemistrySettlement.consumedAmount, float4(0.0)) : float4(0.0);
+    float consumedRecycledMatter = settledAmounts.z;
+    float substrateEnergy = settlementIsCurrent
+        ? max(chemistrySettlement.capturedFreeEnergy, 0.0) : 0.0;
+    float conversionEfficiency = clamp(
+        0.52 + agent.metabolicExpression.w * 0.28 - max(agent.transportExpression.x + agent.transportExpression.y +
+            agent.transportExpression.z - 1.30, 0.0) * 0.08,
+        0.34, 0.88
+    );
+    float uptake = substrateEnergy * conversionEfficiency;
+    float conversionHeat = max(substrateEnergy - uptake, 0.0);
+    contractility *= mix(0.52, 1.58, contractileProgram) * (1.0 + calcium * 0.18) *
+        mix(0.22, 1.0, metabolicReadiness) *
+        mix(0.44, 1.0, discretionaryActivityScale);
+    maintenance *= (0.94 + repairProgram * 0.16 + proliferationProgram * 0.10) *
+        mix(0.20, 1.0, metabolicReadiness) *
+        mix(1.0, 0.48, starvationQuiescence) *
+        (1.0 + proteostasisBurden * (0.16 + maintenanceActivity * 0.24));
+    float signalingCost = (calcium * 0.000020 + erk * 0.000024 +
+        (mechanicsToCalciumEffect + calciumToERKEffect) * 0.000080) *
+        development.mechanochemistryB.x;
+    float resonatorEnergy = resonatorVelocity * resonatorVelocity +
+        angularFrequency * angularFrequency * resonatorDisplacement * resonatorDisplacement;
+    float frequencyWork = resonatorEnergy * (0.00042 + naturalFrequency * 0.075) *
+        (0.58 + resonanceExpression.mechanics.y * 0.82);
+    float surfaceConstructionWork = dot(
+        requestedSurfaceBuild,
+        float4(0.016, 0.021, 0.011, 0.015)
+    ) + dot(requestedChemistryBuild, float4(0.010, 0.014, 0.018, 0.020));
+    float surfaceMaintenanceWork = dot(
+        existingMembraneProperties,
+        float4(0.000006, 0.000010, 0.000005, 0.000008)
+    ) + dot(existingMembraneChemistry, float4(0.000004, 0.000007, 0.000009, 0.000010));
+    float constructionWork = surfaceConstructionWork + surfaceMaintenanceWork +
+        extracellularMatrixConstruction * 0.000052 +
+        extracellularMatrixRemodeling * 0.000030 +
+        dot(materialActivity, float4(0.000028, 0.000034, 0.000024, 0.000032)) +
+        integumentSynthesisDrive * 0.000082 +
+        appendageGrowthDrive * 0.000068 +
+        appendageActuationWork +
+        boundaryMaintenance * 0.000018;
+    float junctionMaterialWork = junctionMaterialDemand * 0.0000045 +
+        junctionStrainMemory * 0.000016;
+    float cellularCatalyticMoleculeSecretion = secretionProgram * agent.metabolicExpression.y *
+        agent.metabolicExpression.w * membraneExposure * metabolicReadiness *
+        (0.000002 + localEcology.y * 0.000014) * (0.55 + catalyticCoating * 0.90) +
+        catalyticDeposition * 0.000020;
+    float cellularReactiveMoleculeNeutralization = molecularCountermeasure * molecularDamageLoad *
+        membraneExposure * metabolicReadiness * 0.000018 +
+        reactiveBindingDeposition * 0.000022;
+    float chemicalCountermeasureWork = molecularCountermeasure * molecularDamageLoad * 0.000022 +
+        detritalScavenging * consumedRecycledMatter * 0.045 +
+        shearAnchoring * environmentalDrive * 0.075 +
+        development.chemicalResponse.w * 0.0000025 +
+        cellularCatalyticMoleculeSecretion * 0.85 + cellularReactiveMoleculeNeutralization * 0.72;
+    float propagulePreparation = max(
+        membraneExposure * motilityProgram * development.mechanochemistryB.w *
+            (1.0 - adhesiveProgram) *
+            smoothstep(0.16, 0.38, cell.physiology.x),
+        reproductiveDrive * membraneExposure * motilityProgram * 0.58
+    ) * physicalReproductiveReadiness * (0.22 + replicationActivity * 0.78) *
+        discretionaryActivityScale;
+    float crossbreedingPreparation = mixedProgramTissue &&
+        meanReceptorChemistryCompatibility >= 0.0
+        ? saturate(meanReceptorChemistryCompatibility) * agent.junctionChemistry.w *
+            saturate(junctionConductance) * metabolicReadiness *
+            physicalReproductiveReadiness * (0.24 + replicationActivity * 0.76) *
+            discretionaryActivityScale
+        : 0.0;
+    float requestedRepairWork = repairUrgency * repairCommitment * (
+        0.00010 + integrityDeficit * 0.00050 + woundCue * 0.00010 +
+        localContactDamage * 0.000055
+    );
+    float discretionaryActiveWork = (contractility * (0.000055 + fieldStrain * 0.000070) +
+        abs(voltageDerivative) * 0.000070 + signalingCost + frequencyWork +
+        constructionWork + propagulePreparation * 0.000060 + morphogenWork +
+        crossbreedingPreparation * 0.000075 + junctionTransportWork +
+        junctionMaterialWork + chemicalCountermeasureWork) *
+        mix(0.16, 1.0, metabolicReadiness) * discretionaryActivityScale;
+    float activeWork = discretionaryActiveWork + requestedRepairWork;
+    float dissipation = externalStress * 0.00032 + fieldWaveSpeed * 0.000035 +
+        dot(cell.velocity, cell.velocity) * 2.8 + barrierLoad *
+            saturate(length(agent.velocity) * 860.0) * 0.00010;
+    float rejectionCost = outgoingRejection * 0.000055;
+    float rejectionDamage = incomingRejection * 0.00018;
+    float plannedATPExpense = maintenance + activeWork + dissipation +
+        rejectionCost + rejectionDamage;
+    float availableATP = max(cell.physiology.x + uptake + atpSharingFlux, 0.0);
+    float expenseScale = plannedATPExpense > 0.0
+        ? min(availableATP / plannedATPExpense, 1.0) : 1.0;
+    maintenance *= expenseScale;
+    activeWork *= expenseScale;
+    frequencyWork *= expenseScale;
+    dissipation *= expenseScale;
+    rejectionCost *= expenseScale;
+    rejectionDamage *= expenseScale;
+    float paidRepairWork = requestedRepairWork * expenseScale;
+    float paidATPExpense = maintenance + activeWork + dissipation +
+        rejectionCost + rejectionDamage;
+    float unclampedATP = availableATP - paidATPExpense;
+    float overflowHeat = max(unclampedATP - 1.2, 0.0);
+    float atp = clamp(unclampedATP, 0.0, 1.2);
+    float4 updatedMembraneProperties = clamp(
+        existingMembraneProperties + requestedSurfaceBuild * expenseScale -
+            surfaceErosion,
+        float4(0.0), float4(1.0)
+    );
+    float4 updatedMembraneChemistry = clamp(
+        existingMembraneChemistry + requestedChemistryBuild * expenseScale -
+            chemistryErosion,
+        float4(0.0), float4(1.0)
+    );
+    float integumentErosion = integumentDamageDrive * 0.0038 +
+        (1.0 - multicellularExpression) * 0.014 +
+        (1.0 - expenseScale) * previousIntegumentCoverage * 0.0018;
+    float integumentCoverage = clamp(
+        previousIntegumentCoverage +
+            integumentSynthesisDrive * expenseScale *
+                (1.0 - previousIntegumentCoverage) * 0.0052 -
+            integumentErosion,
+        0.0, 1.0
+    );
+    float integumentTension = mix(
+        previousIntegumentTension,
+        integumentTensionTarget * max(
+            integumentCoverage, transmittedIntegument * 0.78
+        ),
+        0.010 + expenseScale * 0.024
+    ) * mix(0.92, 1.0, multicellularExpression);
+    float appendageTarget = multicellularExpression * smoothstep(
+        0.0015, 0.032, appendageGrowthDrive
+    ) * (0.72 + integumentCoverage * 0.28);
+    float protrusionGrowth = multicellularExpression > 0.5
+        ? mix(
+            previousProtrusionGrowth, appendageTarget,
+            0.010 + expenseScale * 0.025
+        )
+        : previousProtrusionGrowth * 0.78;
+    float gaitPhase = fract(
+        previousGaitPhase + naturalFrequency *
+            (0.52 + erk * 1.18) * (0.40 + protrusionGrowth * 0.60)
+    );
+    float netProgramContribution = uptake - paidATPExpense;
+    float recycledMatterEnergy = maintenance * 0.34;
+    float heatExport = conversionHeat + maintenance * 0.66 + dissipation +
+        rejectionCost + rejectionDamage + overflowHeat;
+    float recycledMatterReturn = recycledMatterEnergy / 0.62;
+    addEnergyExchange(cellEnergyExchange, energyTileBase, 0u, recycledMatterReturn);
+    addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, heatExport);
+    float developmentalOutputScale = expenseScale * metabolicReadiness;
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 2u,
+        morphogenProduction.x * secretionProgram * membraneExposure *
+            developmentalOutputScale * 0.22
+    );
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 3u,
+        morphogenProduction.y * secretionProgram * membraneExposure *
+            developmentalOutputScale * 0.22
+    );
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 4u,
+        extracellularMatrixConstruction * developmentalOutputScale * 0.00016
+    );
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 5u,
+        (extracellularMatrixRemodeling * 0.000060 +
+            max(1.0 - cell.physiology.w, 0.0) * repairProgram * 0.000075) *
+            developmentalOutputScale
+    );
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 6u,
+        cellularCatalyticMoleculeSecretion * expenseScale
+    );
+    addEnergyExchange(
+        cellEnergyExchange, energyTileBase, 7u,
+        cellularReactiveMoleculeNeutralization * expenseScale
+    );
+    float atpStorageDelta = atp - cell.physiology.x;
+    float conservationResidual = substrateEnergy + atpSharingFlux -
+        (atpStorageDelta + activeWork + recycledMatterEnergy + heatExport);
+    addEnergyAudit(energyAudit, 0u, substrateEnergy);
+    addEnergyAudit(energyAudit, 1u, uptake);
+    addEnergyAudit(energyAudit, 2u, atpStorageDelta);
+    addEnergyAudit(energyAudit, 3u, activeWork);
+    addEnergyAudit(energyAudit, 4u, frequencyWork);
+    addEnergyAudit(energyAudit, 5u, maintenance);
+    addEnergyAudit(energyAudit, 6u, heatExport);
+    addEnergyAudit(energyAudit, 7u, recycledMatterEnergy);
+    addEnergyAudit(energyAudit, 8u, atpSharingFlux);
+    addEnergyAudit(energyAudit, 9u, conservationResidual);
+    float repairSatisfaction = requestedRepairWork > 0.0000001
+        ? saturate(paidRepairWork / requestedRepairWork) : 1.0;
+    float energyStrain = saturate(
+        (1.0 - expenseScale) * 0.82 +
+        (1.0 - smoothstep(0.025, 0.18, atp)) * 0.18
+    );
+    float unresolvedRepair = repairUrgency * (1.0 - repairSatisfaction);
+    float stressTarget = saturate(
+        externalStress + energyStrain * 0.46 + unresolvedRepair * 0.24 -
+            endogenousReproductivePleasure * 0.10 +
+            proteostasisBurden * (0.10 + maintenanceActivity * 0.10)
+    );
+    float stressResponse = stressTarget > cell.signals.z
+        ? 0.026 : 0.012 + repairCommitment * repairSatisfaction * 0.024;
+    float stress = mix(cell.signals.z, stressTarget, stressResponse);
+    // Stress is a signal, not an automatic short countdown to death.  Earlier
+    // tuning integrated ordinary environmental stress quickly enough that a
+    // healthy founder crossed the terminal apoptosis threshold in a few
+    // thousand solver steps.  Keep death emergent, but require sustained
+    // stress that overwhelms the cell's expressed repair and suppression.
+    float apoptosis = clamp(
+        cell.signals.w + max(stress - 0.76, 0.0) * 0.00058 - 0.00020 -
+            repairProgram * 0.00032 - apoptosisSuppression * 0.00038 +
+            incomingRejection * 0.00040 +
+            proteostasisBurden * (0.00010 + maintenanceActivity * 0.00018),
+        0.0, 1.0
+    );
+    float permeabilityTurnover = permeabilityProgram * 0.000024 *
+        mix(0.18, 1.0, metabolicReadiness);
+    float membraneRepairEfficiency = mix(1.20, 2.35, repairProgram) *
+        (0.82 + extracellularMatrixSupport * 0.18) *
+        (1.0 + integumentCoverage * integumentTension * 0.28);
+    float membraneRepair = paidRepairWork * membraneRepairEfficiency +
+        repairProgram * metabolicReadiness * 0.000018;
+    float membraneATPSetpoint = mix(0.12, 0.27, metabolicReadiness);
+    float homeostaticStressCapacity = saturate(
+        0.32 + repairProgram * 0.30 + apoptosisSuppression * 0.18 +
+            metabolicReadiness * 0.20
+    );
+    float unsupportedStress = max(stress - homeostaticStressCapacity, 0.0);
+    float membraneIntegrity = clamp(
+        cell.physiology.w + (atp - membraneATPSetpoint) * 0.00020 + membraneRepair -
+            unsupportedStress * 0.00016 - apoptosis * 0.00025 - permeabilityTurnover -
+            incomingRejection * 0.00026 +
+            integumentCoverage * integumentTension * expenseScale * 0.000026 -
+            proteostasisBurden * (0.000018 + maintenanceActivity * 0.000020),
+        0.0, 1.0
+    );
+    float energySupport = cellularEnergySupport(
+        atp, float4(uptake, maintenance, activeWork, dissipation)
+    );
+    float anabolicDrive = energySupport * mix(0.50, 1.0, membraneExposure) *
+        mix(0.42, 1.38, proliferationProgram);
+    float catabolicDrive = (1.0 - energySupport) *
+        mix(1.0, 0.58, smoothstep(0.08, 0.30, atp));
+    float proposedBiomass = clamp(
+        cell.physiology.y + anabolicDrive * 0.00018 - catabolicDrive * 0.000090,
+        0.16, 1.08
+    );
+    float biomassDelta = proposedBiomass - cell.physiology.y;
+    float biomassEnergyDelta = biomassDelta * 0.18;
+    float biosynthesisCost = min(max(biomassEnergyDelta, 0.0), atp);
+    float biomass = biomassDelta > 0.0
+        ? cell.physiology.y + biosynthesisCost / 0.18
+        : proposedBiomass;
+    float atpBeforeBiomass = atp;
+    atp -= biosynthesisCost;
+    float releasedBiomassEnergy = max(-biomassEnergyDelta, 0.0);
+    float catabolicATPShare = 0.52 * (1.0 - smoothstep(0.18, 0.46, atp));
+    float biomassCatabolicATP = releasedBiomassEnergy * catabolicATPShare;
+    float exportedBiomassEnergy = releasedBiomassEnergy - biomassCatabolicATP;
+    float biomassRecycledMatterEnergy = exportedBiomassEnergy * 0.64;
+    float biomassHeat = exportedBiomassEnergy * 0.36;
+    atp = min(atp + biomassCatabolicATP, 1.2);
+    if (releasedBiomassEnergy > 0.0) {
+        addEnergyExchange(
+            cellEnergyExchange, energyTileBase, 0u, biomassRecycledMatterEnergy / 0.62
+        );
+        addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, biomassHeat);
+    }
+    float storageCorrection = (atp - atpBeforeBiomass) +
+        (biomass - cell.physiology.y) * 0.18;
+    addEnergyAudit(energyAudit, 2u, storageCorrection);
+    addEnergyAudit(energyAudit, 6u, biomassHeat);
+    addEnergyAudit(energyAudit, 7u, biomassRecycledMatterEnergy);
+    addEnergyAudit(
+        energyAudit, 9u,
+        -(storageCorrection + biomassHeat + biomassRecycledMatterEnergy)
+    );
+    float contactInhibition = saturate(contactCount / (3.6 + cell.phenotype.x * 1.8));
+    float unconstrainedCycleDrive = cellCycleDrive(
+        atp, biomass, float4(uptake, maintenance, activeWork, dissipation),
+        proliferationProgram, stress, membraneExposure
+    );
+    float contactBrake = contactInhibition * (0.62 + adhesiveProgram * 0.30);
+    float cycleRate = unconstrainedCycleDrive * (1.0 - contactBrake) *
+        (1.0 - starvationQuiescence * 0.88) *
+        (1.0 - recoveryAllocation * 0.94) *
+        (1.0 + cellularReproductivePleasure * 0.24);
+    float cycleDecay = cellCycleQuiescenceDecay(energySupport, contactBrake, stress);
+    float cycle = clamp(
+        cell.physiology.z + cycleRate - cycleDecay,
+        0.0, 1.2
+    );
+
+    cell.signals.xy = nextMorphogens;
+    cell.signals.zw = float2(stress, apoptosis);
+    float centralProgram = fateMemory;
+    cell.phenotype.x = mix(cell.phenotype.x,
+        clamp(0.14 + agent.metabolicExpression.y * 0.30 + centralProgram * 0.16 + adhesiveProgram * 0.42, 0.0, 1.0),
+        0.0060);
+    cell.phenotype.y = mix(cell.phenotype.y,
+        clamp(0.10 + agent.metabolicExpression.z * 0.26 + (1.0 - centralProgram) * 0.18 + contractileProgram * 0.48,
+            0.0, 1.0), 0.0060);
+    cell.phenotype.z = mix(cell.phenotype.z,
+        clamp(0.12 + agent.transportExpression.x * 0.50 + centralProgram * 0.12 + proliferationProgram * 0.16,
+            0.0, 1.0), 0.0040);
+    cell.phenotype.w = mix(cell.phenotype.w,
+        clamp(0.12 + agent.transportExpression.y * 0.50 + (1.0 - centralProgram) * 0.12 + repairProgram * 0.16,
+            0.0, 1.0), 0.0040);
+    cell.physiology = float4(atp, biomass, cycle, membraneIntegrity);
+    cell.dynamics = float4(voltage, recovery, oscillatorPhase, naturalFrequency);
+    cell.mechanics = float4(contractility, fieldStrain, fieldWaveSpeed, localCoherence);
+    cell.energetics = float4(uptake, maintenance, activeWork, dissipation);
+    cell.regulation = regulation;
+    cell.regulationB = regulationB;
+    cell.resonance = float4(
+        resonatorDisplacement, resonatorVelocity, resonantAmplitude, strainInput
+    );
+    cell.development = float4(
+        developmentalPolarity, fateMemory, junctionTransport
+    );
+    cell.boundaryDynamics = float4(
+        integumentCoverage, saturate(integumentTension),
+        saturate(protrusionGrowth), gaitPhase
+    );
+    cell.membraneProperties = updatedMembraneProperties;
+    cell.membraneChemistry = updatedMembraneChemistry;
+    cell.lifeHistory = float4(
+        chronologicalAge, replicationBurden, proteostasisBurden,
+        regenerativeReopening
+    );
+    cell.functionalActivity = functionalActivity;
+    cell.learning = float4(
+        cuePrediction, predictionError, habituation, acquiredBehavior
+    );
+    cell.constructionFlux = materialActivity * expenseScale;
+
+    float2 boundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
+        ? normalize(cell.tissueGeometry.xy)
+        : developmentalPolarity;
+    float exposure = saturate(cell.tissueGeometry.z);
+    float2 antiWaveDirection = length(erkGradient) > 0.0001
+        ? -normalize(erkGradient)
+        : boundaryNormal;
+    float starvationDrive = 1.0 - metabolicReadiness;
+    float2 tractionDirection = ecologicalGradientLocal *
+        (2.8 + permeabilityProgram * 2.2 + starvationDrive * 7.0) *
+            (1.0 + membraneConductivity * 0.72) +
+        antiWaveDirection * erk * (0.48 + motilityProgram * 0.86) *
+            mix(0.34, 1.0, metabolicReadiness) +
+        developmentalPolarity * (0.16 + allocationContrast * 0.18) *
+            mix(0.38, 1.0, metabolicReadiness);
+    if (length(erkGradient) > 0.0001) {
+        tractionDirection += normalize(erkGradient) * repairProgram *
+            saturate(junctionConductance) * (0.22 + (1.0 - membraneIntegrity) * 0.78);
+    }
+    tractionDirection = length(tractionDirection) > 0.0001
+        ? normalize(tractionDirection)
+        : boundaryNormal;
+    float tractionGain = development.mechanochemistryB.y;
+    float tractionActivation = exposure * motilityProgram *
+        mix(0.22, 1.0, metabolicReadiness) *
+        (0.16 + erk * 1.05) * (1.0 + reproductiveDrive * 0.28) *
+        clamp(1.0 + embodiedReplay * 0.24, 0.76, 1.24);
+    float2 activeTraction = tractionDirection * tractionActivation * tractionGain *
+        (0.000045 + cell.phenotype.y * 0.000105) *
+        (0.46 + adhesiveProgram * 0.54) *
+        (1.0 + extracellularMatrixSupport * adhesiveProgram * 0.38) *
+        (1.0 + membraneAdhesion * 0.32) * structuralDrag;
+    float functionalProtrusionGrowth =
+        multicellularExpression * protrusionGrowth *
+        (0.18 + updatedMembraneProperties.w * 0.82);
+    float footSidePhase = boundaryNormal.y >= 0.0 ? 0.0 : 0.5;
+    float footCycle = fract(gaitPhase + footSidePhase);
+    float footStance = smoothstep(0.04, 0.24, footCycle) *
+        (1.0 - smoothstep(0.62, 0.94, footCycle));
+    float appendageGrip = functionalProtrusionGrowth * integumentCoverage *
+        (0.38 + extracellularMatrixSupport * 0.42 + shearAnchoring * 0.20) *
+        (0.58 + footStance * 0.42);
+    activeTraction *= 1.0 + appendageGrip * 2.15;
+    activeTraction += tractionDirection * appendageGrip *
+        (0.000026 + contractility * 0.000048) *
+        (0.62 + footStance * 0.52);
+    activeTraction += boundaryNormal * exposure * contractility * tractionGain *
+        (0.000014 + adhesiveProgram * 0.000026) * structuralDrag;
+    float2 localFieldMotion = rotateWorldToTissue(localMechanical.xy, agent);
+    if (length(localFieldMotion) > 0.000001) {
+        activeTraction -= normalize(localFieldMotion) *
+            (shearAnchoring + appendageGrip * footStance * 0.72) *
+            environmentalDrive * (0.08 + frequencyMatch * 0.10) *
+            mix(0.30, 1.0, metabolicReadiness);
+    }
+    float propaguleDrive = max(
+        exposure * motilityProgram * development.mechanochemistryB.w *
+            (1.0 - adhesiveProgram) * smoothstep(0.16, 0.38, atp),
+        sexualRelease * exposure * (0.42 + motilityProgram * 0.58) *
+            smoothstep(0.075, 0.24, atp)
+    ) * physicalReproductiveReadiness * (0.20 + replicationActivity * 0.80) *
+        (1.0 + organismReproductivePleasure * 0.34);
+    activeTraction += boundaryNormal * propaguleDrive *
+        (0.00018 + detachmentRelease * 0.00012) * structuralDrag;
+    activeTraction *= expenseScale;
+    mechanicalForce += activeTraction + barrierForceLocal;
+    mechanicalForce += float2(
+        dot(localMechanical.xy, heading),
+        dot(localMechanical.xy, lateral)
+    ) * (0.0008 + agent.metabolicExpression.z * 0.0014);
+    cell.velocity = cell.velocity * mix(0.90, 0.62, barrierLoad) + mechanicalForce;
+    float cellSpeed = length(cell.velocity);
+    if (cellSpeed > 0.0024) { cell.velocity *= 0.0024 / cellSpeed; }
+    cell.position += cell.velocity * uniforms.transportScale;
+
+    cell.interaction = float4(
+        nearestContact,
+        contactBrake,
+        mechanosensoryDrive * 0.020
+    );
+    cell.signaling = float4(calcium, erk, refractory, neighborSignalInput);
+    cell.signalCausality = float4(
+        mechanicsToCalciumEffect,
+        calciumToERKEffect,
+        length(activeTraction),
+        signalingCost
+    );
+    cell.environment = float4(
+        (localSubstrateForcing.x + localSubstrateForcing.y) * 0.5,
+        barrierLoad,
+        localEnvironmentalFrequency,
+        frequencyMatch
+    );
+    programInteractions[gid] = float4(
+        atpSharingFlux,
+        incomingRejection,
+        meanReceptorChemistryCompatibility,
+        netProgramContribution
+    );
+    // Strength is consequence, not an abstract score: reserve, integrity,
+    // stress relief, and successful feedstock capture determine retention.
+    float embodiedAction = clamp(
+        contractility * 0.42 + motilityProgram * 0.30 +
+        secretionProgram * 0.18 + permeabilityProgram * 0.10 - 0.50,
+        -1.0, 1.0
+    );
+    float physicalConsequence = clamp(
+        (atp - cellsIn[gid].physiology.x) * 1.8 +
+        (membraneIntegrity - cellsIn[gid].physiology.w) * 2.2 +
+        (cellsIn[gid].signals.z - stress) * 0.72 + uptake * 140.0,
+        -1.0, 1.0
+    );
+    learnEmbodiedEpisode(
+        embodiedMemory, embodiedCue, embodiedAction, physicalConsequence
+    );
+    cellMemories[gid] = embodiedMemory;
+    float isolation = saturate(1.0 - contactCount / 0.72);
+    float detachmentScore = detachmentReadinessScore(
+        exposure,
+        isolation,
+        cell.physiology.x,
+        cell.physiology.w,
+        cell.phenotype.x,
+        development.mechanochemistryB.w
+    );
+    cell.tissueForce = float4(activeTraction + barrierForceLocal, 0.0, 0.0);
+    cell.tissueGeometry.w = saturate(detachmentScore);
+
+    float2 localContractionDirection = exposure > 0.05
+        ? -boundaryNormal
+        : (nearestDistance < 10.0 ? nearestContact : developmentalPolarity);
+    float2 worldActiveTraction = rotateTissueToWorld(activeTraction, agent);
+    float2 worldContraction =
+        (heading * localContractionDirection.x + lateral * localContractionDirection.y) *
+            contractility * membraneIntegrity * 0.0082 * expenseScale +
+        worldActiveTraction * 2.4;
+    uint forcingIndex = (coordinate.y * uniforms.width + coordinate.x) * 2u;
+    int forceX = int(clamp(worldContraction.x * float(mechanicalForceScale), -8192.0, 8192.0));
+    int forceY = int(clamp(worldContraction.y * float(mechanicalForceScale), -8192.0, 8192.0));
+    atomic_fetch_add_explicit(&mechanicalForcing[forcingIndex], forceX, memory_order_relaxed);
+    atomic_fetch_add_explicit(&mechanicalForcing[forcingIndex + 1u], forceY, memory_order_relaxed);
+
+    if (membraneIntegrity < 0.055 || apoptosis > 0.985 ||
+        (atp < 0.008 && stress > 0.82)) {
+        invalidateCellJunctions(
+            cellJunctions, cellOccupancy, cellIdentities,
+            ownerCellHeads, ownerCellNext, owner, gid, emptySpatialHashEntry
+        );
+        float terminalATP = max(atp, 0.0);
+        float terminalBiomassEnergy = max(biomass, 0.0) * 0.18;
+        float terminalEnergy = terminalATP + terminalBiomassEnergy;
+        float terminalRecycledMatterEnergy = terminalEnergy * 0.72;
+        float terminalHeat = terminalEnergy * 0.28;
+        addEnergyExchange(
+            cellEnergyExchange, energyTileBase, 0u, terminalRecycledMatterEnergy / 0.62
+        );
+        addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, terminalHeat);
+        addEnergyAudit(energyAudit, 2u, -terminalEnergy);
+        addEnergyAudit(energyAudit, 6u, terminalHeat);
+        addEnergyAudit(energyAudit, 7u, terminalRecycledMatterEnergy);
+        addEnergyAudit(
+            energyAudit, 9u, terminalEnergy - terminalHeat - terminalRecycledMatterEnergy
+        );
+        publishCellCorpse(
+            cellCorpses, gid, embodiedMemory, worldPosition,
+            programLineageRecords[programIndex].genomeHash, biomass,
+            membraneIntegrity, uniforms.step
+        );
+        releaseGenomeHeaderSlot(
+            programSlots, identityCounters, programIndex, cellIdentity.programGeneration
+        );
+        atomic_store_explicit(
+            &cellOccupancy[gid], cellOccupancyCorpse, memory_order_relaxed
+        );
+        atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
+        cellIdentity.owner = maxAgentCount;
+        cellIdentity.programIndex = maxGenomeHeaderCount;
+        cellIdentity.componentRoot = emptySpatialHashEntry;
+        cellIdentity.programGeneration = 0u;
+        cellIdentities[gid] = cellIdentity;
+    }
+    cellsOut[gid] = cell;
+}
+
+kernel void evolveCellMembranes(
+    device const CellState* cellsIn [[buffer(0)]],
+    device CellState* cellsOut [[buffer(1)]],
+    device const atomic_uint* cellOccupancy [[buffer(2)]],
+    device MembraneVertex* membraneVertices [[buffer(3)]],
+    constant SimulationUniforms& uniforms [[buffer(4)]],
+    device const CellIdentity* cellIdentities [[buffer(5)]],
+    device const AgentState* agents [[buffer(6)]],
+    device const ProgramLineageRecord* programLineageRecords [[buffer(7)]],
+    device const ProgramSlotState* programSlots [[buffer(8)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+            cellOccupancyAlive) { return; }
+
+    CellState cell = cellsIn[gid];
+    CellIdentity identity = cellIdentities[gid];
+    uint owner = identity.owner;
+    if (owner >= maxAgentCount) { return; }
+    if (!programSlotMatches(
+        programSlots, identity.programIndex, identity.programGeneration
+    )) { return; }
+    AgentState agent = agentWithCellProgram(
+        agents[owner], identity.programIndex, programLineageRecords
+    );
+    uint membraneBase = gid * membraneVertexCount;
+    float2 positions[membraneVertexCount];
+    float2 velocities[membraneVertexCount];
+    float localIntegrity[membraneVertexCount];
+    float previousPressure[membraneVertexCount];
+    bool uninitialized = membraneVertices[membraneBase].mechanics.x <= 0.0;
+    float targetRadius = clamp(
+        0.105 + cell.physiology.y * 0.014 - cell.mechanics.x * 0.008,
+        0.085, 0.145
+    );
+    float restEdge = 2.0 * targetRadius * sin(M_PI_F / float(membraneVertexCount));
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        MembraneVertex state = membraneVertices[membraneBase + vertexIndex];
+        if (uninitialized) {
+            float angle = (float(vertexIndex) / float(membraneVertexCount)) * 2.0 * M_PI_F +
+                cell.dynamics.z * 0.26;
+            state.position = float2(cos(angle), sin(angle)) * targetRadius;
+            state.velocity = float2(0.0);
+            state.mechanics = float4(restEdge, cell.physiology.w, 0.0, 0.0);
+        }
+        positions[vertexIndex] = state.position;
+        velocities[vertexIndex] = state.velocity;
+        localIntegrity[vertexIndex] = state.mechanics.y;
+        previousPressure[vertexIndex] = max(state.mechanics.z, 0.0);
+    }
+
+    float exposure = saturate(cell.tissueGeometry.z);
+    float2 boundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
+        ? normalize(cell.tissueGeometry.xy)
+        : (length(cell.development.xy) > 0.0001
+            ? normalize(cell.development.xy)
+            : float2(cos(cell.dynamics.z * 2.0 * M_PI_F),
+                sin(cell.dynamics.z * 2.0 * M_PI_F)));
+    float2 tractionDirection = length(cell.tissueForce.xy) > 0.000001
+        ? normalize(cell.tissueForce.xy) : boundaryNormal;
+    float sensorAngle = cell.dynamics.z * 2.0 * M_PI_F +
+        agent.dynamicExpression.w * M_PI_F + cell.resonance.x * 1.8;
+    float2 sensorDirection = normalize(
+        boundaryNormal * 0.52 + float2(cos(sensorAngle), sin(sensorAngle)) * 0.48
+    );
+    float membraneThickness = exposure * saturate(cell.membraneProperties.x);
+    float membraneStiffness = exposure * saturate(cell.membraneProperties.y);
+    float membraneConductivity = exposure * saturate(cell.membraneProperties.z);
+    float membraneAdhesion = exposure * saturate(cell.membraneProperties.w);
+    float integumentCoverage = saturate(cell.boundaryDynamics.x);
+    float integumentTension = saturate(cell.boundaryDynamics.y);
+    float multicellularAppendage =
+        (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
+    float protrusionGrowth = multicellularAppendage *
+        saturate(cell.boundaryDynamics.z);
+    float gaitPhase = fract(cell.boundaryDynamics.w + 1.0);
+    float lateralBoundaryAffinity = smoothstep(0.30, 0.76, abs(boundaryNormal.y));
+    float sidePhase = boundaryNormal.y >= 0.0 ? 0.0 : M_PI_F;
+    float strideWave = sin(gaitPhase * 2.0 * M_PI_F + sidePhase);
+    float2 appendageDirection = normalize(
+        boundaryNormal * 0.90 + float2(strideWave * 0.34, 0.0) +
+        boundaryNormal * 0.0001
+    );
+    float2 footPadDirection = normalize(
+        appendageDirection + float2(strideWave * 0.22, 0.0) +
+        appendageDirection * 0.0001
+    );
+    float appendageExtension = protrusionGrowth * lateralBoundaryAffinity *
+        (0.62 + 0.38 * (0.5 + 0.5 * strideWave));
+
+    float signedDoubleArea = 0.0;
+    float perimeter = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        signedDoubleArea += positions[vertexIndex].x * positions[next].y -
+            positions[next].x * positions[vertexIndex].y;
+        perimeter += length(positions[next] - positions[vertexIndex]);
+    }
+    float area = max(abs(signedDoubleArea) * 0.5, 0.0001);
+    float targetArea = M_PI_F * targetRadius * targetRadius;
+    float areaError = clamp((targetArea - area) / targetArea, -0.65, 0.65);
+    float transmittedForce = 0.0;
+
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint previous = (vertexIndex + membraneVertexCount - 1u) % membraneVertexCount;
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        float2 current = positions[vertexIndex];
+        float2 toPrevious = positions[previous] - current;
+        float2 toNext = positions[next] - current;
+        float previousLength = max(length(toPrevious), 0.0001);
+        float nextLength = max(length(toNext), 0.0001);
+        float radialLength = max(length(current), 0.0001);
+        float2 radialNormal = current / radialLength;
+        float forwardThicknessLobe = pow(saturate(dot(radialNormal, boundaryNormal)), 6.0) *
+            membraneThickness;
+        float conductiveLobe = pow(saturate(dot(radialNormal, sensorDirection)), 8.0) *
+            membraneConductivity;
+        float adhesiveLobe = pow(saturate(dot(radialNormal, tractionDirection)), 4.0) *
+            membraneAdhesion;
+        float legLobe = pow(
+            saturate(dot(radialNormal, appendageDirection)), 9.0
+        ) * appendageExtension;
+        float footPadLobe = pow(
+            saturate(dot(radialNormal, footPadDirection)), 16.0
+        ) * appendageExtension * (0.68 + abs(strideWave) * 0.32);
+        float appendageStructure = max(legLobe, footPadLobe);
+        float stiffnessPlate = pow(saturate(dot(radialNormal, boundaryNormal)), 2.0) *
+            membraneStiffness;
+        float vertexTargetRadius = targetRadius * (
+            1.0 + forwardThicknessLobe * 0.58 + conductiveLobe * 0.34 +
+            adhesiveLobe * 0.24 + legLobe * 0.42 +
+            footPadLobe * 0.20 + stiffnessPlate * 0.10
+        );
+        float stiffness = mix(0.006, 0.026, saturate(cell.physiology.w *
+            localIntegrity[vertexIndex])) * (1.0 + stiffnessPlate * 0.92) *
+            (1.0 + integumentCoverage * integumentTension * 1.10);
+        float2 edgeForce = toPrevious / previousLength * (previousLength - restEdge) * stiffness +
+            toNext / nextLength * (nextLength - restEdge) * stiffness;
+        float bendingStiffness = mix(
+            0.010,
+            0.030 + cell.regulation.y * 0.022,
+            saturate(localIntegrity[vertexIndex])
+        ) * (1.0 + integumentCoverage * integumentTension * 0.72) *
+            mix(1.0, 0.52, appendageStructure);
+        float2 bendingForce = (positions[previous] + positions[next] - current * 2.0) *
+            bendingStiffness;
+        float2 pressureForce = radialNormal * areaError *
+            (0.0018 + cell.physiology.x * 0.0028);
+        float2 morphogenesisForce = radialNormal *
+            clamp(vertexTargetRadius - radialLength, -0.08, 0.12) *
+            (0.0048 + cell.regulationB.w * 0.0042 + stiffnessPlate * 0.0020 +
+                appendageStructure * 0.0048);
+        float2 contractileForce = -radialNormal * cell.mechanics.x *
+            (0.00028 + cell.regulation.z * 0.00062);
+        float contactPressure = previousPressure[vertexIndex] * 0.72;
+        float integrityTarget = clamp(
+            cell.physiology.w - contactPressure * 8.0 *
+                (1.0 - integumentCoverage * integumentTension * 0.58) -
+                cell.signals.z * 0.08,
+            0.04, 1.0
+        );
+        float integrity = mix(
+            localIntegrity[vertexIndex], integrityTarget, 0.012 + cell.regulation.w * 0.014
+        );
+        float2 force = edgeForce + bendingForce + pressureForce + morphogenesisForce +
+            contractileForce;
+        float2 velocity = velocities[vertexIndex] * (0.78 + integrity * 0.12) + force;
+        float speed = length(velocity);
+        if (speed > 0.006) { velocity *= 0.006 / speed; }
+        float2 position = current + velocity * uniforms.transportScale;
+        float radius = length(position);
+        float neighborRadius = 0.5 * (length(positions[previous]) + length(positions[next]));
+        float radialAllowance = targetRadius * mix(0.18, 0.34, 1.0 - integrity);
+        float maximumRadius = min(
+            targetRadius * 1.82,
+            max(vertexTargetRadius * 1.08, neighborRadius + radialAllowance)
+        );
+        if (radius > maximumRadius) {
+            position *= maximumRadius / radius;
+            velocity *= 0.35;
+        }
+        MembraneVertex output;
+        output.position = position;
+        output.velocity = velocity;
+        output.mechanics = float4(
+            restEdge, integrity, contactPressure,
+            abs(previousLength - restEdge) + abs(nextLength - restEdge)
+        );
+        membraneVertices[membraneBase + vertexIndex] = output;
+        transmittedForce += contactPressure;
+    }
+
+    float2 membraneCentroid = float2(0.0);
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        membraneCentroid += membraneVertices[membraneBase + vertexIndex].position;
+    }
+    membraneCentroid /= float(membraneVertexCount);
+    float centroidShiftLength = length(membraneCentroid);
+    float2 transferredShift = membraneCentroid;
+    if (centroidShiftLength > 0.003) {
+        transferredShift *= 0.003 / centroidShiftLength;
+    }
+    cell.position += transferredShift;
+    cell.velocity = mix(
+        cell.velocity,
+        cell.velocity + transferredShift / max(uniforms.transportScale, 1.0),
+        0.16
+    );
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint membraneIndex = membraneBase + vertexIndex;
+        MembraneVertex membranePoint = membraneVertices[membraneIndex];
+        membranePoint.position -= membraneCentroid;
+        positions[vertexIndex] = membranePoint.position;
+        membraneVertices[membraneIndex] = membranePoint;
+    }
+
+    float centeredDoubleArea = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        centeredDoubleArea += positions[vertexIndex].x * positions[next].y -
+            positions[next].x * positions[vertexIndex].y;
+    }
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint previous = (vertexIndex + membraneVertexCount - 1u) % membraneVertexCount;
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        float2 curvatureAverage =
+            (positions[previous] + positions[vertexIndex] * 2.0 + positions[next]) * 0.25;
+        float fairing = mix(0.20, 0.38, saturate(localIntegrity[vertexIndex]));
+        velocities[vertexIndex] = mix(positions[vertexIndex], curvatureAverage, fairing);
+    }
+    float fairedDoubleArea = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        fairedDoubleArea += velocities[vertexIndex].x * velocities[next].y -
+            velocities[next].x * velocities[vertexIndex].y;
+    }
+    float areaPreservingScale = sqrt(
+        max(abs(centeredDoubleArea), 0.000001) / max(abs(fairedDoubleArea), 0.000001)
+    );
+    areaPreservingScale = clamp(areaPreservingScale, 0.92, 1.08);
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint membraneIndex = membraneBase + vertexIndex;
+        MembraneVertex membranePoint = membraneVertices[membraneIndex];
+        membranePoint.position = velocities[vertexIndex] * areaPreservingScale;
+        membraneVertices[membraneIndex] = membranePoint;
+    }
+
+    float preliminaryDoubleArea = 0.0;
+    float preliminaryPerimeter = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        float2 a = membraneVertices[membraneBase + vertexIndex].position;
+        float2 b = membraneVertices[membraneBase + next].position;
+        preliminaryDoubleArea += a.x * b.y - b.x * a.y;
+        preliminaryPerimeter += length(b - a);
+    }
+    float preliminaryAreaRatio = abs(preliminaryDoubleArea) * 0.5 / targetArea;
+    float targetPerimeter = 2.0 * M_PI_F * targetRadius;
+    float collapseRecovery = saturate((0.55 - preliminaryAreaRatio) / 0.35) * 0.58;
+    float stretchRecovery = saturate(
+        (preliminaryPerimeter / max(targetPerimeter, 0.0001) - 1.72) / 0.55
+    ) * 0.42;
+    float inversionRecovery = preliminaryDoubleArea <= 0.0 ? 0.82 : 0.0;
+    float geometryRecovery = max(inversionRecovery, max(collapseRecovery, stretchRecovery));
+    if (geometryRecovery > 0.0) {
+        float2 firstPosition = membraneVertices[membraneBase].position;
+        float referenceAngle = length(firstPosition) > 0.0001
+            ? atan2(firstPosition.y, firstPosition.x)
+            : cell.dynamics.z * 2.0 * M_PI_F;
+        for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+            uint membraneIndex = membraneBase + vertexIndex;
+            MembraneVertex membranePoint = membraneVertices[membraneIndex];
+            float angle = referenceAngle +
+                (float(vertexIndex) / float(membraneVertexCount)) * 2.0 * M_PI_F;
+            float2 regularPosition = float2(cos(angle), sin(angle)) * targetRadius;
+            membranePoint.position = mix(
+                membranePoint.position, regularPosition, geometryRecovery
+            );
+            membranePoint.velocity *= 1.0 - geometryRecovery * 0.72;
+            membraneVertices[membraneIndex] = membranePoint;
+        }
+    }
+
+    float updatedDoubleArea = 0.0;
+    float updatedPerimeter = 0.0;
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        float2 a = membraneVertices[membraneBase + vertexIndex].position;
+        float2 b = membraneVertices[membraneBase + next].position;
+        updatedDoubleArea += a.x * b.y - b.x * a.y;
+        float edgeLength = length(b - a);
+        updatedPerimeter += edgeLength;
+    }
+    float updatedArea = max(abs(updatedDoubleArea) * 0.5, 0.0001);
+    float shapeIndex = updatedPerimeter * updatedPerimeter /
+        max(4.0 * M_PI_F * updatedArea, 0.0001);
+    cell.membrane = float4(
+        updatedArea, updatedPerimeter, clamp(shapeIndex, 1.0, 3.5), transmittedForce
+    );
+    float previousExposure = saturate(cell.tissueGeometry.z);
+    float2 previousBoundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
+        ? normalize(cell.tissueGeometry.xy)
+        : (length(cell.development.xy) > 0.0001
+            ? normalize(cell.development.xy)
+            : float2(cos(cell.dynamics.z * 2.0 * M_PI_F),
+                sin(cell.dynamics.z * 2.0 * M_PI_F)));
+    float detachmentScore = detachmentReadinessScore(
+        previousExposure,
+        1.0 - cell.interaction.z,
+        cell.physiology.x,
+        cell.physiology.w,
+        cell.phenotype.x,
+        1.0
+    );
+    cell.tissueGeometry = float4(
+        previousBoundaryNormal, previousExposure, saturate(detachmentScore)
+    );
+    cellsOut[gid] = cell;
+}

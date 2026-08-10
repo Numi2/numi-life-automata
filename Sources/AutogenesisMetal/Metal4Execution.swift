@@ -219,27 +219,35 @@ final class Metal4PipelineFactory {
     }
 
     private static func packagedResourceURL(name: String, extension fileExtension: String) -> URL? {
-        let packagedBundle = Bundle.main.resourceURL
-            .map { $0.appendingPathComponent("NumiAutomata_NumiAutomata.bundle", isDirectory: true) }
-            .flatMap(Bundle.init(url:))
+        let packagedResourceURL = Bundle.main.resourceURL?
+            .appendingPathComponent("NumiAutomata_NumiAutomata.bundle", isDirectory: true)
+            .appendingPathComponent("Shaders", isDirectory: true)
+            .appendingPathComponent(name)
+            .appendingPathExtension(fileExtension)
+        if let packagedResourceURL,
+           FileManager.default.fileExists(atPath: packagedResourceURL.path) {
+            return packagedResourceURL
+        }
+        if let mainResourceURL = Bundle.main.url(
+            forResource: name,
+            withExtension: fileExtension,
+            subdirectory: "Shaders"
+        ) {
+            return mainResourceURL
+        }
+        let executablePath = Bundle.main.executableURL?.standardizedFileURL.path ?? ""
+        guard !executablePath.contains(".app/Contents/MacOS/") else {
+            return nil
+        }
 #if SWIFT_PACKAGE
-        let packageResourceURL = Bundle.module.url(
+        return Bundle.module.url(
             forResource: name,
             withExtension: fileExtension,
             subdirectory: "Shaders"
         )
 #else
-        let packageResourceURL: URL? = nil
+        return nil
 #endif
-        return packagedBundle?.url(
-            forResource: name,
-            withExtension: fileExtension,
-            subdirectory: "Shaders"
-        ) ?? Bundle.main.url(
-            forResource: name,
-            withExtension: fileExtension,
-            subdirectory: "Shaders"
-        ) ?? packageResourceURL
     }
 }
 

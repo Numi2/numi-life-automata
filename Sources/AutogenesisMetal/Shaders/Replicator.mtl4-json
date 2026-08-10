@@ -99,18 +99,13 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "D5E47953015F6D9D65623FF7722083C2594FDC49F31EC62B7B64E10545BA0D52",
-        "name": "molecularDisplayFragment",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
         "label": "4C941733E62D1A22DB62A6CBCE0757C1BF990E33CA9D5C66F1F8C5EF55B9FADF",
         "name": "compactVisibleCells",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
         "label": "167FC0ED0FFB4E20CAE5B896777DC3109EC54514C8C9D08B0C1AA35D7C32C1BC",
-        "name": "nucleateAutogenicFounder",
+        "name": "nucleateProtocells",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -145,7 +140,7 @@
       },
       {
         "label": "E8425FC003E2067C7B78F981CF7CCE36665EE37F3FC60FB42F7AB38FCA32D949",
-        "name": "injectFounder",
+        "name": "injectProtocell",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -201,6 +196,21 @@
       {
         "label": "54D9CDAACA735274415DF5AE22E4EABC846A5D7FA045B19D880B57824B435A47",
         "name": "cellularSurfaceFragment",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "BFC904A83818E2ECA332262864C9428E3B16EAE57C60BBEBB0CCDFA153CCC41C",
+        "name": "scientificContinuumFragment",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "5A18B0E1DB996D08E32CCB22E0D9704BA54CB6406C4EA9475383558A6FF32733",
+        "name": "deepBodyContextVertex",
+        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
+      },
+      {
+        "label": "CE64BD16BF0C822BACFD50DC2043E61E9B2BAB450929A78479CC3A784FF87901",
+        "name": "deepBodyContextFragment",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -269,11 +279,6 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "935E84BDED9917155ECF6390FC025F947872A45C08C3C53BC01A1D1E3995DC55",
-        "name": "waveDisplayFragment",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
         "label": "E93A9E12E1751A92B7E56F7E926AC20A72F1B57D99BF5CFCB3124961A3662602",
         "name": "resetMembraneContactWork",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
@@ -299,13 +304,8 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "EC3B644484249AD5011F638BA8C7BF82D5E60752DD96AAD229A7ED9C2D28880F",
-        "name": "spinorDisplayFragment",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
         "label": "12E800FC28ACAA37D622BCFCB30B757BC5839D6100FFAA3BB11928CEB1A43753",
-        "name": "reactWorld",
+        "name": "evolveWorldChemistry",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -330,7 +330,7 @@
       },
       {
         "label": "2BD75BA0F4CACC67B5DA98F82F15A08ACD8D2BFE3F65512B5DB420F277BFEAED",
-        "name": "applyBrush",
+        "name": "senseAndRegulateCells",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -862,25 +862,24 @@
         "fragment_function_descriptor": "fnd:54D9CDAACA735274415DF5AE22E4EABC846A5D7FA045B19D880B57824B435A47",
         "color_attachments": [
           {
-            "pixel_format": "RG11B10Float"
+            "pixel_format": "RG11B10Float",
+            "blending_state": "Enabled",
+            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
+            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
+            "source_rgb_blend_factor": "SourceAlpha"
           }
         ]
       },
       {
         "vertex_function_descriptor": "fnd:A3994F9F68D66BF1E2BD65F5F70ADFC75788B1E0846F5AF02B4B8AFFC985E8FE",
-        "fragment_function_descriptor": "fnd:D5E47953015F6D9D65623FF7722083C2594FDC49F31EC62B7B64E10545BA0D52",
+        "fragment_function_descriptor": "fnd:BFC904A83818E2ECA332262864C9428E3B16EAE57C60BBEBB0CCDFA153CCC41C",
         "color_attachments": [
           {
-            "pixel_format": "BGRA8Unorm_sRGB"
-          }
-        ]
-      },
-      {
-        "vertex_function_descriptor": "fnd:A3994F9F68D66BF1E2BD65F5F70ADFC75788B1E0846F5AF02B4B8AFFC985E8FE",
-        "fragment_function_descriptor": "fnd:935E84BDED9917155ECF6390FC025F947872A45C08C3C53BC01A1D1E3995DC55",
-        "color_attachments": [
-          {
-            "pixel_format": "BGRA8Unorm_sRGB"
+            "pixel_format": "RG11B10Float",
+            "blending_state": "Enabled",
+            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
+            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
+            "source_rgb_blend_factor": "SourceAlpha"
           }
         ]
       },
@@ -902,7 +901,7 @@
         "fragment_function_descriptor": "fnd:66C1DEB087E775FA171DB32B09AB5608B988CA33DD34E866DEDAD6ED75EA0CFB",
         "color_attachments": [
           {
-            "pixel_format": "BGRA8Unorm_sRGB",
+            "pixel_format": "RG11B10Float",
             "blending_state": "Enabled",
             "destination_alpha_blend_factor": "OneMinusSourceAlpha",
             "destination_rgb_blend_factor": "OneMinusSourceAlpha",
@@ -933,11 +932,15 @@
         ]
       },
       {
-        "vertex_function_descriptor": "fnd:A3994F9F68D66BF1E2BD65F5F70ADFC75788B1E0846F5AF02B4B8AFFC985E8FE",
-        "fragment_function_descriptor": "fnd:EC3B644484249AD5011F638BA8C7BF82D5E60752DD96AAD229A7ED9C2D28880F",
+        "vertex_function_descriptor": "fnd:5A18B0E1DB996D08E32CCB22E0D9704BA54CB6406C4EA9475383558A6FF32733",
+        "fragment_function_descriptor": "fnd:CE64BD16BF0C822BACFD50DC2043E61E9B2BAB450929A78479CC3A784FF87901",
         "color_attachments": [
           {
-            "pixel_format": "BGRA8Unorm_sRGB"
+            "pixel_format": "RG11B10Float",
+            "blending_state": "Enabled",
+            "destination_alpha_blend_factor": "OneMinusSourceAlpha",
+            "destination_rgb_blend_factor": "OneMinusSourceAlpha",
+            "source_rgb_blend_factor": "SourceAlpha"
           }
         ]
       },
@@ -946,7 +949,7 @@
         "fragment_function_descriptor": "fnd:D9C81D58FD40589C8B4127FA8B9D288D43BF20E8159C7C32221EA7E838B232DD",
         "color_attachments": [
           {
-            "pixel_format": "BGRA8Unorm_sRGB",
+            "pixel_format": "RG11B10Float",
             "blending_state": "Enabled",
             "destination_alpha_blend_factor": "OneMinusSourceAlpha",
             "destination_rgb_blend_factor": "OneMinusSourceAlpha",

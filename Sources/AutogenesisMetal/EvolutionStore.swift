@@ -4,23 +4,23 @@ import Foundation
 import simd
 
 enum FieldDisplayMode: UInt32, CaseIterable, Identifiable {
-    case ecology
-    case energy
-    case genome
-    case niches
-    case development
-    case causality
+    case chemistry
+    case materials
+    case lineages
+    case signals
+    case physiology
+    case interactions
 
     var id: UInt32 { rawValue }
 
     var label: String {
         switch self {
-        case .ecology: "World"
-        case .energy: "Energy"
-        case .genome: "Traits"
-        case .niches: "Needs"
-        case .development: "Growth"
-        case .causality: "Cause and effect"
+        case .chemistry: "Chemistry"
+        case .materials: "Materials"
+        case .lineages: "Lineages"
+        case .signals: "Signals"
+        case .physiology: "Physiology"
+        case .interactions: "Interactions"
         }
     }
 
@@ -40,11 +40,13 @@ enum EvolutionEventKind: Sendable, Equatable {
     case cellDivision
     case programMutation
     case crossbreeding
-    case maturation
+    case speciesBirth
+    case crossFeeding
+    case construction
+    case chemicalArmsRace
+    case collectiveReproduction
     case regeneration
-    case senescence
     case learning
-    case nicheConstruction
 }
 
 struct EvolutionEvent: Identifiable, Sendable, Equatable {
@@ -73,24 +75,70 @@ struct ComponentAncestryEdge: Hashable, Sendable {
     let aroseByFusion: Bool
 }
 
-struct EvolutionSnapshot: Sendable, Equatable {
+struct ChemistryObservation: Sendable, Equatable {
+    let quantumNorm: Double
+    let quantumOrder: Double
+    let basisMaterialAvailability: Double
+    let molecularActivity: Double
+    let reactiveMolecularLoad: Double
+    let membranePrecursorAvailability: Double
+    let catalyticReactionFlux: Double
+    let matterRecyclingFlux: Double
+}
+
+struct PopulationObservation: Sendable, Equatable {
+    let organismCount: Int
+    let cellCount: Int
+    let lineageCount: Int
+    let meanATP: Double
+    let meanIntegrity: Double
+    let chronologicalAge: Double
+    let replicationBurden: Double
+    let proteostasisBurden: Double
+    let injuryReopening: Double
+}
+
+struct InteractionObservation: Sendable, Equatable {
+    let crossComponentContacts: UInt32
+    let membraneBreaches: UInt32
+    let trophicTransfers: UInt32
+    let successfulFusions: UInt32
+    let transferredEnergy: Double
+    let interactionDiversity: Double
+}
+
+struct IndividualityObservation: Sendable, Equatable {
+    let mixedLineageFraction: Double
+    let maximumLineageRichness: Int
+    let boundaryCoherence: Double
+    let meanCellsPerIndividual: Double
+    let largestIndividualCellCount: Int
+}
+
+struct RuntimeObservation: Sendable, Equatable {
+    let generation: Int
+    let totalSteps: UInt64
+    let energyConservationResidual: Double
+    let cellPoolUtilization: Double
+    let genomeHeaderPoolUtilization: Double
+}
+
+struct WorldObservation: Sendable, Equatable {
     var generation: Int = 0
     var totalSteps: UInt64 = 0
-    var selectedWorld: Int = 0
-    var archiveCount: Int = 0
     var quantumNorm: Double = 0
-    var meanMolecularResourceB: Double = 0
-    var meanMolecularCatalyst: Double = 0
-    var meanMolecularToxin: Double = 0
-    var meanMolecularMembrane: Double = 0
+    var meanBasisMaterialAvailability: Double = 0
+    var meanMolecularActivity: Double = 0
+    var meanReactiveMolecularLoad: Double = 0
+    var meanMembranePrecursorAvailability: Double = 0
     var meanQuantumOrder: Double = 0
     var meanChemicalAffinity: Double = 0
-    var meanCatalystProduction: Double = 0
+    var meanCatalyticReactionFlux: Double = 0
     var meanPrebioticEnergyProduction: Double = 0
     var meanMembraneAssembly: Double = 0
-    var meanDetritalMineralization: Double = 0
+    var meanMatterRecyclingFlux: Double = 0
     var organismCount: Int = 0
-    var hunterCount: Int = 0
+    var trophicInteractionCount: Int = 0
     var organismLineageCount: Int = 0
     var meanOrganismSpeed: Double = 0
     var cellCount: Int = 0
@@ -106,8 +154,8 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanBarrierLoad: Double = 0
     var meanEnvironmentalFrequency: Double = 0
     var meanFrequencyMatch: Double = 0
-    var meanArmorConstruction: Double = 0
-    var meanPredatoryConstruction: Double = 0
+    var meanMembraneStiffness: Double = 0
+    var meanMembraneThickness: Double = 0
     var cellularEnergyHarvest: Double = 0
     var cellularEnergyDemand: Double = 0
     var cellularEnergyDissipation: Double = 0
@@ -117,14 +165,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var auditedActiveWork: Double = 0
     var auditedFrequencyWork: Double = 0
     var auditedHeatExport: Double = 0
-    var auditedDetritusReturn: Double = 0
+    var auditedRecycledMaterial: Double = 0
     var energyConservationResidual: Double = 0
     var meanProliferationProgram: Double = 0
     var meanAdhesiveProgram: Double = 0
     var meanContractileProgram: Double = 0
     var meanRepairProgram: Double = 0
-    var meanDevelopmentalNodeCount: Double = 0
-    var meanDevelopmentalEdgeCount: Double = 0
+    var meanRegulationPageCount: Double = 0
+    var meanGenomeLinkCount: Double = 0
     var meanMorphogenActivator: Double = 0
     var meanMorphogenInhibitor: Double = 0
     var meanDevelopmentalFateMemory: Double = 0
@@ -133,21 +181,21 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanDevelopmentalPolarityCoherence: Double = 0
     var meanMorphogenSynthesisRate: Double = 0
     var meanMorphogenTransportWork: Double = 0
-    var meanOntogeneticProgress: Double = 0
-    var meanReproductiveMaturity: Double = 0
-    var meanSenescentLoad: Double = 0
-    var meanRegenerativeReopening: Double = 0
-    var meanGermlineRole: Double = 0
-    var meanSomaRole: Double = 0
-    var meanNeuralRole: Double = 0
-    var meanBuilderRole: Double = 0
+    var meanChronologicalAge: Double = 0
+    var meanReplicationBurden: Double = 0
+    var meanProteostasisBurden: Double = 0
+    var meanInjuryReopening: Double = 0
+    var meanReplicationActivity: Double = 0
+    var meanMaintenanceActivity: Double = 0
+    var meanSignalActivity: Double = 0
+    var meanConstructionActivity: Double = 0
     var meanPredictionError: Double = 0
     var meanHabituation: Double = 0
     var meanAcquiredBehavior: Double = 0
-    var meanShelterConstruction: Double = 0
-    var meanReservoirConstruction: Double = 0
-    var meanRecyclingConstruction: Double = 0
-    var meanDetoxificationConstruction: Double = 0
+    var meanStiffnessDeposition: Double = 0
+    var meanStorageDeposition: Double = 0
+    var meanCatalyticDeposition: Double = 0
+    var meanReactiveBindingDeposition: Double = 0
     var meanResonanceFrequency: Double = 0
     var meanResonanceDamping: Double = 0
     var meanResonanceBandwidth: Double = 0
@@ -190,20 +238,20 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var meanJunctionCorticalTension: Double = 0
     var meanJunctionDamping: Double = 0
     var meanJunctionPermeability: Double = 0
-    var meanToxinTolerance: Double = 0
-    var meanDetritalScavenging: Double = 0
+    var meanReactiveMoleculeTolerance: Double = 0
+    var meanMoleculeScavenging: Double = 0
     var meanShearAnchoring: Double = 0
     var meanStarvationQuiescence: Double = 0
     var meanCellsPerOrganism: Double = 0
     var largestTissueCellCount: Int = 0
     var cellPoolUtilization: Double = 0
-    var heritableProgramCount: Int = 0
-    var heritableProgramPoolUtilization: Double = 0
+    var liveGenomeHeaderCount: Int = 0
+    var genomeHeaderPoolUtilization: Double = 0
     var meanMixedProgramCellFraction: Double = 0
     var maximumProgramRichness: Int = 0
     var meanProgramATPExchange: Double = 0
     var meanProgramRejection: Double = 0
-    var meanProgramRecognitionCompatibility: Double = -1
+    var meanProgramReceptorChemistryCompatibility: Double = -1
     var meanProgramNetContribution: Double = 0
     var crossComponentContactSamples: UInt32 = 0
     var membraneBreachSamples: UInt32 = 0
@@ -214,26 +262,24 @@ struct EvolutionSnapshot: Sendable, Equatable {
     var fusionContactSamples: UInt32 = 0
     var successfulFusionContactSamples: UInt32 = 0
     var metrics: WorldMetrics = .empty
-    var fitness = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
+    var openEndedness: OpenEndednessObservation = .empty
 
     init(
         generation: Int = 0,
         totalSteps: UInt64 = 0,
-        selectedWorld: Int = 0,
-        archiveCount: Int = 0,
         quantumNorm: Double = 0,
-        meanMolecularResourceB: Double = 0,
-        meanMolecularCatalyst: Double = 0,
-        meanMolecularToxin: Double = 0,
-        meanMolecularMembrane: Double = 0,
+        meanBasisMaterialAvailability: Double = 0,
+        meanMolecularActivity: Double = 0,
+        meanReactiveMolecularLoad: Double = 0,
+        meanMembranePrecursorAvailability: Double = 0,
         meanQuantumOrder: Double = 0,
         meanChemicalAffinity: Double = 0,
-        meanCatalystProduction: Double = 0,
+        meanCatalyticReactionFlux: Double = 0,
         meanPrebioticEnergyProduction: Double = 0,
         meanMembraneAssembly: Double = 0,
-        meanDetritalMineralization: Double = 0,
+        meanMatterRecyclingFlux: Double = 0,
         organismCount: Int = 0,
-        hunterCount: Int = 0,
+        trophicInteractionCount: Int = 0,
         organismLineageCount: Int = 0,
         meanOrganismSpeed: Double = 0,
         cellCount: Int = 0,
@@ -249,8 +295,8 @@ struct EvolutionSnapshot: Sendable, Equatable {
         meanBarrierLoad: Double = 0,
         meanEnvironmentalFrequency: Double = 0,
         meanFrequencyMatch: Double = 0,
-        meanArmorConstruction: Double = 0,
-        meanPredatoryConstruction: Double = 0,
+        meanMembraneStiffness: Double = 0,
+        meanMembraneThickness: Double = 0,
         cellularEnergyHarvest: Double = 0,
         cellularEnergyDemand: Double = 0,
         cellularEnergyDissipation: Double = 0,
@@ -260,14 +306,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
         auditedActiveWork: Double = 0,
         auditedFrequencyWork: Double = 0,
         auditedHeatExport: Double = 0,
-        auditedDetritusReturn: Double = 0,
+        auditedRecycledMaterial: Double = 0,
         energyConservationResidual: Double = 0,
         meanProliferationProgram: Double = 0,
         meanAdhesiveProgram: Double = 0,
         meanContractileProgram: Double = 0,
         meanRepairProgram: Double = 0,
-        meanDevelopmentalNodeCount: Double = 0,
-        meanDevelopmentalEdgeCount: Double = 0,
+        meanRegulationPageCount: Double = 0,
+        meanGenomeLinkCount: Double = 0,
         meanMorphogenActivator: Double = 0,
         meanMorphogenInhibitor: Double = 0,
         meanDevelopmentalFateMemory: Double = 0,
@@ -318,41 +364,39 @@ struct EvolutionSnapshot: Sendable, Equatable {
         meanJunctionCorticalTension: Double = 0,
         meanJunctionDamping: Double = 0,
         meanJunctionPermeability: Double = 0,
-        meanToxinTolerance: Double = 0,
-        meanDetritalScavenging: Double = 0,
+        meanReactiveMoleculeTolerance: Double = 0,
+        meanMoleculeScavenging: Double = 0,
         meanShearAnchoring: Double = 0,
         meanStarvationQuiescence: Double = 0,
         meanCellsPerOrganism: Double = 0,
         largestTissueCellCount: Int = 0,
         cellPoolUtilization: Double = 0,
-        heritableProgramCount: Int = 0,
-        heritableProgramPoolUtilization: Double = 0,
+        liveGenomeHeaderCount: Int = 0,
+        genomeHeaderPoolUtilization: Double = 0,
         meanMixedProgramCellFraction: Double = 0,
         maximumProgramRichness: Int = 0,
         meanProgramATPExchange: Double = 0,
         meanProgramRejection: Double = 0,
-        meanProgramRecognitionCompatibility: Double = -1,
+        meanProgramReceptorChemistryCompatibility: Double = -1,
         meanProgramNetContribution: Double = 0,
         metrics: WorldMetrics = .empty,
-        fitness: FitnessVector = FitnessVector(viability: 0, adaptiveComplexity: 0, recovery: 0, novelty: 0)
+        openEndedness: OpenEndednessObservation = .empty
     ) {
         self.generation = generation
         self.totalSteps = totalSteps
-        self.selectedWorld = selectedWorld
-        self.archiveCount = archiveCount
         self.quantumNorm = quantumNorm
-        self.meanMolecularResourceB = meanMolecularResourceB
-        self.meanMolecularCatalyst = meanMolecularCatalyst
-        self.meanMolecularToxin = meanMolecularToxin
-        self.meanMolecularMembrane = meanMolecularMembrane
+        self.meanBasisMaterialAvailability = meanBasisMaterialAvailability
+        self.meanMolecularActivity = meanMolecularActivity
+        self.meanReactiveMolecularLoad = meanReactiveMolecularLoad
+        self.meanMembranePrecursorAvailability = meanMembranePrecursorAvailability
         self.meanQuantumOrder = meanQuantumOrder
         self.meanChemicalAffinity = meanChemicalAffinity
-        self.meanCatalystProduction = meanCatalystProduction
+        self.meanCatalyticReactionFlux = meanCatalyticReactionFlux
         self.meanPrebioticEnergyProduction = meanPrebioticEnergyProduction
         self.meanMembraneAssembly = meanMembraneAssembly
-        self.meanDetritalMineralization = meanDetritalMineralization
+        self.meanMatterRecyclingFlux = meanMatterRecyclingFlux
         self.organismCount = organismCount
-        self.hunterCount = hunterCount
+        self.trophicInteractionCount = trophicInteractionCount
         self.organismLineageCount = organismLineageCount
         self.meanOrganismSpeed = meanOrganismSpeed
         self.cellCount = cellCount
@@ -368,8 +412,8 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.meanBarrierLoad = meanBarrierLoad
         self.meanEnvironmentalFrequency = meanEnvironmentalFrequency
         self.meanFrequencyMatch = meanFrequencyMatch
-        self.meanArmorConstruction = meanArmorConstruction
-        self.meanPredatoryConstruction = meanPredatoryConstruction
+        self.meanMembraneStiffness = meanMembraneStiffness
+        self.meanMembraneThickness = meanMembraneThickness
         self.cellularEnergyHarvest = cellularEnergyHarvest
         self.cellularEnergyDemand = cellularEnergyDemand
         self.cellularEnergyDissipation = cellularEnergyDissipation
@@ -379,14 +423,14 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.auditedActiveWork = auditedActiveWork
         self.auditedFrequencyWork = auditedFrequencyWork
         self.auditedHeatExport = auditedHeatExport
-        self.auditedDetritusReturn = auditedDetritusReturn
+        self.auditedRecycledMaterial = auditedRecycledMaterial
         self.energyConservationResidual = energyConservationResidual
         self.meanProliferationProgram = meanProliferationProgram
         self.meanAdhesiveProgram = meanAdhesiveProgram
         self.meanContractileProgram = meanContractileProgram
         self.meanRepairProgram = meanRepairProgram
-        self.meanDevelopmentalNodeCount = meanDevelopmentalNodeCount
-        self.meanDevelopmentalEdgeCount = meanDevelopmentalEdgeCount
+        self.meanRegulationPageCount = meanRegulationPageCount
+        self.meanGenomeLinkCount = meanGenomeLinkCount
         self.meanMorphogenActivator = meanMorphogenActivator
         self.meanMorphogenInhibitor = meanMorphogenInhibitor
         self.meanDevelopmentalFateMemory = meanDevelopmentalFateMemory
@@ -437,30 +481,92 @@ struct EvolutionSnapshot: Sendable, Equatable {
         self.meanJunctionCorticalTension = meanJunctionCorticalTension
         self.meanJunctionDamping = meanJunctionDamping
         self.meanJunctionPermeability = meanJunctionPermeability
-        self.meanToxinTolerance = meanToxinTolerance
-        self.meanDetritalScavenging = meanDetritalScavenging
+        self.meanReactiveMoleculeTolerance = meanReactiveMoleculeTolerance
+        self.meanMoleculeScavenging = meanMoleculeScavenging
         self.meanShearAnchoring = meanShearAnchoring
         self.meanStarvationQuiescence = meanStarvationQuiescence
         self.meanCellsPerOrganism = meanCellsPerOrganism
         self.largestTissueCellCount = largestTissueCellCount
         self.cellPoolUtilization = cellPoolUtilization
-        self.heritableProgramCount = heritableProgramCount
-        self.heritableProgramPoolUtilization = heritableProgramPoolUtilization
+        self.liveGenomeHeaderCount = liveGenomeHeaderCount
+        self.genomeHeaderPoolUtilization = genomeHeaderPoolUtilization
         self.meanMixedProgramCellFraction = meanMixedProgramCellFraction
         self.maximumProgramRichness = maximumProgramRichness
         self.meanProgramATPExchange = meanProgramATPExchange
         self.meanProgramRejection = meanProgramRejection
-        self.meanProgramRecognitionCompatibility = meanProgramRecognitionCompatibility
+        self.meanProgramReceptorChemistryCompatibility = meanProgramReceptorChemistryCompatibility
         self.meanProgramNetContribution = meanProgramNetContribution
         self.metrics = metrics
-        self.fitness = fitness
+        self.openEndedness = openEndedness
+    }
+}
+
+// These projections are observer-only value types. Nothing in the renderer binds
+// a WorldObservation back into a causal simulation buffer.
+extension WorldObservation {
+    var chemistry: ChemistryObservation {
+        ChemistryObservation(
+            quantumNorm: quantumNorm,
+            quantumOrder: meanQuantumOrder,
+            basisMaterialAvailability: meanBasisMaterialAvailability,
+            molecularActivity: meanMolecularActivity,
+            reactiveMolecularLoad: meanReactiveMolecularLoad,
+            membranePrecursorAvailability: meanMembranePrecursorAvailability,
+            catalyticReactionFlux: meanCatalyticReactionFlux,
+            matterRecyclingFlux: meanMatterRecyclingFlux
+        )
+    }
+
+    var population: PopulationObservation {
+        PopulationObservation(
+            organismCount: organismCount,
+            cellCount: cellCount,
+            lineageCount: organismLineageCount,
+            meanATP: meanCellATP,
+            meanIntegrity: meanCellIntegrity,
+            chronologicalAge: meanChronologicalAge,
+            replicationBurden: meanReplicationBurden,
+            proteostasisBurden: meanProteostasisBurden,
+            injuryReopening: meanInjuryReopening
+        )
+    }
+
+    var interactions: InteractionObservation {
+        InteractionObservation(
+            crossComponentContacts: crossComponentContactSamples,
+            membraneBreaches: membraneBreachSamples,
+            trophicTransfers: trophicTransferSamples,
+            successfulFusions: successfulFusionContactSamples,
+            transferredEnergy: transferredEnergy,
+            interactionDiversity: metrics.interactionDiversity
+        )
+    }
+
+    var individuality: IndividualityObservation {
+        IndividualityObservation(
+            mixedLineageFraction: meanMixedProgramCellFraction,
+            maximumLineageRichness: maximumProgramRichness,
+            boundaryCoherence: metrics.boundaryCoherence,
+            meanCellsPerIndividual: meanCellsPerOrganism,
+            largestIndividualCellCount: largestTissueCellCount
+        )
+    }
+
+    var runtime: RuntimeObservation {
+        RuntimeObservation(
+            generation: generation,
+            totalSteps: totalSteps,
+            energyConservationResidual: energyConservationResidual,
+            cellPoolUtilization: cellPoolUtilization,
+            genomeHeaderPoolUtilization: genomeHeaderPoolUtilization
+        )
     }
 }
 
 struct RendererSettings: Sendable, Equatable {
     var isRunning: Bool
     var stepsPerFrame: Int
-    var resourceFlux: Float
+    var externalEnergyFlux: Float
     var mutationScale: Float
     var transportScale: Float
     var mechanosensingGain: Float
@@ -482,15 +588,15 @@ final class EvolutionStore: ObservableObject {
 
     @Published var isRunning = true
     @Published var stepsPerFrame = 3
-    @Published var resourceFlux: Double = 1.0
+    @Published var externalEnergyFlux: Double = 1.0
     @Published var mutationScale: Double = 1.0
     @Published var transportScale: Double = 1.0
     @Published private(set) var mechanosensingBlocked = false
-    @Published var displayMode: FieldDisplayMode = .ecology
+    @Published var displayMode: FieldDisplayMode = .chemistry
     @Published private(set) var cameraCenter = spinorOrigin
     @Published private(set) var cameraZoom: Double = 900
-    @Published private(set) var snapshot = EvolutionSnapshot()
-    @Published private(set) var history: [EvolutionSnapshot] = []
+    @Published private(set) var snapshot = WorldObservation()
+    @Published private(set) var history: [WorldObservation] = []
     @Published private(set) var events: [EvolutionEvent] = []
     @Published private(set) var founderCount = 0
     @Published private(set) var fusionEventCount = 0
@@ -530,7 +636,17 @@ final class EvolutionStore: ObservableObject {
     private var nextEventID: UInt64 = 1
     private var lastRecordedGeneration = 0
     private var observedAgents: [AgentObservation] = []
-    private var observedLifeMilestones: [UInt32: UInt8] = [:]
+    private struct PersistentLifeEvidence {
+        var speciesWindows: UInt8 = 0
+        var regenerationWindows: UInt8 = 0
+        var learningWindows: UInt8 = 0
+        var constructionWindows: UInt8 = 0
+        var emittedFlags: UInt8 = 0
+    }
+    private var persistentLifeEvidence: [UInt32: PersistentLifeEvidence] = [:]
+    private var crossFeedingEvidenceWindows: UInt8 = 0
+    private var chemicalArmsRaceEvidenceWindows: UInt8 = 0
+    private var emittedWorldEvidence: UInt8 = 0
     private var followedBirthID: UInt32?
     private struct ObservedProgramKey: Hashable {
         let componentID: UInt64
@@ -561,7 +677,7 @@ final class EvolutionStore: ObservableObject {
     // spinor components are visible immediately. Explicit scale/follow actions
     // can still opt into tracking a biological unit.
     private var autoFollowInitialObservation = false
-    private var pendingMechanosensoryIntervention: (baseline: EvolutionSnapshot, blocked: Bool)?
+    private var pendingMechanosensoryIntervention: (baseline: WorldObservation, blocked: Bool)?
 
     init() {
         if let rawSpeed = ProcessInfo.processInfo.environment["NUMI_INITIAL_SPEED"],
@@ -573,16 +689,16 @@ final class EvolutionStore: ObservableObject {
         ], let magnification = Double(rawMagnification), magnification.isFinite else { return }
         cameraZoom = min(max(magnification, 0.000_001), 1.0e24)
         autoFollowInitialObservation = magnification >= 6
-        displayMode = magnification >= 64 && magnification < 160 ? .energy :
-            (magnification >= 18 && magnification < 64 ? .development :
-                (magnification >= 6 && magnification < 18 ? .genome : .ecology))
+        displayMode = magnification >= 64 && magnification < 160 ? .materials :
+            (magnification >= 18 && magnification < 64 ? .physiology :
+                (magnification >= 6 && magnification < 18 ? .lineages : .chemistry))
     }
 
     var rendererSettings: RendererSettings {
         RendererSettings(
             isRunning: isRunning,
             stepsPerFrame: stepsPerFrame,
-            resourceFlux: Float(resourceFlux),
+            externalEnergyFlux: Float(externalEnergyFlux),
             mutationScale: Float(mutationScale),
             transportScale: Float(transportScale),
             mechanosensingGain: mechanosensingBlocked ? 0 : 1,
@@ -617,13 +733,17 @@ final class EvolutionStore: ObservableObject {
     }
 
     func addColony() {
-        let angle = Float(addedColonyCount) * 2.3999632
-        let visibleRadius = Float(min(0.24 / max(cameraZoom, 0.001), 0.24))
-        let offset = SIMD2<Float>(cos(angle), sin(angle)) * visibleRadius
-        addColonyPosition = textureCoordinate(cameraCenter + offset)
+        addColonyPosition = openFounderPosition(near: cameraCenter)
         addedColonyCount += 1
         founderCount += 1
         hasObservedFirstBiologicalUnit = true
+        // An explicit founder is an object the user should immediately see.
+        // Stop following an older body, centre the camera on the open nursery,
+        // and use the same close-cell scale as the Story view.
+        clearFollow()
+        cameraCenter = addColonyPosition
+        cameraZoom = worldScale * 96
+        displayMode = .materials
         addColonyToken &+= 1
         recordEvent(
             generation: snapshot.generation,
@@ -634,22 +754,62 @@ final class EvolutionStore: ObservableObject {
         objectWillChange.send()
     }
 
+    private func openFounderPosition(near requested: SIMD2<Float>) -> SIMD2<Float> {
+        let clampedRequest = simd_clamp(
+            requested,
+            SIMD2<Float>(repeating: 0.018),
+            SIMD2<Float>(repeating: 0.982)
+        )
+        guard !observedAgents.isEmpty else { return clampedRequest }
+
+        func minimumClearanceSquared(at candidate: SIMD2<Float>) -> Float {
+            observedAgents.reduce(1) { clearance, agent in
+                min(clearance, simd_distance_squared(candidate, agent.position))
+            }
+        }
+
+        var bestPosition = clampedRequest
+        var bestClearance = minimumClearanceSquared(at: clampedRequest)
+        guard bestClearance < 0.000_625 else { return bestPosition }
+
+        for candidateIndex in 0..<20 {
+            let radius = Float(0.026 + Double(candidateIndex / 5) * 0.014)
+            let angle = Float(candidateIndex) * 2.399_963_23
+            let offset = SIMD2<Float>(cos(angle), sin(angle)) * radius
+            let candidate = simd_clamp(
+                clampedRequest + offset,
+                SIMD2<Float>(repeating: 0.018),
+                SIMD2<Float>(repeating: 0.982)
+            )
+            let clearance = minimumClearanceSquared(at: candidate)
+            if clearance > bestClearance {
+                bestClearance = clearance
+                bestPosition = candidate
+            }
+        }
+        return bestPosition
+    }
+
     func zoom(by factor: Double, around anchor: SIMD2<Float>, aspect: Float) {
         guard factor.isFinite, factor > 0 else { return }
+        applyZoom(by: factor, around: anchor, aspect: aspect)
+    }
+
+    private func applyZoom(by factor: Double, around anchor: SIMD2<Float>, aspect: Float) {
         let oldZoom = cameraZoom
         let newZoom = min(max(oldZoom * factor, 0.000_001), 1.0e24)
         guard newZoom != oldZoom else { return }
         let scale = aspectScale(for: aspect)
-        let effectiveAnchor = followedAgentID == nil ? anchor : SIMD2<Float>(repeating: 0.5)
-        let anchorOffset = (effectiveAnchor - SIMD2<Float>(repeating: 0.5)) * scale
-        cameraCenter += anchorOffset * Float((1 / oldZoom) - (1 / newZoom))
+        let anchorOffset = (anchor - SIMD2<Float>(repeating: 0.5)) * scale
+        cameraCenter = textureCoordinate(
+            cameraCenter + anchorOffset * Float((1 / oldZoom) - (1 / newZoom))
+        )
         cameraZoom = newZoom
-        expandWorldIfNeeded(aspect: aspect)
     }
 
     func zoom(to magnification: Double, aspect: Float) {
         let target = min(max(magnification, 1), 1.0e24)
-        zoom(
+        applyZoom(
             by: target / max(observationZoom, 0.000_001),
             around: SIMD2<Float>(repeating: 0.5),
             aspect: aspect
@@ -659,8 +819,7 @@ final class EvolutionStore: ObservableObject {
     func pan(by screenDelta: SIMD2<Float>, aspect: Float) {
         clearFollow()
         let worldDelta = screenDelta * aspectScale(for: aspect) / Float(cameraZoom)
-        cameraCenter -= worldDelta
-        expandWorldIfNeeded(aspect: aspect)
+        cameraCenter = textureCoordinate(cameraCenter - worldDelta)
     }
 
     func resetCamera() {
@@ -685,6 +844,24 @@ final class EvolutionStore: ObservableObject {
         }
         autoFollowInitialObservation = false
         follow(nearest)
+        frame(agent: nearest)
+    }
+
+    func frameLivingFocus() {
+        let current = followedAgentID.flatMap { id in
+            observedAgents.first(where: { $0.id == id })
+        }
+        guard let subject = current ?? observedAgents.min(by: {
+            simd_distance_squared($0.position, cameraCenter) <
+                simd_distance_squared($1.position, cameraCenter)
+        }) else {
+            autoFollowInitialObservation = true
+            return
+        }
+        autoFollowInitialObservation = false
+        follow(subject)
+        frame(agent: subject)
+        displayMode = .physiology
     }
 
     func followAdjacentOrganism(direction: Int) {
@@ -750,6 +927,8 @@ final class EvolutionStore: ObservableObject {
         if autoFollowInitialObservation, followedAgentID == nil, let first = agents.first {
             autoFollowInitialObservation = false
             follow(first)
+            frame(agent: first)
+            displayMode = .physiology
         }
         if !hasObservedFirstBiologicalUnit, let founder = agents.first {
             hasObservedFirstBiologicalUnit = true
@@ -759,7 +938,7 @@ final class EvolutionStore: ObservableObject {
                 kind: .founding,
                 title: "Founder cell nucleated",
                 detail: String(
-                    format: "Component handle %d initialized at (%.4f, %.4f) after local biomass, stored-energy, membrane, and catalyst thresholds were met. Individuality is inferred only from subsequent observations.",
+                    format: "Component handle %d initialized at (%.4f, %.4f) after a locally closed autocatalytic chemistry consumed basis material, stored energy, and membrane precursors. Individuality is inferred only from subsequent observations.",
                     founder.id,
                     founder.position.x,
                     founder.position.y
@@ -820,6 +999,12 @@ final class EvolutionStore: ObservableObject {
         cameraCenter = agent.position
     }
 
+    private func frame(agent: AgentObservation) {
+        let estimatedCellCount = max(Double(agent.morphology.x) * 24, 1)
+        let bodyMagnification = 128 / sqrt(estimatedCellCount)
+        cameraZoom = worldScale * min(max(bodyMagnification, 18), 128)
+    }
+
     private func clearFollow() {
         autoFollowInitialObservation = false
         followedAgentID = nil
@@ -855,18 +1040,20 @@ final class EvolutionStore: ObservableObject {
             currentComponentAutonomyVectors.removeAll(keepingCapacity: true)
             resolvedIndividualLabels.removeAll(keepingCapacity: true)
             previousResolvedIndividualKeys.removeAll(keepingCapacity: true)
-            observedLifeMilestones.removeAll(keepingCapacity: true)
+            persistentLifeEvidence.removeAll(keepingCapacity: true)
+            crossFeedingEvidenceWindows = 0
+            chemicalArmsRaceEvidenceWindows = 0
+            emittedWorldEvidence = 0
             individualityEvidence = .inconclusive
         }
         runtimeTelemetry = telemetry
     }
 
     private func observeLifeMilestones(in agents: [AgentObservation]) {
-        let maturityFlag: UInt8 = 1 << 0
+        let speciesFlag: UInt8 = 1 << 0
         let regenerationFlag: UInt8 = 1 << 1
-        let senescenceFlag: UInt8 = 1 << 2
-        let learningFlag: UInt8 = 1 << 3
-        let nicheFlag: UInt8 = 1 << 4
+        let learningFlag: UInt8 = 1 << 2
+        let constructionFlag: UInt8 = 1 << 3
         let ordered = agents.sorted {
             let lhsFollowed = $0.birthID == followedBirthID
             let rhsFollowed = $1.birthID == followedBirthID
@@ -876,18 +1063,44 @@ final class EvolutionStore: ObservableObject {
         var recordedCount = 0
 
         for agent in ordered {
-            var flags = observedLifeMilestones[agent.birthID, default: 0]
+            var evidence = persistentLifeEvidence[agent.birthID, default: .init()]
             let label = "Life-form #\(agent.birthID)"
 
-            func recordOnce(
+            func advance(_ value: inout UInt8, while condition: Bool) {
+                value = condition ? min(value &+ 1, 3) : 0
+            }
+
+            advance(
+                &evidence.speciesWindows,
+                while: agent.programReplicationGeneration > 0 &&
+                    agent.mutationDistance > 0.001 && agent.energeticIndependence > 0.35
+            )
+            advance(
+                &evidence.regenerationWindows,
+                while: agent.hasReceivedDamageChallenge && agent.lifeHistory.w >= 0.12 &&
+                    agent.functionalActivity.y >= 0.15 && agent.boundary.w >= 0.62
+            )
+            advance(
+                &evidence.learningWindows,
+                while: agent.functionalActivity.z >= 0.25 && abs(agent.learning.w) >= 0.025
+            )
+            advance(
+                &evidence.constructionWindows,
+                while: agent.functionalActivity.w >= 0.20 && max(
+                    max(agent.constructionFlux.x, agent.constructionFlux.y),
+                    max(agent.constructionFlux.z, agent.constructionFlux.w)
+                ) >= 0.015
+            )
+
+            func recordPersistentEvidence(
                 flag: UInt8,
-                condition: Bool,
+                windows: UInt8,
                 kind: EvolutionEventKind,
                 title: String,
                 detail: String
             ) -> Bool {
-                guard condition, flags & flag == 0 else { return false }
-                flags |= flag
+                guard windows >= 3, evidence.emittedFlags & flag == 0 else { return false }
+                evidence.emittedFlags |= flag
                 guard recordedCount < 2 else { return false }
                 recordEvent(
                     generation: snapshot.generation,
@@ -899,52 +1112,41 @@ final class EvolutionStore: ObservableObject {
                 return true
             }
 
-            _ = recordOnce(
-                flag: maturityFlag,
-                condition: agent.lifecycle.y >= 0.55,
-                kind: .maturation,
-                title: "\(label) reached reproductive maturity",
-                detail: "Its inherited regulation crossed the observed maturity threshold; reproduction is now physically permitted when energy, germline allocation, and detachment conditions also allow it."
+            _ = recordPersistentEvidence(
+                flag: speciesFlag,
+                windows: evidence.speciesWindows,
+                kind: .speciesBirth,
+                title: "\(label) sustained a novel inherited program",
+                detail: "The observer found a mutated genome persisting with independent energy capture for three windows. This is an observer classification and does not affect survival or reproduction."
             )
-            _ = recordOnce(
+            _ = recordPersistentEvidence(
                 flag: regenerationFlag,
-                condition: agent.lifecycle.w >= 0.18 &&
-                    (agent.hasReceivedDamageChallenge || agent.boundary.w < 0.92),
+                windows: evidence.regenerationWindows,
                 kind: .regeneration,
-                title: "\(label) reopened development after injury",
-                detail: "Damage raised its regenerative reopening state, allowing repair and developmental programs to become active again."
+                title: "\(label) sustained an injury-repair pattern",
+                detail: "After measured damage, maintenance activity, developmental reopening, and membrane integrity persisted together for three observer windows. Causation requires the paired wound/sham experiment."
             )
-            _ = recordOnce(
+            _ = recordPersistentEvidence(
                 flag: learningFlag,
-                condition: agent.roles.z >= 0.25 && abs(agent.learning.w) >= 0.025,
+                windows: evidence.learningWindows,
                 kind: .learning,
                 title: "\(label) acquired a response during life",
-                detail: "Neural-like cells changed an embodied sensorimotor bias from experience. The acquired value is not written back into the genome."
+                detail: "Signaling activity and an acquired sensorimotor bias persisted for three windows. Lifetime state remains separate from inherited genome pages."
             )
-            _ = recordOnce(
-                flag: nicheFlag,
-                condition: agent.roles.w >= 0.20 && max(
-                    max(agent.niche.x, agent.niche.y),
-                    max(agent.niche.z, agent.niche.w)
-                ) >= 0.015,
-                kind: .nicheConstruction,
-                title: "\(label) began constructing a niche",
-                detail: "Builder-like cells paid energy to alter local matrix or chemistry, creating shelter, storage, recycling, or detoxification effects."
-            )
-            _ = recordOnce(
-                flag: senescenceFlag,
-                condition: agent.lifecycle.z >= 0.22,
-                kind: .senescence,
-                title: "\(label) entered observable senescence",
-                detail: "Accumulated age load is now increasing maintenance demand and membrane wear; continued survival depends on evolved maintenance and regeneration."
+            _ = recordPersistentEvidence(
+                flag: constructionFlag,
+                windows: evidence.constructionWindows,
+                kind: .construction,
+                title: "\(label) persistently deposited material",
+                detail: "Paid stiffness, storage, catalytic, or reactive-binding deposition persisted for three windows. Any shelter, trail, reef, or reservoir function remains an observer hypothesis until counterfactual evidence is available."
             )
 
-            observedLifeMilestones[agent.birthID] = flags
+            persistentLifeEvidence[agent.birthID] = evidence
         }
 
-        if observedLifeMilestones.count > 8_192 {
+        if persistentLifeEvidence.count > 8_192 {
             let livingBirthIDs = Set(agents.map(\.birthID))
-            observedLifeMilestones = observedLifeMilestones.filter {
+            persistentLifeEvidence = persistentLifeEvidence.filter {
                 livingBirthIDs.contains($0.key)
             }
         }
@@ -987,10 +1189,10 @@ final class EvolutionStore: ObservableObject {
                 calciumToERK: Double(agent.mechanochemical.y),
                 erkToTraction: Double(agent.mechanochemical.z),
                 tractionToStrain: Double(agent.mechanochemical.w),
-                junctionTransmission: Double(agent.social.z),
-                atpSharing: Double(agent.social.x),
-                rejection: Double(agent.social.y),
-                withinComponentReplicationAdvantage: Double(agent.social.w),
+                junctionTransmission: Double(agent.junctionChemistry.z),
+                atpSharing: Double(agent.junctionChemistry.x),
+                rejection: Double(agent.junctionChemistry.y),
+                withinComponentReplicationAdvantage: Double(agent.junctionChemistry.w),
                 descendantRepresentation: agent.componentDescentDepth > 0 ? 1 : 0,
                 parentResemblance: parentResemblance
             )
@@ -1030,10 +1232,10 @@ final class EvolutionStore: ObservableObject {
                 calciumToERK: Double(cell.mechanochemical.y),
                 erkToTraction: Double(cell.mechanochemical.z),
                 tractionToStrain: Double(cell.mechanochemical.w),
-                junctionTransmission: Double(cell.social.z),
-                atpSharing: Double(cell.social.x),
-                rejection: Double(cell.social.y),
-                withinComponentReplicationAdvantage: Double(cell.social.w),
+                junctionTransmission: Double(cell.junctionChemistry.z),
+                atpSharing: Double(cell.junctionChemistry.x),
+                rejection: Double(cell.junctionChemistry.y),
+                withinComponentReplicationAdvantage: Double(cell.junctionChemistry.w),
                 descendantRepresentation: 0,
                 parentResemblance: 0
             )
@@ -1072,12 +1274,20 @@ final class EvolutionStore: ObservableObject {
             }
         resolvedIndividualLabels = Array(allResolvedKeys.prefix(6))
         let resolvedKeys = Set(allResolvedKeys)
+        let descendantCollectiveKeys = Set(agents.lazy.filter {
+            $0.componentDescentDepth > 0
+        }.map { "C#\($0.birthID)" })
         for key in resolvedKeys.subtracting(previousResolvedIndividualKeys).sorted() {
+            let isCollectiveReproduction = descendantCollectiveKeys.contains(key)
             recordEvent(
                 generation: snapshot.generation,
-                kind: .emergence,
-                title: "Observer resolved \(key)",
-                detail: "The current partition sustained energetic uptake, boundary repair, mechanochemical closure, and endogenous predictability across the required autocorrelation-adjusted evidence windows. This observer result does not alter causal dynamics."
+                kind: isCollectiveReproduction ? .collectiveReproduction : .emergence,
+                title: isCollectiveReproduction
+                    ? "Observer resolved reproduced collective \(key)"
+                    : "Observer resolved \(key)",
+                detail: isCollectiveReproduction
+                    ? "A physically separated descendant sustained energetic uptake, boundary repair, mechanochemical closure, parent-organization resemblance, and endogenous predictability across the required evidence windows. This classification does not alter causal dynamics."
+                    : "The current partition sustained energetic uptake, boundary repair, mechanochemical closure, and endogenous predictability across the required autocorrelation-adjusted evidence windows. This observer result does not alter causal dynamics."
             )
         }
         for key in previousResolvedIndividualKeys.subtracting(resolvedKeys).sorted() {
@@ -1370,7 +1580,7 @@ final class EvolutionStore: ObservableObject {
         effectiveZoom
     }
 
-    func apply(_ newSnapshot: EvolutionSnapshot) {
+    func apply(_ newSnapshot: WorldObservation) {
         var analyzedSnapshot = newSnapshot
         analyzedSnapshot.persistentCladeCount = lineageAnalysis.persistentCladeCount
         analyzedSnapshot.meanMorphologyDistance = lineageAnalysis.meanMorphologyDistance
@@ -1384,9 +1594,46 @@ final class EvolutionStore: ObservableObject {
         }
         lastRecordedGeneration = analyzedSnapshot.generation
         observeMechanosensoryIntervention(to: analyzedSnapshot)
+        observePersistentEcologyEvidence(from: previous, to: analyzedSnapshot)
         observeChange(from: previous, to: analyzedSnapshot)
-        if analyzedSnapshot.metrics.occupiedFraction > 0.72 {
-            expandBackingWorld()
+    }
+
+    private func observePersistentEcologyEvidence(
+        from previous: WorldObservation?,
+        to current: WorldObservation
+    ) {
+        guard let previous else { return }
+        let crossFeedingCandidate = current.trophicTransferSamples > 0 &&
+            current.meanCatalyticDeposition > 0.002 &&
+            current.meanMatterRecyclingFlux > previous.meanMatterRecyclingFlux &&
+            current.cellularEnergyHarvest > previous.cellularEnergyHarvest
+        crossFeedingEvidenceWindows = crossFeedingCandidate
+            ? min(crossFeedingEvidenceWindows &+ 1, 3) : 0
+
+        let armsRaceCandidate = current.membraneBreachSamples > 0 &&
+            current.resistedAttackSamples > 0 &&
+            current.meanReactiveMolecularLoad > 0.002 &&
+            current.meanReactiveMoleculeTolerance > previous.meanReactiveMoleculeTolerance
+        chemicalArmsRaceEvidenceWindows = armsRaceCandidate
+            ? min(chemicalArmsRaceEvidenceWindows &+ 1, 3) : 0
+
+        if crossFeedingEvidenceWindows >= 3, emittedWorldEvidence & 1 == 0 {
+            emittedWorldEvidence |= 1
+            recordEvent(
+                generation: current.generation,
+                kind: .crossFeeding,
+                title: "Persistent reciprocal matter-flow candidate",
+                detail: "Trophic transfer, catalytic deposition, matter recycling, and recipient energy capture rose together for three windows. Story treats this as a candidate; a paired pathway ablation is still required before calling it cross-feeding causally."
+            )
+        }
+        if chemicalArmsRaceEvidenceWindows >= 3, emittedWorldEvidence & 2 == 0 {
+            emittedWorldEvidence |= 2
+            recordEvent(
+                generation: current.generation,
+                kind: .chemicalArmsRace,
+                title: "Persistent chemical conflict candidate",
+                detail: "Reactive molecular load, membrane breaches, resisted contacts, and evolved tolerance co-varied for three windows. A receptor/reaction ablation is still required before claiming a chemical arms race causally."
+            )
         }
     }
 
@@ -1408,28 +1655,7 @@ final class EvolutionStore: ObservableObject {
         )
     }
 
-    private func expandWorldIfNeeded(aspect: Float) {
-        let scale = aspectScale(for: aspect)
-        var iterations = 0
-        while iterations < 64 {
-            let halfView = scale * (0.5 / Float(cameraZoom))
-            let exposesEdge = cameraZoom < 1 ||
-                cameraCenter.x - halfView.x < 0 || cameraCenter.x + halfView.x > 1 ||
-                cameraCenter.y - halfView.y < 0 || cameraCenter.y + halfView.y > 1
-            guard exposesEdge else { return }
-            expandBackingWorld()
-            iterations += 1
-        }
-    }
-
-    private func expandBackingWorld() {
-        cameraCenter = SIMD2<Float>(repeating: 0.25) + cameraCenter * 0.5
-        cameraZoom *= 2
-        worldScale *= 2
-        expansionToken &+= 1
-    }
-
-    private func observeChange(from previous: EvolutionSnapshot?, to current: EvolutionSnapshot) {
+    private func observeChange(from previous: WorldObservation?, to current: WorldObservation) {
         guard let previous else {
             recordEvent(
                 generation: current.generation,
@@ -1476,13 +1702,13 @@ final class EvolutionStore: ObservableObject {
             recordedMajorEvent = true
         }
 
-        if current.metrics.resourceDensity < 0.015,
-           previous.metrics.resourceDensity >= 0.015 {
+        if current.metrics.basisMaterialDensity < 0.015,
+           previous.metrics.basisMaterialDensity >= 0.015 {
             recordEvent(
                 generation: current.generation,
                 kind: .scarcity,
-                title: "Mean resource density crossed below 0.015",
-                detail: "Measured free-resource density: \(decimal(current.metrics.resourceDensity))."
+                title: "Available basis material crossed below 0.015",
+                detail: "Measured freely available basis material: \(decimal(current.metrics.basisMaterialDensity))."
             )
             recordedMajorEvent = true
         }
@@ -1519,7 +1745,7 @@ final class EvolutionStore: ObservableObject {
         }
     }
 
-    private func observeMechanosensoryIntervention(to current: EvolutionSnapshot) {
+    private func observeMechanosensoryIntervention(to current: WorldObservation) {
         guard let pending = pendingMechanosensoryIntervention,
               current.generation > pending.baseline.generation else { return }
         let baseline = pending.baseline
@@ -1566,9 +1792,11 @@ final class EvolutionStore: ObservableObject {
         }
     }
 
-    private func observationTitle(for snapshot: EvolutionSnapshot) -> String {
+    private func observationTitle(for snapshot: WorldObservation) -> String {
         if snapshot.metrics.temporalActivity > 0.03 { return "Temporal activity exceeds 0.030" }
-        if snapshot.fitness.diversification > 0.35 { return "Diversification score exceeds 0.35" }
+        if snapshot.openEndedness.current.functionalDiversity > 0.35 {
+            return "Persistent functional diversity is rising"
+        }
         if snapshot.metrics.occupiedFraction > 0.72 { return "Occupied-cell fraction exceeds 0.72" }
         return "Periodic metric reduction completed"
     }
@@ -1578,7 +1806,7 @@ final class EvolutionStore: ObservableObject {
             .first { previous < $0 && current >= $0 }
     }
 
-    private func observationDetail(for snapshot: EvolutionSnapshot) -> String {
+    private func observationDetail(for snapshot: WorldObservation) -> String {
         "Occupied \(percent(snapshot.metrics.occupiedFraction)); " +
             "lineage bins \(lineageEstimate(snapshot.metrics.lineageDiversity))/16; " +
             "mean temporal activity \(decimal(snapshot.metrics.temporalActivity))."

@@ -10,7 +10,7 @@ struct LifecycleExperimentConfiguration: Codable, Sendable {
     var steps: UInt64 = 18_000
     var interventionStep: UInt64 = 9_600
     var recoveryDelay: UInt64 = 1_200
-    var maturationWindow: UInt64 = 600
+    var persistenceWindow: UInt64 = 600
     var batchSize = 64
     var sampleInterval: UInt64 = 600
     var auditInterval: UInt64 = 1
@@ -20,12 +20,12 @@ struct LifecycleExperimentConfiguration: Codable, Sendable {
     var outputPath = ""
 
     static let usage = """
-    Usage: NumiAutomata lifecycle-experiment [options]
+    Usage: NumiAutomata lifeHistory-experiment [options]
 
       --steps N             Final step for each paired run (default: 18000)
       --intervention-step N Last unwounded baseline step (default: 9600)
       --recovery-delay N    Steps allowed before recovery is assessed (default: 1200)
-      --maturation-window N Required stable grandchild duration (default: 600)
+      --persistence-window N Required stable descendant duration (default: 600)
       --max-seeds N         Maximum fixed seeds attempted, 4...128 (default: 128)
       --minimum-valid N     Eligible valid cycles required, 1...64 (default: 8)
       --seed N              Master UInt32 seed (default: 1)
@@ -74,13 +74,13 @@ struct LifecycleExperimentConfiguration: Codable, Sendable {
                     )
                 }
                 configuration.recoveryDelay = parsed
-            case "--maturation-window":
+            case "--persistence-window":
                 guard let parsed = UInt64(try value(after: argument)), parsed > 0 else {
                     throw HeadlessExperimentError.invalidArgument(
-                        "--maturation-window must be positive."
+                        "--persistence-window must be positive."
                     )
                 }
-                configuration.maturationWindow = parsed
+                configuration.persistenceWindow = parsed
             case "--max-seeds":
                 guard let parsed = Int(try value(after: argument)), (4...128).contains(parsed) else {
                     throw HeadlessExperimentError.invalidArgument("--max-seeds must be in 4...128.")
@@ -141,21 +141,21 @@ struct LifecycleExperimentConfiguration: Codable, Sendable {
             )
         }
         let recoveryStep = configuration.interventionStep &+ configuration.recoveryDelay
-        guard recoveryStep &+ configuration.maturationWindow < configuration.steps else {
+        guard recoveryStep &+ configuration.persistenceWindow < configuration.steps else {
             throw HeadlessExperimentError.invalidArgument(
-                "The run must extend beyond recovery by more than the maturation window."
+                "The run must extend beyond recovery by more than the persistence window."
             )
         }
-        guard configuration.sampleInterval <= configuration.maturationWindow else {
+        guard configuration.sampleInterval <= configuration.persistenceWindow else {
             throw HeadlessExperimentError.invalidArgument(
-                "--sample-every cannot exceed --maturation-window."
+                "--sample-every cannot exceed --persistence-window."
             )
         }
         if configuration.outputPath.isEmpty {
             let timestamp = ISO8601DateFormatter().string(from: Date())
                 .replacingOccurrences(of: ":", with: "-")
             configuration.outputPath = FileManager.default.currentDirectoryPath +
-                "/Experiments/lifecycle-\(timestamp).jsonl"
+                "/Experiments/lifeHistory-\(timestamp).jsonl"
         }
         return configuration
     }
@@ -253,8 +253,8 @@ enum LifecycleExperimentCLI {
             targetRule: "Use the same deterministic regenerative-descendant target selected by the paired sham and wound branches at the final baseline step.",
             stoppingRule: "Attempt fixed SplitMix64-derived seeds in order until the predeclared valid-cycle count is reached or maximumSeedCount is exhausted. Stopping never depends on success or resemblance.",
             validCycleRule: "The same target must exist in both baseline branches, receive the treatment wound, and both runs must retain zero invariant flags and absolute energy residual at most 0.001.",
-            completedCycleRule: "The wounded target must recover relative to its sham twin, then emit a physical fission whose child crosses reproductive maturity and remains multicellular, metabolically viable, developmentally restarted, and observed across the maturation window.",
-            qualificationRule: "At least minimumValidCycles are required; a two-sided 95% Wilson lower bound above 0.5 supports recovery or lifecycle completion.",
+            completedCycleRule: "The wounded target must recover relative to its sham twin, then emit a physical fission whose descendant remains multicellular, metabolically viable, developmentally active, and persistent across the declared observation window. No life-stage threshold is used.",
+            qualificationRule: "At least minimumValidCycles are required; a two-sided 95% Wilson lower bound above 0.5 supports recovery or lifeHistory completion.",
             configuration: configuration
         ))
 
@@ -455,8 +455,8 @@ enum LifecycleExperimentCLI {
                 recovery: lifecycleEstimate,
                 minimumTrials: configuration.minimumValidCycles,
                 threshold: 0.5,
-                outcomeLabel: "complete-lifecycle",
-                validTrialDescription: "lifecycle cycles were observed"
+                outcomeLabel: "complete-lifeHistory",
+                validTrialDescription: "lifeHistory cycles were observed"
             ),
             meanMorphologyResemblance: mean(morphologyResemblances),
             meanFunctionalResemblance: mean(functionalResemblances),
@@ -472,21 +472,21 @@ enum LifecycleExperimentCLI {
     }
 
     private static func runConfiguration(
-        _ lifecycle: LifecycleExperimentConfiguration,
+        _ lifeHistory: LifecycleExperimentConfiguration,
         seed: UInt32,
         mode: DamageChallengeMode
     ) -> HeadlessExperimentConfiguration {
         var configuration = HeadlessExperimentConfiguration()
         configuration.seed = seed
-        configuration.steps = lifecycle.steps
-        configuration.batchSize = lifecycle.batchSize
-        configuration.sampleInterval = lifecycle.sampleInterval
-        configuration.auditInterval = lifecycle.auditInterval
-        configuration.quantumStride = lifecycle.quantumStride
-        configuration.strictInvariants = lifecycle.strictInvariants
+        configuration.steps = lifeHistory.steps
+        configuration.batchSize = lifeHistory.batchSize
+        configuration.sampleInterval = lifeHistory.sampleInterval
+        configuration.auditInterval = lifeHistory.auditInterval
+        configuration.quantumStride = lifeHistory.quantumStride
+        configuration.strictInvariants = lifeHistory.strictInvariants
         configuration.damageChallenge = DamageChallengeSchedule(
             mode: mode,
-            interventionStep: lifecycle.interventionStep
+            interventionStep: lifeHistory.interventionStep
         )
         configuration.outputPath = "/dev/null"
         return configuration
@@ -522,11 +522,10 @@ enum LifecycleExperimentCLI {
         let viable = snapshots.filter {
             $0.birthID == birthID && $0.step >= bornAt &&
                 $0.regeneratedDevelopment && $0.cellCount >= 2 &&
-                $0.atp >= 0.08 && $0.integrity >= 0.60 && $0.stress <= 0.35 &&
-                $0.reproductiveMaturity >= 0.55
+                $0.atp >= 0.08 && $0.integrity >= 0.60 && $0.stress <= 0.35
         }.sorted { $0.step < $1.step }
         guard let first = viable.first, let last = viable.last,
-              last.step >= first.step + configuration.maturationWindow else { return [] }
+              last.step >= first.step + configuration.persistenceWindow else { return [] }
         return viable
     }
 

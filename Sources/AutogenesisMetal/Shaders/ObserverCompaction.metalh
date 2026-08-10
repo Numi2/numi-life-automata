@@ -1,0 +1,287 @@
+kernel void resetActiveComponentDispatch(
+    device atomic_uint* activeComponentCount [[buffer(0)]],
+    device uint* dispatchArguments [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    atomic_store_explicit(activeComponentCount, 0u, memory_order_relaxed);
+    dispatchArguments[0] = 0u;
+    dispatchArguments[1] = 1u;
+    dispatchArguments[2] = 1u;
+}
+
+kernel void compactActiveComponents(
+    device const atomic_uint* occupancy [[buffer(0)]],
+    device uint* activeComponents [[buffer(1)]],
+    device atomic_uint* activeComponentCount [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= maxAgentCount ||
+        atomic_load_explicit(&occupancy[gid], memory_order_relaxed) != 1u) { return; }
+    uint compactIndex = atomic_fetch_add_explicit(
+        activeComponentCount, 1u, memory_order_relaxed
+    );
+    activeComponents[compactIndex] = gid;
+}
+
+kernel void prepareActiveComponentDispatch(
+    device const atomic_uint* activeComponentCount [[buffer(0)]],
+    device uint* dispatchArguments [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint count = atomic_load_explicit(activeComponentCount, memory_order_relaxed);
+    dispatchArguments[0] = (count + 63u) / 64u;
+    dispatchArguments[1] = 1u;
+    dispatchArguments[2] = 1u;
+}
+
+kernel void compactActiveCellsOrdered(
+    device const atomic_uint* cellOccupancy [[buffer(0)]],
+    device uint* activeCellIndices [[buffer(1)]],
+    device atomic_uint* activeCellCount [[buffer(2)]],
+    device uint* dispatchArguments [[buffer(3)]],
+    uint threadIndex [[thread_index_in_threadgroup]],
+    uint threadCount [[threads_per_threadgroup]]
+) {
+    threadgroup uint localCounts[256];
+    threadgroup uint localOffsets[256];
+    uint chunkSize = (maxCellCount + threadCount - 1u) / threadCount;
+    uint start = min(threadIndex * chunkSize, maxCellCount);
+    uint end = min(start + chunkSize, maxCellCount);
+    uint localCount = 0u;
+    for (uint cellIndex = start; cellIndex < end; ++cellIndex) {
+        if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) ==
+            cellOccupancyAlive) {
+            localCount += 1u;
+        }
+    }
+    localCounts[threadIndex] = localCount;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (threadIndex == 0u) {
+        uint prefix = 0u;
+        for (uint index = 0u; index < threadCount; ++index) {
+            localOffsets[index] = prefix;
+            prefix += localCounts[index];
+        }
+        atomic_store_explicit(activeCellCount, prefix, memory_order_relaxed);
+        dispatchArguments[0] = (prefix + 63u) / 64u;
+        dispatchArguments[1] = 1u;
+        dispatchArguments[2] = 1u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint output = localOffsets[threadIndex];
+    for (uint cellIndex = start; cellIndex < end; ++cellIndex) {
+        if (atomic_load_explicit(&cellOccupancy[cellIndex], memory_order_relaxed) ==
+            cellOccupancyAlive) {
+            activeCellIndices[output++] = cellIndex;
+        }
+    }
+}
+
+kernel void expandAgents(
+    device AgentState* agents [[buffer(0)]],
+    device atomic_uint* occupancy [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= maxAgentCount || atomic_load_explicit(&occupancy[gid], memory_order_relaxed) == 0u) { return; }
+    AgentState agent = agents[gid];
+    agent.position = 0.25 + agent.position * 0.5;
+    agent.velocity *= 0.5;
+    agents[gid] = agent;
+}
+
+kernel void resetRenderDrawArguments(
+    device atomic_uint* cellDrawArguments [[buffer(0)]],
+    device atomic_uint* meshDispatchArguments [[buffer(1)]],
+    device atomic_uint* junctionDrawArguments [[buffer(2)]],
+    device const atomic_uint* contactWorkState [[buffer(3)]],
+    device uint* junctionCompactionDispatchArguments [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    for (uint index = 0u; index < 4u; ++index) {
+        atomic_store_explicit(&cellDrawArguments[index], 0u, memory_order_relaxed);
+        atomic_store_explicit(&junctionDrawArguments[index], 0u, memory_order_relaxed);
+    }
+    for (uint index = 0u; index < 3u; ++index) {
+        atomic_store_explicit(&meshDispatchArguments[index], 0u, memory_order_relaxed);
+    }
+    uint registeredCount = min(
+        atomic_load_explicit(
+            &contactWorkState[registeredJunctionCountIndex], memory_order_relaxed
+        ),
+        cellJunctionCapacity
+    );
+    junctionCompactionDispatchArguments[0] = (registeredCount + 63u) / 64u;
+    junctionCompactionDispatchArguments[1] = 1u;
+    junctionCompactionDispatchArguments[2] = 1u;
+}
+
+kernel void compactVisibleCells(
+    device const atomic_uint* agentOccupancy [[buffer(0)]],
+    device const atomic_uint* cellOccupancy [[buffer(1)]],
+    device uint* visibleCellIndices [[buffer(2)]],
+    device atomic_uint* drawArguments [[buffer(3)]],
+    constant SimulationUniforms& uniforms [[buffer(4)]],
+    device const CellIdentity* cellIdentities [[buffer(5)]],
+    device const AgentState* agents [[buffer(6)]],
+    device const CellState* cells [[buffer(7)]],
+    device atomic_uint* meshDispatchArguments [[buffer(8)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+            cellOccupancyAlive) { return; }
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    if (observationZoom <= 0.35) { return; }
+    if (uniforms.trackedAgentID != 0xffffffffu &&
+        uniforms.trackedAgentID != owner && observationZoom >= 34.0) { return; }
+
+    float2 center = cellWorldPosition(agents[owner], cells[gid].position, uniforms);
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0
+        ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float cameraZoom = max(uniforms.cameraZoom, 0.000000001);
+    float2 halfViewWorld = 0.5 * viewScale / cameraZoom;
+    float worldRadius = 0.33 * cellWorldScale(uniforms);
+    float2 worldMargin = float2(worldRadius + 0.004 / cameraZoom);
+    if (any(abs(center - uniforms.cameraCenter) >
+        halfViewWorld + worldMargin)) { return; }
+
+    uint target = atomic_fetch_add_explicit(&drawArguments[1], 1u, memory_order_relaxed);
+    if (observationZoom < 64.0) {
+        atomic_fetch_add_explicit(&meshDispatchArguments[0], 1u, memory_order_relaxed);
+    }
+    if (target < maxCellCount) {
+        visibleCellIndices[target] = gid;
+    }
+}
+
+kernel void compactVisibleJunctions(
+    device const CellJunctionState* junctionStates [[buffer(0)]],
+    device const atomic_uint* cellOccupancy [[buffer(1)]],
+    device const CellIdentity* cellIdentities [[buffer(2)]],
+    device const AgentState* agents [[buffer(3)]],
+    device const atomic_uint* agentOccupancy [[buffer(4)]],
+    device const CellState* cells [[buffer(5)]],
+    constant SimulationUniforms& uniforms [[buffer(6)]],
+    device uint* visibleJunctionIndices [[buffer(7)]],
+    device atomic_uint* drawArguments [[buffer(8)]],
+    device const uint* registeredJunctionIndices [[buffer(9)]],
+    device const atomic_uint* contactWorkState [[buffer(10)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    uint registeredCount = min(
+        atomic_load_explicit(
+            &contactWorkState[registeredJunctionCountIndex], memory_order_relaxed
+        ),
+        cellJunctionCapacity
+    );
+    if (compactIndex >= registeredCount) { return; }
+    uint junctionIndex = registeredJunctionIndices[compactIndex];
+    if (junctionIndex >= cellJunctionCapacity) { return; }
+    uint pairKey = atomic_load_explicit(
+        &junctionStates[junctionIndex].pairKey, memory_order_relaxed
+    );
+    if (pairKey == emptySpatialHashEntry || pairKey == 0u) { return; }
+    uint packedPair = pairKey - 1u;
+    uint cellA = packedPair / maxCellCount;
+    uint cellB = packedPair % maxCellCount;
+    if (cellA >= maxCellCount || cellB >= maxCellCount || cellA >= cellB ||
+        atomic_load_explicit(&cellOccupancy[cellA], memory_order_relaxed) !=
+            cellOccupancyAlive ||
+        atomic_load_explicit(&cellOccupancy[cellB], memory_order_relaxed) !=
+            cellOccupancyAlive) { return; }
+    uint owner = cellIdentities[cellA].owner;
+    if (owner >= maxAgentCount || cellIdentities[cellB].owner != owner ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+    uint lastSeen = atomic_load_explicit(
+        &junctionStates[junctionIndex].lastSeenStep, memory_order_relaxed
+    );
+    if (uniforms.step < lastSeen || uniforms.step - lastSeen > 180u ||
+        junctionStates[junctionIndex].persistentFingerprint !=
+            cellPairFingerprint(cellIdentities, cellA, cellB) ||
+        !isfinite(junctionStates[junctionIndex].restDistance) ||
+        !isfinite(junctionStates[junctionIndex].strength) ||
+        !isfinite(junctionStates[junctionIndex].age) ||
+        !isfinite(junctionStates[junctionIndex].load) ||
+        !all(isfinite(junctionStates[junctionIndex].material)) ||
+        !all(isfinite(junctionStates[junctionIndex].remodeling))) { return; }
+
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    if (observationZoom <= 0.35 || observationZoom >= 64.0 ||
+        (uniforms.trackedAgentID != 0xffffffffu &&
+            uniforms.trackedAgentID != owner && observationZoom >= 34.0)) { return; }
+    float2 centerA = cellWorldPosition(agents[owner], cells[cellA].position, uniforms);
+    float2 centerB = cellWorldPosition(agents[owner], cells[cellB].position, uniforms);
+    if (!all(isfinite(centerA)) || !all(isfinite(centerB))) { return; }
+    float safeAspect = max(uniforms.viewportAspect, 0.001);
+    float2 viewScale = safeAspect >= 1.0
+        ? float2(1.0, 1.0 / safeAspect) : float2(safeAspect, 1.0);
+    float2 screenA = 0.5 + (centerA - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    float2 screenB = 0.5 + (centerB - uniforms.cameraCenter) *
+        max(uniforms.cameraZoom, 0.000000001) / viewScale;
+    float2 lower = min(screenA, screenB);
+    float2 upper = max(screenA, screenB);
+    if (any(upper < float2(-0.025)) || any(lower > float2(1.025))) { return; }
+
+    uint target = atomic_fetch_add_explicit(&drawArguments[1], 1u, memory_order_relaxed);
+    if (target < cellJunctionCapacity) {
+        visibleJunctionIndices[target] = junctionIndex;
+    }
+}
+
+kernel void finalizeRenderDrawArguments(
+    device atomic_uint* cellDrawArguments [[buffer(0)]],
+    device atomic_uint* meshDispatchArguments [[buffer(1)]],
+    device atomic_uint* junctionDrawArguments [[buffer(2)]],
+    constant SimulationUniforms& uniforms [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint cellCount = min(
+        atomic_load_explicit(&cellDrawArguments[1], memory_order_relaxed),
+        maxCellCount
+    );
+    uint meshCount = min(
+        atomic_load_explicit(&meshDispatchArguments[0], memory_order_relaxed),
+        maxCellCount
+    );
+    uint junctionCount = min(
+        atomic_load_explicit(&junctionDrawArguments[1], memory_order_relaxed),
+        cellJunctionCapacity
+    );
+    float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
+    uint cellVertexCount = observationZoom >= 160.0
+        ? membraneVertexCount * 6u
+        : (observationZoom < 64.0
+            ? (membraneRenderSegmentCount / 2u) * 3u
+            : membraneRenderSegmentCount * 3u);
+    atomic_store_explicit(&cellDrawArguments[0], cellVertexCount, memory_order_relaxed);
+    atomic_store_explicit(&cellDrawArguments[1], cellCount, memory_order_relaxed);
+    atomic_store_explicit(&cellDrawArguments[2], 0u, memory_order_relaxed);
+    atomic_store_explicit(&cellDrawArguments[3], 0u, memory_order_relaxed);
+    atomic_store_explicit(&meshDispatchArguments[0], meshCount, memory_order_relaxed);
+    atomic_store_explicit(&meshDispatchArguments[1], 1u, memory_order_relaxed);
+    atomic_store_explicit(&meshDispatchArguments[2], 1u, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[0], 6u, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[1], junctionCount, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[2], 0u, memory_order_relaxed);
+    atomic_store_explicit(&junctionDrawArguments[3], 0u, memory_order_relaxed);
+}
+
+struct RasterData {
+    float4 position [[position]];
+    float2 uv;
+};

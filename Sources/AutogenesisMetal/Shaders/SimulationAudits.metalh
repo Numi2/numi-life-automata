@@ -1,0 +1,1536 @@
+kernel void initializeInvariantAudit(
+    device atomic_uint* invariantState [[buffer(0)]],
+    device atomic_int* scratch [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid < invariantScratchCount) {
+        atomic_store_explicit(&scratch[gid], 0, memory_order_relaxed);
+    }
+    if (gid < invariantStateCount) {
+        atomic_store_explicit(&invariantState[gid], 0u, memory_order_relaxed);
+    }
+    if (gid == 0u) {
+        atomic_store_explicit(&invariantState[1], 0xffffffffu, memory_order_relaxed);
+    }
+}
+
+kernel void clearInvariantScratch(
+    device atomic_int* scratch [[buffer(0)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid < invariantScratchCount) {
+        atomic_store_explicit(&scratch[gid], 0, memory_order_relaxed);
+    }
+}
+
+kernel void auditContactMomentum(
+    device const atomic_int* contactEffects [[buffer(0)]],
+    device atomic_int* scratch [[buffer(1)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount) { return; }
+    atomic_fetch_add_explicit(
+        &scratch[0], atomic_load_explicit(
+            &contactEffects[gid * cellContactEffectChannelCount], memory_order_relaxed
+        ),
+        memory_order_relaxed
+    );
+    atomic_fetch_add_explicit(
+        &scratch[1], atomic_load_explicit(
+            &contactEffects[gid * cellContactEffectChannelCount + 1u],
+            memory_order_relaxed
+        ),
+        memory_order_relaxed
+    );
+}
+
+kernel void accumulateSimulationInvariants(
+    device const atomic_uint* agentOccupancy [[buffer(0)]],
+    device const CellState* cells [[buffer(1)]],
+    device const atomic_uint* cellOccupancy [[buffer(2)]],
+    device const CellIdentity* cellIdentities [[buffer(3)]],
+    device const ProgramSlotState* programSlots [[buffer(4)]],
+    device const MembraneVertex* membraneVertices [[buffer(5)]],
+    device CellJunctionState* junctionStates [[buffer(6)]],
+    device atomic_int* scratch [[buffer(7)]],
+    device atomic_uint* invariantState [[buffer(8)]],
+    constant SimulationUniforms& uniforms [[buffer(9)]],
+    device const CellCorpseState* cellCorpses [[buffer(10)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid < maxCellCount && atomic_load_explicit(
+        &cellOccupancy[gid], memory_order_relaxed
+    ) == cellOccupancyCorpse) {
+        CellIdentity corpseIdentity = cellIdentities[gid];
+        bool validCorpse = atomic_load_explicit(
+            &cellCorpses[gid].structure, memory_order_relaxed
+        ) > 0u && all(isfinite(cellCorpses[gid].worldPosition)) &&
+            all(cellCorpses[gid].worldPosition >= float2(0.0)) &&
+            all(cellCorpses[gid].worldPosition <= float2(1.0)) &&
+            corpseIdentity.owner == maxAgentCount &&
+            corpseIdentity.programIndex == maxGenomeHeaderCount &&
+            corpseIdentity.componentRoot == emptySpatialHashEntry;
+        if (!validCorpse) {
+            recordInvariantFailure(
+                invariantState, invariantDisconnectedOwnership, 9u, uniforms.step
+            );
+        }
+    }
+    if (gid < maxCellCount &&
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) ==
+            cellOccupancyAlive) {
+        atomic_fetch_add_explicit(&scratch[4], 1, memory_order_relaxed);
+        CellIdentity identity = cellIdentities[gid];
+        bool validOwner = identity.owner < maxAgentCount &&
+            atomic_load_explicit(
+                &agentOccupancy[identity.owner], memory_order_relaxed
+            ) == 1u;
+        bool validRoot = identity.componentRoot < maxCellCount &&
+            atomic_load_explicit(
+                &cellOccupancy[identity.componentRoot], memory_order_relaxed
+            ) == cellOccupancyAlive &&
+            cellIdentities[identity.componentRoot].owner == identity.owner;
+        if (!validOwner || !validRoot) {
+            recordInvariantFailure(
+                invariantState, invariantDisconnectedOwnership, 9u, uniforms.step
+            );
+        } else {
+            int encodedRoot = int(identity.componentRoot + 1u);
+            int observedRoot = atomic_load_explicit(
+                &scratch[invariantOwnerRootOffset + identity.owner], memory_order_relaxed
+            );
+            for (uint attempt = 0u; attempt < 8u && observedRoot == 0; ++attempt) {
+                int expectedRoot = 0;
+                if (atomic_compare_exchange_weak_explicit(
+                    &scratch[invariantOwnerRootOffset + identity.owner],
+                    &expectedRoot,
+                    encodedRoot,
+                    memory_order_relaxed,
+                    memory_order_relaxed
+                )) {
+                    observedRoot = encodedRoot;
+                    break;
+                }
+                observedRoot = expectedRoot;
+            }
+            if (observedRoot != encodedRoot) {
+                recordInvariantFailure(
+                    invariantState, invariantDisconnectedOwnership, 9u, uniforms.step
+                );
+            }
+        }
+        bool validProgram = programSlotMatches(
+            programSlots, identity.programIndex, identity.programGeneration
+        );
+        if (!validProgram) {
+            recordInvariantFailure(
+                invariantState, invariantStaleProgram, 5u, uniforms.step
+            );
+        } else {
+            atomic_fetch_add_explicit(
+                &scratch[invariantScratchHeaderCount + identity.programIndex],
+                1, memory_order_relaxed
+            );
+        }
+
+        CellState cell = cells[gid];
+        bool validState = all(isfinite(cell.position)) && all(isfinite(cell.velocity)) &&
+            all(isfinite(cell.physiology)) && all(isfinite(cell.membrane)) &&
+            all(isfinite(cell.development)) && all(isfinite(cell.boundaryDynamics)) &&
+            all(cell.boundaryDynamics >= float4(0.0)) &&
+            all(cell.boundaryDynamics <= float4(1.0001)) &&
+            all(isfinite(cell.membraneChemistry)) &&
+            all(cell.membraneChemistry >= float4(0.0)) &&
+            all(cell.membraneChemistry <= float4(1.0001)) &&
+            cell.physiology.w >= 0.0 && cell.physiology.w <= 1.0001;
+        float signedDoubleArea = 0.0;
+        float perimeter = 0.0;
+        uint membraneBase = gid * membraneVertexCount;
+        for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+            uint next = (vertexIndex + 1u) % membraneVertexCount;
+            MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
+            MembraneVertex nextVertex = membraneVertices[membraneBase + next];
+            validState = validState && all(isfinite(membranePoint.position)) &&
+                all(isfinite(membranePoint.velocity)) && all(isfinite(membranePoint.mechanics)) &&
+                membranePoint.mechanics.x > 0.0 && membranePoint.mechanics.y >= 0.0 &&
+                membranePoint.mechanics.y <= 1.0001;
+            signedDoubleArea += membranePoint.position.x * nextVertex.position.y -
+                nextVertex.position.x * membranePoint.position.y;
+            perimeter += length(nextVertex.position - membranePoint.position);
+        }
+        validState = validState && isfinite(signedDoubleArea) && isfinite(perimeter) &&
+            signedDoubleArea > 0.00001 && perimeter > 0.08 && perimeter < 4.0;
+        if (!validState) {
+            recordInvariantFailure(
+                invariantState, invariantInvalidMembrane, 8u, uniforms.step
+            );
+        }
+    }
+
+    if (gid < maxGenomeHeaderCount) {
+        uint occupied = atomic_load_explicit(
+            &programSlots[gid].occupied, memory_order_relaxed
+        );
+        uint references = atomic_load_explicit(
+            &programSlots[gid].referenceCount, memory_order_relaxed
+        );
+        if (occupied == 1u) {
+            atomic_fetch_add_explicit(&scratch[5], 1, memory_order_relaxed);
+        }
+        atomic_fetch_add_explicit(&scratch[6], int(references), memory_order_relaxed);
+    }
+
+    if (gid < cellJunctionCapacity) {
+        uint pairKey = atomic_load_explicit(
+            &junctionStates[gid].pairKey, memory_order_relaxed
+        );
+        if (pairKey != emptySpatialHashEntry) {
+            uint packedPair = pairKey - 1u;
+            uint cellA = packedPair / maxCellCount;
+            uint cellB = packedPair % maxCellCount;
+            uint lastSeen = atomic_load_explicit(
+                &junctionStates[gid].lastSeenStep, memory_order_relaxed
+            );
+            bool stale = uniforms.step > lastSeen && uniforms.step - lastSeen > 180u;
+            if (stale) {
+                atomic_store_explicit(
+                    &junctionStates[gid].pairKey,
+                    emptySpatialHashEntry,
+                    memory_order_relaxed
+                );
+                return;
+            }
+            bool validPair = pairKey > 0u && cellA < maxCellCount && cellB < maxCellCount &&
+                cellA < cellB &&
+                atomic_load_explicit(&cellOccupancy[cellA], memory_order_relaxed) ==
+                    cellOccupancyAlive &&
+                atomic_load_explicit(&cellOccupancy[cellB], memory_order_relaxed) ==
+                    cellOccupancyAlive &&
+                cellIdentities[cellA].owner == cellIdentities[cellB].owner &&
+                junctionStates[gid].persistentFingerprint ==
+                    cellPairFingerprint(cellIdentities, cellA, cellB);
+            bool validMaterial = all(isfinite(junctionStates[gid].material)) &&
+                all(isfinite(junctionStates[gid].remodeling)) &&
+                junctionStates[gid].restDistance > 0.0 &&
+                all(junctionStates[gid].material >= float4(0.0)) &&
+                all(junctionStates[gid].material <= float4(2.01)) &&
+                abs(junctionStates[gid].remodeling.y) < 2.0 &&
+                junctionStates[gid].remodeling.z >= 0.0 &&
+                junctionStates[gid].remodeling.z <= 1.01 &&
+                abs(junctionStates[gid].remodeling.w) <= 1.01;
+            if (!validPair || !validMaterial) {
+                recordInvariantFailure(
+                    invariantState, invariantOrphanedJunction, 7u, uniforms.step
+                );
+            } else {
+                atomic_fetch_add_explicit(&scratch[2], 1, memory_order_relaxed);
+                atomic_fetch_add_explicit(
+                    &scratch[3],
+                    int(clamp(junctionStates[gid].load * 1048576.0, 0.0, 1048576.0)),
+                    memory_order_relaxed
+                );
+            }
+        }
+    }
+}
+
+kernel void finalizeSimulationInvariants(
+    device const ProgramSlotState* programSlots [[buffer(0)]],
+    device const atomic_int* scratch [[buffer(1)]],
+    device atomic_uint* invariantState [[buffer(2)]],
+    device const atomic_int* energyAudit [[buffer(3)]],
+    constant SimulationUniforms& uniforms [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid < maxGenomeHeaderCount) {
+        uint occupied = atomic_load_explicit(
+            &programSlots[gid].occupied, memory_order_relaxed
+        );
+        uint recordedReferences = atomic_load_explicit(
+            &programSlots[gid].referenceCount, memory_order_relaxed
+        );
+        uint observedReferences = uint(max(atomic_load_explicit(
+            &scratch[invariantScratchHeaderCount + gid], memory_order_relaxed
+        ), 0));
+        bool valid = occupied == 1u
+            ? recordedReferences == observedReferences && recordedReferences > 0u
+            : recordedReferences == 0u && observedReferences == 0u && occupied == 0u;
+        if (!valid) {
+            recordInvariantFailure(
+                invariantState, invariantReferenceCount, 6u, uniforms.step
+            );
+        }
+    }
+    if (gid != 0u) { return; }
+
+    int netX = atomic_load_explicit(&scratch[0], memory_order_relaxed);
+    int netY = atomic_load_explicit(&scratch[1], memory_order_relaxed);
+    uint momentumMagnitude = uint(abs(netX)) + uint(abs(netY));
+    if (momentumMagnitude != 0u) {
+        recordInvariantFailure(
+            invariantState, invariantContactMomentum, 3u, uniforms.step
+        );
+    }
+    int energyResidual = atomic_load_explicit(&energyAudit[9], memory_order_relaxed);
+    uint absoluteEnergyResidual = uint(abs(energyResidual));
+    if (absoluteEnergyResidual > 256u) {
+        recordInvariantFailure(
+            invariantState, invariantEnergyDrift, 4u, uniforms.step
+        );
+    }
+    atomic_fetch_add_explicit(&invariantState[2], 1u, memory_order_relaxed);
+    atomic_fetch_max_explicit(&invariantState[10], momentumMagnitude, memory_order_relaxed);
+    atomic_store_explicit(
+        &invariantState[11], uint(max(atomic_load_explicit(&scratch[2], memory_order_relaxed), 0)),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &invariantState[12], uint(max(atomic_load_explicit(&scratch[3], memory_order_relaxed), 0)),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &invariantState[13], uint(max(atomic_load_explicit(&scratch[4], memory_order_relaxed), 0)),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &invariantState[14], uint(max(atomic_load_explicit(&scratch[5], memory_order_relaxed), 0)),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &invariantState[15], uint(max(atomic_load_explicit(&scratch[6], memory_order_relaxed), 0)),
+        memory_order_relaxed
+    );
+    atomic_fetch_max_explicit(
+        &invariantState[16], absoluteEnergyResidual, memory_order_relaxed
+    );
+}
+
+kernel void measureCellMembraneExposure(
+    device const AgentState* agents [[buffer(0)]],
+    device CellState* cells [[buffer(1)]],
+    device const atomic_uint* cellOccupancy [[buffer(2)]],
+    device MembraneVertex* membraneVertices [[buffer(3)]],
+    device const atomic_uint* hashHeads [[buffer(4)]],
+    device const uint* hashNext [[buffer(5)]],
+    constant SimulationUniforms& uniforms [[buffer(6)]],
+    device const CellIdentity* cellIdentities [[buffer(7)]],
+    device const atomic_uint* agentOccupancy [[buffer(8)]],
+    device const ProgramExpressionCache* programExpressionCaches [[buffer(9)]],
+    device const ProgramSlotState* programSlots [[buffer(10)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
+    uint gid = activeCellIndices[compactIndex];
+    if (gid >= maxCellCount ||
+        atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
+            cellOccupancyAlive) { return; }
+    uint owner = cellIdentities[gid].owner;
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+
+    AgentState agent = agents[owner];
+    CellState cell = cells[gid];
+    uint membraneBase = gid * membraneVertexCount;
+    float perimeter = 0.0;
+    float exposedPerimeter = 0.0;
+    float2 exposedNormal = float2(0.0);
+    float junctionLoad = 0.0;
+    uint nearbySameOwnerCells[64];
+    uint nearbyCellCount = 0u;
+    int2 centerCoordinate = int2(spatialHashCoordinate(
+        cellWorldPosition(agent, cell.position, uniforms)
+    ));
+    for (int offsetY = -2; offsetY <= 2 && nearbyCellCount < 64u; ++offsetY) {
+        for (int offsetX = -2; offsetX <= 2 && nearbyCellCount < 64u; ++offsetX) {
+            int2 candidateCoordinate = centerCoordinate + int2(offsetX, offsetY);
+            if (any(candidateCoordinate < int2(0)) ||
+                any(candidateCoordinate >= int2(cellSpatialHashAxisResolution))) { continue; }
+            uint bucket = cellSpatialHash(uint2(candidateCoordinate));
+            uint otherIndex = atomic_load_explicit(
+                &hashHeads[bucket], memory_order_relaxed
+            );
+            uint traversed = 0u;
+            while (otherIndex != emptySpatialHashEntry && traversed < 48u &&
+                nearbyCellCount < 64u) {
+                uint following = hashNext[otherIndex];
+                if (otherIndex != gid &&
+                    atomic_load_explicit(
+                        &cellOccupancy[otherIndex], memory_order_relaxed
+                    ) != 0u && cellIdentities[otherIndex].owner == owner) {
+                    nearbySameOwnerCells[nearbyCellCount++] = otherIndex;
+                }
+                otherIndex = following;
+                traversed += 1u;
+            }
+        }
+    }
+    for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+        uint next = (vertexIndex + 1u) % membraneVertexCount;
+        MembraneVertex membraneA = membraneVertices[membraneBase + vertexIndex];
+        MembraneVertex membraneB = membraneVertices[membraneBase + next];
+        float2 edge = membraneB.position - membraneA.position;
+        float edgeLength = length(edge);
+        perimeter += edgeLength;
+        junctionLoad += (membraneA.mechanics.z + membraneB.mechanics.z) *
+            edgeLength * 0.5;
+        float2 localMidpoint = (membraneA.position + membraneB.position) * 0.5;
+        bool occluded = false;
+        for (uint nearbyIndex = 0u;
+            nearbyIndex < nearbyCellCount && !occluded; ++nearbyIndex) {
+            uint otherIndex = nearbySameOwnerCells[nearbyIndex];
+            CellState other = cells[otherIndex];
+            // Same-owner cells already share this tissue coordinate frame.
+            // The former world transform, subtraction, inverse rotation, and
+            // scale division reduce algebraically to this local difference.
+            float2 pointInOther = cell.position + localMidpoint - other.position;
+            if (pointInsideMembrane(
+                membraneVertices, otherIndex, pointInOther
+            )) {
+                occluded = true;
+            }
+        }
+        if (!occluded && edgeLength > 0.000001) {
+            exposedPerimeter += edgeLength;
+            float2 outward = normalize(float2(edge.y, -edge.x));
+            if (dot(outward, localMidpoint) < 0.0) { outward *= -1.0; }
+            exposedNormal += outward * edgeLength;
+        }
+        MembraneVertex markedEdge = membraneVertices[membraneBase + vertexIndex];
+        markedEdge.mechanics.w = (occluded ? -1.0 : 1.0) *
+            (abs(markedEdge.mechanics.w) + 0.000001);
+        membraneVertices[membraneBase + vertexIndex] = markedEdge;
+    }
+    float exposure = saturate(exposedPerimeter / max(perimeter, 0.0001));
+    float2 boundaryNormal = length(exposedNormal) > 0.0001
+        ? normalize(exposedNormal)
+        : (length(cell.development.xy) > 0.0001
+            ? normalize(cell.development.xy)
+            : float2(cos(cell.dynamics.z * 2.0 * M_PI_F),
+                sin(cell.dynamics.z * 2.0 * M_PI_F)));
+    uint programIndex = cellIdentities[gid].programIndex;
+    float propaguleInvestment = programSlotMatches(
+        programSlots, programIndex, cellIdentities[gid].programGeneration
+    ) ? programExpressionCaches[programIndex].mechanochemistryB.w : 0.0;
+    float detachmentScore = detachmentReadinessScore(
+        exposure,
+        1.0 - cell.interaction.z,
+        cell.physiology.x,
+        cell.physiology.w,
+        cell.phenotype.x,
+        propaguleInvestment
+    );
+    cell.membrane.w = junctionLoad;
+    cell.tissueGeometry = float4(
+        boundaryNormal, exposure, saturate(detachmentScore)
+    );
+    cells[gid] = cell;
+}
+
+kernel void divideAndReduceOrganismCells(
+    device AgentState* agents [[buffer(0)]],
+    device const atomic_uint* agentOccupancy [[buffer(1)]],
+    device CellState* cells [[buffer(2)]],
+    device atomic_uint* cellOccupancy [[buffer(3)]],
+    device CellAggregate* aggregates [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device float* regulatoryStates [[buffer(6)]],
+    device MembraneVertex* membraneVertices [[buffer(7)]],
+    device ResonanceExpressionCache* resonanceExpressionCaches [[buffer(8)]],
+    device CellIdentity* cellIdentities [[buffer(9)]],
+    device atomic_uint* ownerCellHeads [[buffer(10)]],
+    device uint* ownerCellNext [[buffer(11)]],
+    device atomic_uint* identityCounters [[buffer(12)]],
+    device uint* cellParentIDs [[buffer(13)]],
+    device float4* programInteractions [[buffer(14)]],
+    device ProgramSlotState* programSlots [[buffer(15)]],
+    device ProgramExpressionCache* programExpressionCaches [[buffer(16)]],
+    device ProgramLineageRecord* programLineageRecords [[buffer(19)]],
+    device LineageEventRecord* lineageEvents [[buffer(20)]],
+    device const uint* activeComponents [[buffer(21)]],
+    device const atomic_uint* activeComponentCount [[buffer(22)]],
+    device CellJunctionState* cellJunctions [[buffer(23)]],
+    device atomic_uint* contactWorkState [[buffer(24)]],
+    device CellMemoryState* cellMemories [[buffer(25)]],
+    device uint* registeredJunctionIndices [[buffer(26)]],
+    device GenomeHeader* genomeHeaders [[buffer(27)]],
+    device GenomePage* genomePages [[buffer(28)]],
+    device atomic_uint* genomeArenaState [[buffer(29)]],
+    device ChemistryAuditState* chemistryAudit [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeComponentCount, memory_order_relaxed)) { return; }
+    uint owner = activeComponents[compactIndex];
+    if (owner >= maxAgentCount ||
+        atomic_load_explicit(&agentOccupancy[owner], memory_order_relaxed) == 0u) { return; }
+
+    AgentState agent = agents[owner];
+    uint index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
+    while (index != emptySpatialHashEntry) {
+        uint nextIndex = ownerCellNext[index];
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) ==
+                cellOccupancyAlive &&
+            cellIdentities[index].owner == owner) {
+            CellState candidate = cells[index];
+            float cycle = candidate.physiology.z;
+            uint candidateProgram = cellIdentities[index].programIndex;
+            float propaguleInvestment = candidateProgram < maxGenomeHeaderCount
+                ? programExpressionCaches[candidateProgram].mechanochemistryB.w : 0.0;
+            float developmentalIntegritySupport = saturate(propaguleInvestment);
+            float divisionIntegrityThreshold = mix(
+                0.52, 0.32, developmentalIntegritySupport
+            );
+            bool divisionCompetent = candidate.physiology.x >= 0.18 &&
+                candidate.physiology.y >= 0.42 &&
+                candidate.physiology.w >= divisionIntegrityThreshold &&
+                candidate.signals.z <= 0.68;
+            // Execution is serialized per component to keep its linked list stable,
+            // but every pre-existing cell passes its own local checkpoint. There is
+            // no component-wide winner and multiple cells may divide in one step.
+            if (divisionCompetent && cycle >= 1.0) {
+                uint divisionParent = index;
+                uint divisionSeed = hash32(
+                    owner * 2246822519u ^ divisionParent * 3266489917u ^ uniforms.step
+                );
+                uint divisionTarget = claimFreeCell(
+                    cellOccupancy, divisionSeed ^ 0xa511e9b3u
+                );
+                if (divisionTarget == maxCellCount) {
+                    index = nextIndex;
+                    continue;
+                }
+            CellState parent = cells[divisionParent];
+            CellIdentity parentIdentity = cellIdentities[divisionParent];
+            uint recombinationDonor = maxCellCount;
+            float recombinationScore = 0.0;
+            bool sexualBodyPair = false;
+            uint sexualDonorOwner = maxAgentCount;
+            uint sexualDonorBirthID = 0xffffffffu;
+            uint nominatedDonor = sexualPartnerIndex(
+                parentIdentity.identityPadding0
+            );
+            if (nominatedDonor < maxCellCount &&
+                atomic_load_explicit(
+                    &cellOccupancy[nominatedDonor], memory_order_relaxed
+                ) != 0u) {
+                CellIdentity nominatedIdentity = cellIdentities[nominatedDonor];
+                if (nominatedIdentity.owner < maxAgentCount &&
+                    nominatedIdentity.owner != owner &&
+                    atomic_load_explicit(
+                        &agentOccupancy[nominatedIdentity.owner], memory_order_relaxed
+                    ) != 0u &&
+                    nominatedIdentity.programIndex != parentIdentity.programIndex &&
+                    programSlotMatches(
+                        programSlots, nominatedIdentity.programIndex,
+                        nominatedIdentity.programGeneration
+                    )) {
+                    recombinationDonor = nominatedDonor;
+                    recombinationScore = sexualPartnerScore(
+                        parentIdentity.identityPadding0
+                    );
+                    sexualBodyPair = true;
+                    sexualDonorOwner = nominatedIdentity.owner;
+                    sexualDonorBirthID = agents[sexualDonorOwner].birthID;
+                }
+            }
+            uint donorIndex = sexualBodyPair
+                ? emptySpatialHashEntry
+                : atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
+            while (donorIndex != emptySpatialHashEntry) {
+                uint followingDonor = ownerCellNext[donorIndex];
+                if (donorIndex != divisionParent &&
+                    atomic_load_explicit(
+                        &cellOccupancy[donorIndex], memory_order_relaxed
+                    ) != 0u && cellIdentities[donorIndex].owner == owner) {
+                    CellIdentity donorIdentity = cellIdentities[donorIndex];
+                    bool distinctProgram =
+                        donorIdentity.programIndex != parentIdentity.programIndex &&
+                        programSlotMatches(
+                            programSlots,
+                            donorIdentity.programIndex,
+                            donorIdentity.programGeneration
+                        );
+                    if (distinctProgram) {
+                        uint pairKey = cellPairKey(divisionParent, donorIndex);
+                        uint fingerprint = cellPairFingerprint(
+                            cellIdentities, divisionParent, donorIndex
+                        );
+                        uint junctionIndex = findCellJunction(
+                            cellJunctions, pairKey, fingerprint
+                        );
+                        if (junctionIndex < cellJunctionCapacity) {
+                            uint lastSeen = atomic_load_explicit(
+                                &cellJunctions[junctionIndex].lastSeenStep,
+                                memory_order_relaxed
+                            );
+                            bool recentJunction = uniforms.step >= lastSeen &&
+                                uniforms.step - lastSeen <= 2u;
+                            CellState donor = cells[donorIndex];
+                            AgentState primaryProgram = agentWithCellProgram(
+                                agent, parentIdentity.programIndex, programLineageRecords
+                            );
+                            AgentState donorProgram = agentWithCellProgram(
+                                agent, donorIdentity.programIndex, programLineageRecords
+                            );
+                            float compatibility = receptorChemistryCompatibility(
+                                primaryProgram, donorProgram
+                            );
+                            float programDifference = saturate(
+                                length(primaryProgram.metabolicExpression - donorProgram.metabolicExpression) * 0.22 +
+                                length(primaryProgram.dynamicExpression - donorProgram.dynamicExpression) * 0.18 +
+                                length(primaryProgram.transportExpression - donorProgram.transportExpression) * 0.18
+                            );
+                            float donorCompetence = smoothstep(
+                                0.10, 0.28, donor.physiology.x
+                            ) * smoothstep(0.28, 0.72, donor.physiology.w) *
+                                (1.0 - smoothstep(0.48, 0.78, donor.signals.z));
+                            float junctionReadiness = smoothstep(
+                                2.0, 34.0, cellJunctions[junctionIndex].age
+                            ) * saturate(cellJunctions[junctionIndex].strength);
+                            float bilateralInvestment = min(
+                                primaryProgram.junctionChemistry.w, donorProgram.junctionChemistry.w
+                            );
+                            float differenceGate = smoothstep(
+                                0.015, 0.16, programDifference
+                            );
+                            bool recombinationEligible = recentJunction &&
+                                compatibility > 0.35 &&
+                                donorCompetence > 0.08 &&
+                                junctionReadiness > 0.001 &&
+                                bilateralInvestment > 0.20 &&
+                                programDifference > 0.04;
+                            float combinedSuitability = compatibility * donorCompetence *
+                                junctionReadiness * bilateralInvestment * differenceGate;
+                            // Five independent gates produce a product-space value.
+                            // Its geometric mean restores a normalized suitability
+                            // score before the separate stochastic reproduction step.
+                            float score = recombinationEligible
+                                ? pow(max(combinedSuitability, 0.000000000001), 0.20)
+                                : 0.0;
+                            if (score > recombinationScore ||
+                                (score > 0.0 && score == recombinationScore &&
+                                    donorIndex < recombinationDonor)) {
+                                recombinationScore = score;
+                                recombinationDonor = donorIndex;
+                            }
+                        }
+                    }
+                }
+                donorIndex = followingDonor;
+            }
+            if (recombinationDonor < maxCellCount) {
+                atomic_fetch_add_explicit(
+                    &identityCounters[13], 1u, memory_order_relaxed
+                );
+                atomic_fetch_max_explicit(
+                    &identityCounters[15],
+                    uint(clamp(recombinationScore * 1000000.0, 0.0, 1000000.0)),
+                    memory_order_relaxed
+                );
+            }
+            ProgramExpressionCache inheritedDevelopment =
+                programExpressionCaches[parentIdentity.programIndex];
+            float phaseAngle = parent.dynamics.z * 2.0 * M_PI_F;
+            float2 phaseAxis = float2(cos(phaseAngle), sin(phaseAngle));
+            float2 polarityAxis = length(parent.development.xy) > 0.0001
+                ? normalize(parent.development.xy) : phaseAxis;
+            float2 boundaryAxis = length(parent.tissueGeometry.xy) > 0.0001
+                ? normalize(parent.tissueGeometry.xy) : polarityAxis;
+            float2 axis = normalize(
+                polarityAxis * (0.52 + parent.regulation.x * 0.36) +
+                phaseAxis * (0.18 + parent.regulation.z * 0.24) +
+                boundaryAxis * (0.10 + parent.tissueGeometry.z * 0.22) +
+                float2(parent.signals.x - parent.signals.y, parent.mechanics.y - 0.5) * 0.12
+            );
+            if (sexualBodyPair) {
+                CellState donorCell = cells[recombinationDonor];
+                AgentState donorAgent = agents[sexualDonorOwner];
+                float2 parentWorldPosition = cellWorldPosition(
+                    agent, parent.position, uniforms
+                );
+                float2 donorWorldPosition = cellWorldPosition(
+                    donorAgent, donorCell.position, uniforms
+                );
+                float2 interBodyDirection = donorWorldPosition - parentWorldPosition;
+                if (length(interBodyDirection) > 0.000001) {
+                    float2 localBirthDirection = rotateWorldToTissue(
+                        normalize(interBodyDirection), agent
+                    );
+                    axis = normalize(
+                        localBirthDirection * 0.78 + boundaryAxis * 0.22
+                    );
+                }
+            }
+            CellState child = parent;
+            // Cytokinesis starts with overlapping daughter membranes. The next
+            // contact pass can create a physical junction. Placing the centers
+            // beyond their post-division membrane supports would immediately
+            // produce two independently handled components instead of tissue growth.
+            parent.position -= axis * 0.072;
+            child.position += axis * 0.072;
+            parent.velocity -= axis * 0.00035;
+            child.velocity += axis * 0.00035;
+            float childMaterialShare = sexualBodyPair
+                ? mix(
+                    0.44, 0.58,
+                    saturate(inheritedDevelopment.mechanochemistryB.w / 1.80)
+                )
+                : 0.50;
+            float parentMaterialShare = 1.0 - childMaterialShare;
+            // Existing sheath material is divided with the two new surfaces;
+            // cytokinesis cannot duplicate a mature integument or appendage for free.
+            parent.boundaryDynamics.xy *= sqrt(parentMaterialShare);
+            child.boundaryDynamics.xy *= sqrt(childMaterialShare);
+            parent.boundaryDynamics.z *= parentMaterialShare;
+            child.boundaryDynamics.z *= childMaterialShare;
+            child.boundaryDynamics.w = fract(parent.boundaryDynamics.w + 0.5);
+            parent.membraneProperties *= parentMaterialShare;
+            child.membraneProperties *= childMaterialShare;
+            float preDivisionATP = parent.physiology.x;
+            float preDivisionBiomass = parent.physiology.y;
+            parent.physiology.x = preDivisionATP * parentMaterialShare;
+            child.physiology.x = preDivisionATP * childMaterialShare;
+            parent.physiology.y = preDivisionBiomass * parentMaterialShare;
+            child.physiology.y = preDivisionBiomass * childMaterialShare;
+            parent.physiology.z = 0.0;
+            child.physiology.z = 0.0;
+            float partitionAmplitude = clamp(
+                0.006 + abs(parent.signals.x - parent.signals.y) * 0.085 +
+                    parent.regulation.z * 0.055 + parent.mechanics.y * 0.035 +
+                    abs(inheritedDevelopment.morphogenTransport.x -
+                        inheritedDevelopment.morphogenTransport.y) * 0.025 +
+                    abs(inheritedDevelopment.morphogenTransport.z -
+                        inheritedDevelopment.morphogenTransport.w) * 0.020,
+                0.006, 0.18
+            );
+            float2 morphogenPartition = float2(
+                conservativeDivisionDelta(
+                    parent.signals.x,
+                    signedRandom(divisionSeed + 11u) * partitionAmplitude * 0.34
+                ),
+                conservativeDivisionDelta(
+                    parent.signals.y,
+                    signedRandom(divisionSeed + 13u) * partitionAmplitude * 0.34
+                )
+            );
+            parent.signals.xy -= morphogenPartition;
+            child.signals.xy += morphogenPartition;
+            float fateMemoryDelta = conservativeDivisionDelta(
+                parent.development.z,
+                signedRandom(divisionSeed + 17u) * partitionAmplitude * 0.34
+            );
+            parent.development.z -= fateMemoryDelta;
+            child.development.z += fateMemoryDelta;
+            float polarityRotation = signedRandom(divisionSeed + 2u) *
+                (0.010 + partitionAmplitude * 0.20);
+            float rotationCosine = cos(polarityRotation);
+            float rotationSine = sin(polarityRotation);
+            float2 inheritedPolarity = polarityAxis;
+            parent.development.xy = normalize(float2(
+                inheritedPolarity.x * rotationCosine + inheritedPolarity.y * rotationSine,
+                -inheritedPolarity.x * rotationSine + inheritedPolarity.y * rotationCosine
+            ));
+            child.development.xy = normalize(float2(
+                inheritedPolarity.x * rotationCosine - inheritedPolarity.y * rotationSine,
+                inheritedPolarity.x * rotationSine + inheritedPolarity.y * rotationCosine
+            ));
+            parent.development.w = 0.0;
+            child.development.w = 0.0;
+            child.interaction = float4(0.0);
+            child.dynamics.z = fract(
+                parent.dynamics.z + signedRandom(divisionSeed + 3u) * 0.040 + 1.0
+            );
+            child.dynamics.w = clamp(
+                parent.dynamics.w * (1.0 + signedRandom(divisionSeed + 4u) * 0.045),
+                0.0012, 0.0075
+            );
+            parent.mechanics = float4(0.0, parent.mechanics.yz, parent.mechanics.w);
+            child.mechanics = parent.mechanics;
+            parent.energetics = float4(0.0);
+            child.energetics = float4(0.0);
+            child.resonance.xy *= float2(0.72, -0.48);
+            child.resonance.z *= 0.72;
+            parent.resonance.xy *= float2(0.72, 0.48);
+            parent.resonance.z *= 0.72;
+            float2 signalingPartition = float2(
+                conservativeDivisionDelta(
+                    parent.signaling.x,
+                    signedRandom(divisionSeed + 19u) * partitionAmplitude * 0.08
+                ),
+                conservativeDivisionDelta(
+                    parent.signaling.y,
+                    signedRandom(divisionSeed + 23u) * partitionAmplitude * 0.08
+                )
+            );
+            parent.signaling.xy -= signalingPartition;
+            child.signaling.xy += signalingPartition;
+            // Cytokinesis is reproductive completion at the cellular scale.
+            // The peak begins only in the two cells at the cleavage site and
+            // then travels through whatever body signaling they remain part of.
+            applyLocalReproductiveClimax(parent, 1.0);
+            applyLocalReproductiveClimax(child, 1.0);
+            parent.signalCausality = float4(0.0);
+            child.signalCausality = float4(0.0);
+            child.tissueForce = float4(0.0);
+            child.tissueGeometry = float4(axis, 1.0, 0.0);
+            // Division creates a young cell but does not erase inherited material
+            // damage or replication history. Repair allocation determines how much
+            // proteostasis burden is cleared before the two physical halves separate.
+            float divisionRepair = clamp(
+                parent.regulation.w * inheritedDevelopment.allocationControl.x *
+                    (sexualBodyPair ? 1.12 : 0.88),
+                0.0, 0.72
+            );
+            parent.lifeHistory.y += 1.0;
+            child.lifeHistory.x = 0.0;
+            child.lifeHistory.y = parent.lifeHistory.y;
+            child.lifeHistory.z *= 1.0 - divisionRepair;
+            child.lifeHistory.w = max(
+                child.lifeHistory.w,
+                divisionRepair * inheritedDevelopment.allocationControl.x * 0.34
+            );
+            float acquiredStateInheritance = clamp(
+                0.08 + inheritedDevelopment.plasticityControl.w * 0.18 +
+                    parent.functionalActivity.x * 0.10,
+                0.08, 0.38
+            );
+            child.learning *= acquiredStateInheritance;
+            child.constructionFlux = float4(0.0);
+
+            uint parentStateBase = divisionParent * regulatoryStateChannelCount;
+            uint childStateBase = divisionTarget * regulatoryStateChannelCount;
+            for (uint channel = 0u; channel < regulatoryStateChannelCount; ++channel) {
+                float state = regulatoryStates[parentStateBase + channel];
+                float stateDelta = conservativeDivisionDelta(
+                    state,
+                    signedRandom(divisionSeed + 101u + channel) *
+                        partitionAmplitude * 0.12
+                );
+                regulatoryStates[parentStateBase + channel] = state - stateDelta;
+                regulatoryStates[childStateBase + channel] = state + stateDelta;
+            }
+            uint parentMembraneBase = divisionParent * membraneVertexCount;
+            uint childMembraneBase = divisionTarget * membraneVertexCount;
+            float parentRadiusShare = sqrt(parentMaterialShare);
+            float childRadiusShare = sqrt(childMaterialShare);
+            for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+                MembraneVertex inheritedMembrane =
+                    membraneVertices[parentMembraneBase + vertexIndex];
+                MembraneVertex parentMembrane = inheritedMembrane;
+                parentMembrane.position *= parentRadiusShare;
+                parentMembrane.velocity *= 0.25;
+                parentMembrane.mechanics.x *= parentRadiusShare;
+                membraneVertices[parentMembraneBase + vertexIndex] = parentMembrane;
+                MembraneVertex daughterMembrane = inheritedMembrane;
+                daughterMembrane.position *= childRadiusShare;
+                daughterMembrane.velocity *= -0.25;
+                daughterMembrane.mechanics.x *= childRadiusShare;
+                daughterMembrane.mechanics.zw = float2(0.0);
+                membraneVertices[childMembraneBase + vertexIndex] = daughterMembrane;
+            }
+            float4 inheritedMembraneMeasurement = parent.membrane;
+            parent.membrane = float4(
+                inheritedMembraneMeasurement.x * parentMaterialShare,
+                inheritedMembraneMeasurement.y * parentRadiusShare,
+                inheritedMembraneMeasurement.zw
+            );
+            child.membrane = float4(
+                inheritedMembraneMeasurement.x * childMaterialShare,
+                inheritedMembraneMeasurement.y * childRadiusShare,
+                inheritedMembraneMeasurement.zw
+            );
+            cells[divisionParent] = parent;
+            cells[divisionTarget] = child;
+            CellIdentity childIdentity;
+            childIdentity.owner = owner;
+            childIdentity.programIndex = parentIdentity.programIndex;
+            childIdentity.persistentID = atomic_fetch_add_explicit(
+                &identityCounters[3], 1u, memory_order_relaxed
+            );
+            childIdentity.componentRoot = parentIdentity.componentRoot;
+            childIdentity.programGeneration = parentIdentity.programGeneration;
+            childIdentity.identityPadding0 = 0u;
+            childIdentity.identityPadding1 = 0u;
+            childIdentity.identityPadding2 = 0u;
+            AgentState inheritedAgent = agentWithCellProgram(
+                agent, parentIdentity.programIndex, programLineageRecords
+            );
+            AgentState childProgramAgent = inheritedAgent;
+            float repairFidelity = saturate(
+                parent.regulation.w * 0.55 + parent.physiology.x * 0.30 +
+                parent.physiology.w * 0.15
+            );
+            float replicationDamage = saturate(
+                parent.signals.z * 0.58 + (1.0 - parent.physiology.w) * 0.42
+            );
+            float replicationError = clamp(
+                (0.020 + inheritedAgent.dynamicExpression.y * 0.62 + replicationDamage * 0.040) *
+                    mix(1.0, 0.42, repairFidelity) * max(uniforms.mutationScale, 0.25),
+                0.020, 0.10
+            );
+            bool programMutated = false;
+            bool programCrossbred = false;
+            uint donorPersistentID = 0xffffffffu;
+            if (recombinationDonor < maxCellCount &&
+                (sexualBodyPair || random01(divisionSeed + 1741u) <
+                    clamp(recombinationScore * 0.28, 0.0, 0.22))) {
+                atomic_fetch_add_explicit(
+                    &identityCounters[14], 1u, memory_order_relaxed
+                );
+                CellIdentity donorIdentity = cellIdentities[recombinationDonor];
+                uint daughterProgramGeneration = 0u;
+                uint daughterProgram = claimGenomeHeaderSlot(
+                    programSlots, identityCounters, divisionSeed ^ 0x72b4a91du,
+                    daughterProgramGeneration
+                );
+                if (daughterProgram < maxGenomeHeaderCount) {
+                    childProgramAgent = recombineCellPrograms(
+                        programExpressionCaches, resonanceExpressionCaches,
+                        programLineageRecords, programSlots,
+                        agent, parentIdentity.programIndex, donorIdentity.programIndex,
+                        daughterProgram, daughterProgramGeneration,
+                        childIdentity.persistentID, divisionSeed ^ 0x3f6a2c87u
+                    );
+                    childIdentity.programIndex = daughterProgram;
+                    childIdentity.programGeneration = daughterProgramGeneration;
+                    donorPersistentID = sexualBodyPair
+                        ? sexualDonorBirthID : donorIdentity.persistentID;
+                    if (sexualBodyPair) {
+                        childIdentity.identityPadding1 = sexualDonorBirthID;
+                        childIdentity.identityPadding2 = uniforms.step + 1u;
+                    }
+                    programCrossbred = publishGenomeOverlay(
+                        genomeHeaders, genomePages, genomeArenaState, chemistryAudit,
+                        parentIdentity.programIndex, donorIdentity.programIndex,
+                        daughterProgram, daughterProgramGeneration,
+                        childProgramAgent.genomeHash, childIdentity.persistentID,
+                        1u + hash32(divisionSeed + 1733u) % 8u,
+                        max(childProgramAgent.lastMutationDistance, 0.001),
+                        divisionSeed ^ 0x6f137a4du, true
+                    );
+                    if (programCrossbred) {
+                        childProgramAgent = synchronizePublishedGenomeExpression(
+                            genomeHeaders, genomePages, programExpressionCaches,
+                            resonanceExpressionCaches, programLineageRecords,
+                            daughterProgram, childProgramAgent
+                        );
+                        publishGenomeHeaderSlot(
+                            programSlots, daughterProgram,
+                            genomeHeaders[daughterProgram].genomeHash
+                        );
+                    }
+                    if (!programCrossbred) {
+                        abandonGenomeHeaderSlot(
+                            programSlots, identityCounters, daughterProgram
+                        );
+                        childIdentity.programIndex = parentIdentity.programIndex;
+                        childIdentity.programGeneration = parentIdentity.programGeneration;
+                        childIdentity.identityPadding1 = 0u;
+                        childIdentity.identityPadding2 = 0u;
+                        childProgramAgent = inheritedAgent;
+                    }
+                }
+            }
+            bool mutationDue = !programCrossbred && accrueProgramMutationHazard(
+                programSlots, parentIdentity.programIndex,
+                parentIdentity.programGeneration, replicationError
+            );
+            if (mutationDue) {
+                uint daughterProgramGeneration = 0u;
+                uint daughterProgram = claimGenomeHeaderSlot(
+                    programSlots, identityCounters, divisionSeed ^ 0x4b1d5a77u,
+                    daughterProgramGeneration
+                );
+                if (daughterProgram < maxGenomeHeaderCount) {
+                    uint replicationGeneration =
+                        programLineageRecords[parentIdentity.programIndex].generation + 1u;
+                    float evolvedStructuralRate = clamp(
+                        0.08 + inheritedDevelopment.mutation.w * 0.78,
+                        0.08, 0.22
+                    );
+                    bool structuralMutation = random01(divisionSeed + 1789u) <
+                        evolvedStructuralRate;
+                    childProgramAgent = mutateCellProgram(
+                        programExpressionCaches, resonanceExpressionCaches,
+                        programLineageRecords, programSlots,
+                        agent, parentIdentity.programIndex, daughterProgram,
+                        daughterProgramGeneration, childIdentity.persistentID,
+                        replicationGeneration, divisionSeed ^ 0x8da6b343u,
+                        uniforms.mutationScale, structuralMutation
+                    );
+                    childIdentity.programIndex = daughterProgram;
+                    childIdentity.programGeneration = daughterProgramGeneration;
+                    programMutated = publishGenomeOverlay(
+                        genomeHeaders, genomePages, genomeArenaState, chemistryAudit,
+                        parentIdentity.programIndex, maxGenomeHeaderCount,
+                        daughterProgram, daughterProgramGeneration,
+                        childProgramAgent.genomeHash, childIdentity.persistentID,
+                        1u + hash32(divisionSeed + 1811u) % 8u,
+                        max(childProgramAgent.lastMutationDistance, 0.001),
+                        divisionSeed ^ 0x93d765b9u, false
+                    );
+                    if (programMutated) {
+                        childProgramAgent = synchronizePublishedGenomeExpression(
+                            genomeHeaders, genomePages, programExpressionCaches,
+                            resonanceExpressionCaches, programLineageRecords,
+                            daughterProgram, childProgramAgent
+                        );
+                        publishGenomeHeaderSlot(
+                            programSlots, daughterProgram,
+                            genomeHeaders[daughterProgram].genomeHash
+                        );
+                    }
+                    if (!programMutated) {
+                        abandonGenomeHeaderSlot(
+                            programSlots, identityCounters, daughterProgram
+                        );
+                        childIdentity.programIndex = parentIdentity.programIndex;
+                        childIdentity.programGeneration = parentIdentity.programGeneration;
+                        childProgramAgent = inheritedAgent;
+                    }
+                }
+            }
+            if (!retainGenomeHeaderSlot(
+                programSlots, childIdentity.programIndex, childIdentity.programGeneration
+            )) {
+                if (childIdentity.programIndex != parentIdentity.programIndex) {
+                    abandonGenomeHeaderSlot(
+                        programSlots, identityCounters, childIdentity.programIndex
+                    );
+                }
+                atomic_store_explicit(
+                    &cellOccupancy[divisionTarget], 0u, memory_order_relaxed
+                );
+                return;
+            }
+            CellMemoryState childMemory = cellMemories[divisionParent];
+            float experientialInheritance = clamp(
+                0.16 + parent.functionalActivity.x * 0.16 +
+                    programExpressionCaches[childIdentity.programIndex].plasticityControl.w * 0.24,
+                0.16, 0.58
+            );
+            for (uint memoryIndex = 0u; memoryIndex < embodiedMemoryCount;
+                 ++memoryIndex) {
+                float4 inheritedEpisode = unpackEmbodiedMemory(
+                    childMemory.episodes[memoryIndex]
+                );
+                inheritedEpisode.w *= experientialInheritance;
+                childMemory.episodes[memoryIndex] = packEmbodiedMemory(inheritedEpisode);
+            }
+            if (programCrossbred && recombinationDonor < maxCellCount) {
+                float4 donorEpisode;
+                strongestEmbodiedMemory(
+                    cellMemories[recombinationDonor], donorEpisode
+                );
+                donorEpisode.w *= clamp(
+                    programExpressionCaches[childIdentity.programIndex].plasticityControl.w * 0.28,
+                    0.04, 0.38
+                );
+                receiveEmbodiedEpisode(childMemory, donorEpisode);
+            }
+            cellMemories[divisionTarget] = childMemory;
+            cellIdentities[divisionTarget] = childIdentity;
+            cellParentIDs[divisionTarget] = parentIdentity.persistentID;
+            programInteractions[divisionTarget] = float4(0.0, 0.0, -1.0, 0.0);
+            uint cytokineticPairKey = cellPairKey(divisionParent, divisionTarget);
+            uint cytokineticFingerprint = cellPairFingerprint(
+                cellIdentities, divisionParent, divisionTarget
+            );
+            float daughterAdhesion = min(parent.phenotype.x, child.phenotype.x);
+            float daughterRepair = min(parent.regulation.w, child.regulation.w);
+            float daughterIntegrity = min(parent.physiology.w, child.physiology.w);
+            float cytokineticTension = max(parent.membrane.w, child.membrane.w);
+            float tensionGate = 1.0 / (1.0 + max(cytokineticTension, 0.0) * 6.0);
+            float midbodyStrength = clamp(
+                (0.32 + daughterAdhesion * 0.28 + daughterRepair * 0.20 +
+                    daughterIntegrity * 0.20) * tensionGate,
+                0.28, 0.94
+            );
+            bool sexualBudConceived = sexualBodyPair && programCrossbred;
+            if (sexualBudConceived) {
+                midbodyStrength = clamp(
+                    midbodyStrength * 1.18 + 0.12, 0.46, 0.98
+                );
+            }
+            uint midbodyJunction = findOrCreateCellJunction(
+                cellJunctions, registeredJunctionIndices, contactWorkState,
+                cytokineticPairKey, cytokineticFingerprint,
+                uniforms.step, length(child.position - parent.position), midbodyStrength
+            );
+            if (midbodyJunction < cellJunctionCapacity) {
+                float4 midbodyInheritedMaterial = sqrt(max(
+                    programExpressionCaches[parentIdentity.programIndex].junctionMaterial *
+                        programExpressionCaches[childIdentity.programIndex].junctionMaterial,
+                    float4(0.0001)
+                ));
+                float midbodyRestDistance = length(child.position - parent.position);
+                cellJunctions[midbodyJunction].flags = registeredJunctionFlag |
+                    (sexualBudConceived ? 7u : 3u);
+                cellJunctions[midbodyJunction].age = mix(
+                    5.0, 14.0, daughterRepair * daughterIntegrity
+                );
+                cellJunctions[midbodyJunction].material = clamp(float4(
+                    midbodyStrength * midbodyInheritedMaterial.x,
+                    midbodyInheritedMaterial.z,
+                    midbodyInheritedMaterial.w * daughterIntegrity *
+                        (sexualBudConceived ? 1.45 : 1.0),
+                    midbodyInheritedMaterial.y * (0.45 + daughterRepair * 0.55)
+                ), float4(0.02), float4(1.80));
+                cellJunctions[midbodyJunction].remodeling = float4(
+                    midbodyRestDistance, 0.0,
+                    daughterRepair * daughterIntegrity, 1.0
+                );
+            }
+            uint ownerHead = atomic_load_explicit(
+                &ownerCellHeads[owner], memory_order_relaxed
+            );
+            if (ownerHead == emptySpatialHashEntry || divisionTarget < ownerHead) {
+                ownerCellNext[divisionTarget] = ownerHead;
+                atomic_store_explicit(
+                    &ownerCellHeads[owner], divisionTarget, memory_order_relaxed
+                );
+            } else {
+                uint previous = ownerHead;
+                uint following = ownerCellNext[previous];
+                while (following != emptySpatialHashEntry && following < divisionTarget) {
+                    previous = following;
+                    following = ownerCellNext[following];
+                }
+                ownerCellNext[divisionTarget] = following;
+                ownerCellNext[previous] = divisionTarget;
+            }
+            agent.biomass = min(agent.biomass + 0.0008, 1.0);
+            if (agent.generation > 0u) {
+                // A separated fragment becomes a regenerative descendant only
+                // after its own cells restart and complete the division cycle.
+                agent.componentFlags |= componentRegeneratedFlag;
+            }
+            agents[owner] = agent;
+            atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
+            ProgramLineageRecord childProgram = programLineageRecords[childIdentity.programIndex];
+            ProgramExpressionCache childDevelopment =
+                programExpressionCaches[childIdentity.programIndex];
+            ResonanceExpressionCache childResonance = resonanceExpressionCaches[childIdentity.programIndex];
+            recordCellLineageEvent(
+                lineageEvents, identityCounters, 5u, childIdentity,
+                parentIdentity.persistentID, child, childProgram,
+                childDevelopment, childResonance, 0.0, uniforms.step
+            );
+            if (programMutated) {
+                recordCellLineageEvent(
+                    lineageEvents, identityCounters, 4u, childIdentity,
+                    parentIdentity.persistentID, child, childProgram,
+                    childDevelopment, childResonance,
+                    childProgramAgent.lastMutationDistance, uniforms.step
+                );
+            }
+            if (programCrossbred) {
+                recordCellLineageEvent(
+                    lineageEvents, identityCounters, 6u, childIdentity,
+                    donorPersistentID, child, childProgram,
+                    childDevelopment, childResonance,
+                    childProgramAgent.lastMutationDistance, uniforms.step
+                );
+            }
+        }
+        }
+        index = nextIndex;
+    }
+
+    float activeCount = 0.0;
+    float atpTotal = 0.0;
+    float biomassTotal = 0.0;
+    float cycleTotal = 0.0;
+    float integrityTotal = 0.0;
+    float stressTotal = 0.0;
+    float dividingCount = 0.0;
+    float voltageTotal = 0.0;
+    float frequencyTotal = 0.0;
+    float2 phaseTotal = float2(0.0);
+    float strainTotal = 0.0;
+    float contractilityTotal = 0.0;
+    float waveSpeedTotal = 0.0;
+    float4 energeticsTotal = float4(0.0);
+    float4 regulationTotal = float4(0.0);
+    float4 regulationBTotal = float4(0.0);
+    float4 causalityTotal = float4(0.0);
+    float resonanceDisplacementTotal = 0.0;
+    float resonanceAmplitudeTotal = 0.0;
+    float membraneAreaTotal = 0.0;
+    float membranePerimeterTotal = 0.0;
+    float membraneShapeTotal = 0.0;
+    float junctionForceTotal = 0.0;
+    float4 signalingTotal = float4(0.0);
+    float4 signalCausalityTotal = float4(0.0);
+    float4 environmentTotal = float4(0.0);
+    float4 developmentTotal = float4(0.0);
+    float2 developmentalPolarityTotal = float2(0.0);
+    float morphogenDifferentiationTotal = 0.0;
+    float morphogenSynthesisTotal = 0.0;
+    float morphogenTransportWorkTotal = 0.0;
+    float2 cellCentroid = float2(0.0);
+    float2 boundaryCentroidTotal = float2(0.0);
+    float boundaryLength = 0.0;
+    float2 netForce = float2(0.0);
+    float meanForceMagnitude = 0.0;
+    float contactLoad = 0.0;
+    float trophicGain = 0.0;
+    float trophicLoss = 0.0;
+    float maximumDetachment = 0.0;
+    float nonDominantProgramCount = 0.0;
+    float4 programEcologyTotal = float4(0.0);
+    float receptorChemistrySampleCount = 0.0;
+    float4 embodiedMemoryTotal = float4(0.0);
+    float embodiedMemoryWeight = 0.0;
+    float4 membranePropertyTotal = float4(0.0);
+    float4 membraneChemistryTotal = float4(0.0);
+    float4 lifeHistoryTotal = float4(0.0);
+    float4 functionalActivityTotal = float4(0.0);
+    float4 learningTotal = float4(0.0);
+    float4 constructionTotal = float4(0.0);
+    uint programFingerprint = 0u;
+    uint maximumProgramReplicationGeneration = 0u;
+    index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
+    while (index != emptySpatialHashEntry) {
+        uint nextIndex = ownerCellNext[index];
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) !=
+                cellOccupancyAlive ||
+            cellIdentities[index].owner != owner) {
+            index = nextIndex;
+            continue;
+        }
+        CellState cell = cells[index];
+        membranePropertyTotal += cell.membraneProperties;
+        membraneChemistryTotal += cell.membraneChemistry;
+        lifeHistoryTotal += cell.lifeHistory;
+        functionalActivityTotal += cell.functionalActivity;
+        learningTotal += cell.learning;
+        constructionTotal += cell.constructionFlux;
+        float4 strongestEpisode;
+        strongestEmbodiedMemory(cellMemories[index], strongestEpisode);
+        float episodeWeight = max(strongestEpisode.w, 0.0001);
+        embodiedMemoryTotal += strongestEpisode * episodeWeight;
+        embodiedMemoryWeight += episodeWeight;
+        activeCount += 1.0;
+        uint cellProgramIndex = cellIdentities[index].programIndex;
+        nonDominantProgramCount += cellProgramIndex != agent.dominantProgramIndex ? 1.0 : 0.0;
+        if (cellProgramIndex < maxGenomeHeaderCount) {
+            programFingerprint |= 1u << (hash32(cellProgramIndex) & 31u);
+            maximumProgramReplicationGeneration = max(
+                maximumProgramReplicationGeneration,
+                programLineageRecords[cellProgramIndex].generation
+            );
+        }
+        float4 programInteraction = programInteractions[index];
+        programEcologyTotal.x += abs(programInteraction.x);
+        programEcologyTotal.y += programInteraction.y;
+        programEcologyTotal.w += programInteraction.w;
+        if (programInteraction.z >= 0.0) {
+            programEcologyTotal.z += programInteraction.z;
+            receptorChemistrySampleCount += 1.0;
+        }
+        atpTotal += cell.physiology.x;
+        biomassTotal += cell.physiology.y;
+        cycleTotal += cell.physiology.z;
+        integrityTotal += cell.physiology.w;
+        stressTotal += cell.signals.z;
+        dividingCount += cell.physiology.z >= 0.78 ? 1.0 : 0.0;
+        voltageTotal += cell.dynamics.x;
+        frequencyTotal += cell.dynamics.w;
+        float phaseAngle = cell.dynamics.z * 2.0 * M_PI_F;
+        phaseTotal += float2(cos(phaseAngle), sin(phaseAngle));
+        strainTotal += cell.mechanics.y;
+        contractilityTotal += cell.mechanics.x;
+        waveSpeedTotal += cell.mechanics.z;
+        energeticsTotal += cell.energetics;
+        regulationTotal += cell.regulation;
+        regulationBTotal += cell.regulationB;
+        resonanceDisplacementTotal += cell.resonance.x;
+        resonanceAmplitudeTotal += cell.resonance.z;
+        membraneAreaTotal += cell.membrane.x;
+        membranePerimeterTotal += cell.membrane.y;
+        membraneShapeTotal += cell.membrane.z;
+        junctionForceTotal += cell.membrane.w;
+        signalingTotal += cell.signaling;
+        signalCausalityTotal += cell.signalCausality;
+        environmentTotal += cell.environment;
+        developmentTotal += float4(
+            cell.signals.xy, cell.development.z, cell.development.w
+        );
+        developmentalPolarityTotal += length(cell.development.xy) > 0.0001
+            ? normalize(cell.development.xy) : float2(0.0);
+        morphogenDifferentiationTotal += abs(cell.signals.x - cell.signals.y);
+        uint developmentalProgramIndex = cellIdentities[index].programIndex;
+        if (developmentalProgramIndex < maxGenomeHeaderCount) {
+            ProgramExpressionCache cellDevelopment =
+                programExpressionCaches[developmentalProgramIndex];
+            float activatorAutocatalysis = cell.signals.x * cell.signals.x /
+                max(0.08 + cell.signals.x * cell.signals.x, 0.0001);
+            float inhibitorSuppression = 1.0 / (
+                1.0 + cell.signals.y * cellDevelopment.morphogenTransport.y * 1.4
+            );
+            morphogenSynthesisTotal +=
+                cellDevelopment.morphogenKinetics.x *
+                    mix(0.34, 1.20, cell.regulationB.y) *
+                    mix(0.42, 1.0, activatorAutocatalysis) *
+                    inhibitorSuppression * 0.00155 +
+                cellDevelopment.morphogenKinetics.y *
+                    mix(1.05, 0.46, cell.regulationB.y) *
+                    (0.48 + cell.signals.x *
+                        cellDevelopment.morphogenTransport.x * 0.52) * 0.00145;
+        }
+        morphogenTransportWorkTotal += cell.development.w * 0.006;
+        netForce += cell.tissueForce.xy;
+        meanForceMagnitude += length(cell.tissueForce.xy);
+        contactLoad += cell.tissueForce.z;
+        trophicGain += max(cell.tissueForce.w, 0.0);
+        trophicLoss += max(-cell.tissueForce.w, 0.0);
+        maximumDetachment = max(maximumDetachment, cell.tissueGeometry.w);
+        float energySupport = cellularEnergySupport(cell.physiology.x, cell.energetics);
+        float unconstrainedCycleDrive = cellCycleDrive(
+            cell.physiology.x, cell.physiology.y, cell.energetics,
+            cell.regulation.x, cell.signals.z, cell.tissueGeometry.z
+        );
+        float cycleDecay = cellCycleQuiescenceDecay(
+            energySupport, cell.interaction.z, cell.signals.z
+        );
+        float contactEffect = -(unconstrainedCycleDrive * cell.interaction.z + cycleDecay);
+        float repairEffect = cell.regulation.w * cell.physiology.x * 0.00022;
+        causalityTotal += float4(
+            cell.interaction.w, unconstrainedCycleDrive, contactEffect, repairEffect
+        );
+        cellCentroid += cell.position;
+        uint membraneBase = index * membraneVertexCount;
+        for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+            uint nextVertex = (vertexIndex + 1u) % membraneVertexCount;
+            float2 a = cell.position + membraneVertices[membraneBase + vertexIndex].position;
+            float2 b = cell.position + membraneVertices[membraneBase + nextVertex].position;
+            float2 midpoint = (a + b) * 0.5;
+            if (membraneVertices[membraneBase + vertexIndex].mechanics.w < 0.0) { continue; }
+            float edgeLength = length(b - a);
+            boundaryLength += edgeLength;
+            boundaryCentroidTotal += midpoint * edgeLength;
+        }
+        index = nextIndex;
+    }
+
+    float inverseCount = 1.0 / max(activeCount, 1.0);
+    cellCentroid *= inverseCount;
+    float2 boundaryCentroid = boundaryLength > 0.0001
+        ? boundaryCentroidTotal / boundaryLength : cellCentroid;
+    float covarianceXX = 0.0;
+    float covarianceXY = 0.0;
+    float covarianceYY = 0.0;
+    float boundaryWeight = 0.0;
+    index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
+    while (index != emptySpatialHashEntry) {
+        uint nextIndex = ownerCellNext[index];
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) !=
+                cellOccupancyAlive ||
+            cellIdentities[index].owner != owner) {
+            index = nextIndex;
+            continue;
+        }
+        CellState cell = cells[index];
+        uint membraneBase = index * membraneVertexCount;
+        for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+            uint nextVertex = (vertexIndex + 1u) % membraneVertexCount;
+            float2 a = cell.position + membraneVertices[membraneBase + vertexIndex].position;
+            float2 b = cell.position + membraneVertices[membraneBase + nextVertex].position;
+            if (membraneVertices[membraneBase + vertexIndex].mechanics.w < 0.0) { continue; }
+            float edgeLength = length(b - a);
+            float2 offsetA = a - boundaryCentroid;
+            float2 offsetB = b - boundaryCentroid;
+            covarianceXX += edgeLength * (
+                offsetA.x * offsetA.x + offsetA.x * offsetB.x + offsetB.x * offsetB.x
+            ) / 3.0;
+            covarianceXY += edgeLength * (
+                2.0 * offsetA.x * offsetA.y + offsetA.x * offsetB.y +
+                offsetB.x * offsetA.y + 2.0 * offsetB.x * offsetB.y
+            ) / 6.0;
+            covarianceYY += edgeLength * (
+                offsetA.y * offsetA.y + offsetA.y * offsetB.y + offsetB.y * offsetB.y
+            ) / 3.0;
+            boundaryWeight += edgeLength;
+        }
+        index = nextIndex;
+    }
+    float inverseBoundaryWeight = 1.0 / max(boundaryWeight, 0.0001);
+    covarianceXX *= inverseBoundaryWeight;
+    covarianceXY *= inverseBoundaryWeight;
+    covarianceYY *= inverseBoundaryWeight;
+    float covarianceTrace = covarianceXX + covarianceYY;
+    float covarianceDiscriminant = sqrt(max(
+        (covarianceXX - covarianceYY) * (covarianceXX - covarianceYY) +
+            4.0 * covarianceXY * covarianceXY,
+        0.0
+    ));
+    float majorEigenvalue = max((covarianceTrace + covarianceDiscriminant) * 0.5, 0.000001);
+    float minorEigenvalue = max((covarianceTrace - covarianceDiscriminant) * 0.5, 0.000001);
+    float2 principalAxis = abs(covarianceXY) > 0.000001
+        ? normalize(float2(covarianceXY, majorEigenvalue - covarianceXX))
+        : (covarianceXX >= covarianceYY ? float2(1.0, 0.0) : float2(0.0, 1.0));
+    float2 secondaryAxis = float2(-principalAxis.y, principalAxis.x);
+    float positiveMajorExtent = 0.0;
+    float negativeMajorExtent = 0.0;
+    float positiveMinorExtent = 0.0;
+    float negativeMinorExtent = 0.0;
+    index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
+    while (index != emptySpatialHashEntry) {
+        uint nextIndex = ownerCellNext[index];
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) !=
+                cellOccupancyAlive ||
+            cellIdentities[index].owner != owner) {
+            index = nextIndex;
+            continue;
+        }
+        CellState cell = cells[index];
+        uint membraneBase = index * membraneVertexCount;
+        for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+            uint nextVertex = (vertexIndex + 1u) % membraneVertexCount;
+            float2 a = cell.position + membraneVertices[membraneBase + vertexIndex].position;
+            float2 b = cell.position + membraneVertices[membraneBase + nextVertex].position;
+            if (membraneVertices[membraneBase + vertexIndex].mechanics.w < 0.0) { continue; }
+            float2 offsetA = a - boundaryCentroid;
+            float2 offsetB = b - boundaryCentroid;
+            float2 majorProjection = float2(
+                dot(offsetA, principalAxis), dot(offsetB, principalAxis)
+            );
+            float2 minorProjection = float2(
+                dot(offsetA, secondaryAxis), dot(offsetB, secondaryAxis)
+            );
+            positiveMajorExtent = max(
+                positiveMajorExtent, max(majorProjection.x, majorProjection.y)
+            );
+            negativeMajorExtent = max(
+                negativeMajorExtent, max(-majorProjection.x, -majorProjection.y)
+            );
+            positiveMinorExtent = max(
+                positiveMinorExtent, max(minorProjection.x, minorProjection.y)
+            );
+            negativeMinorExtent = max(
+                negativeMinorExtent, max(-minorProjection.x, -minorProjection.y)
+            );
+        }
+        index = nextIndex;
+    }
+    float majorExtent = max(
+        positiveMajorExtent + negativeMajorExtent, sqrt(majorEigenvalue) * 2.0
+    );
+    float minorExtent = max(
+        positiveMinorExtent + negativeMinorExtent, sqrt(minorEigenvalue) * 2.0
+    );
+    float2 geometryPolarity = principalAxis *
+        ((positiveMajorExtent - negativeMajorExtent) / max(majorExtent, 0.0001)) +
+        secondaryAxis *
+        ((positiveMinorExtent - negativeMinorExtent) / max(minorExtent, 0.0001));
+    float elongation = saturate(
+        (majorExtent - minorExtent) / max(majorExtent + minorExtent, 0.0001)
+    );
+    float squaredRadius = 0.0;
+    float tissueTorque = 0.0;
+    index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
+    while (index != emptySpatialHashEntry) {
+        uint nextIndex = ownerCellNext[index];
+        if (atomic_load_explicit(&cellOccupancy[index], memory_order_relaxed) ==
+                cellOccupancyAlive &&
+            cellIdentities[index].owner == owner) {
+            CellState cell = cells[index];
+            float2 offset = cell.position - cellCentroid;
+            squaredRadius += dot(offset, offset);
+            tissueTorque += offset.x * cell.tissueForce.y - offset.y * cell.tissueForce.x;
+            cell.position = offset;
+            cells[index] = cell;
+        }
+        index = nextIndex;
+    }
+
+    CellAggregate aggregate;
+    aggregate.physiology = float4(
+        activeCount, atpTotal * inverseCount,
+        integrityTotal * inverseCount, stressTotal * inverseCount
+    );
+    aggregate.morphology = float4(
+        biomassTotal * inverseCount, cycleTotal * inverseCount,
+        sqrt(squaredRadius * inverseCount), dividingCount * inverseCount
+    );
+    float phaseCoherence = saturate(length(phaseTotal) * inverseCount);
+    float meanPhase = phaseCoherence > 0.0001
+        ? fract(atan2(phaseTotal.y, phaseTotal.x) / (2.0 * M_PI_F) + 1.0) : 0.0;
+    aggregate.dynamics = float4(
+        voltageTotal * inverseCount, phaseCoherence,
+        frequencyTotal * inverseCount, meanPhase
+    );
+    aggregate.mechanics = float4(
+        strainTotal * inverseCount, contractilityTotal * inverseCount,
+        waveSpeedTotal * inverseCount,
+        (energeticsTotal.x - energeticsTotal.y - energeticsTotal.z - energeticsTotal.w) *
+            inverseCount
+    );
+    aggregate.energetics = energeticsTotal;
+    aggregate.regulation = regulationTotal * inverseCount;
+    aggregate.regulationB = regulationBTotal * inverseCount;
+    aggregate.causality = causalityTotal * inverseCount;
+    aggregate.resonance = float4(
+        resonanceDisplacementTotal * inverseCount,
+        resonanceAmplitudeTotal * inverseCount,
+        frequencyTotal * inverseCount,
+        agent.dominantProgramIndex < maxGenomeHeaderCount
+            ? resonanceExpressionCaches[agent.dominantProgramIndex].mechanics.y : 0.0
+    );
+    aggregate.shape = float4(
+        membraneAreaTotal * inverseCount, membranePerimeterTotal * inverseCount,
+        membraneShapeTotal * inverseCount, junctionForceTotal * inverseCount
+    );
+    aggregate.signaling = signalingTotal * inverseCount;
+    aggregate.signalCausality = signalCausalityTotal * inverseCount;
+    aggregate.geometryAxes = float4(principalAxis, majorExtent, minorExtent);
+    aggregate.geometryBoundary = float4(
+        length(geometryPolarity) > 0.0001 ? normalize(geometryPolarity) : principalAxis,
+        elongation, boundaryLength
+    );
+    aggregate.tissueMotion = float4(
+        netForce, tissueTorque, meanForceMagnitude * inverseCount
+    );
+    aggregate.trophic = float4(
+        contactLoad, trophicGain, trophicLoss, maximumDetachment
+    );
+    float nonDominantFraction = nonDominantProgramCount * inverseCount;
+    aggregate.inheritance = float4(
+        1.0 - nonDominantFraction,
+        nonDominantFraction,
+        float(popcount(programFingerprint)),
+        float(agent.dominantProgramIndex)
+    );
+    aggregate.programEcology = float4(
+        programEcologyTotal.x * inverseCount,
+        programEcologyTotal.y * inverseCount,
+        receptorChemistrySampleCount > 0.0
+            ? programEcologyTotal.z / receptorChemistrySampleCount : -1.0,
+        programEcologyTotal.w * inverseCount
+    );
+    aggregate.environment = environmentTotal * inverseCount;
+    aggregate.development = developmentTotal * inverseCount;
+    aggregate.developmentCausality = float4(
+        morphogenDifferentiationTotal * inverseCount,
+        saturate(length(developmentalPolarityTotal) * inverseCount),
+        morphogenSynthesisTotal * inverseCount,
+        morphogenTransportWorkTotal * inverseCount
+    );
+    aggregate.embodiedMemory = embodiedMemoryWeight > 0.0001
+        ? embodiedMemoryTotal / embodiedMemoryWeight : float4(0.0);
+    aggregate.membraneProperties = membranePropertyTotal * inverseCount;
+    aggregate.membraneChemistry = membraneChemistryTotal * inverseCount;
+    aggregate.lifeHistory = lifeHistoryTotal * inverseCount;
+    aggregate.functionalActivity = functionalActivityTotal * inverseCount;
+    aggregate.learning = learningTotal * inverseCount;
+    aggregate.constructionFlux = constructionTotal * inverseCount;
+    aggregates[owner] = aggregate;
+    agent.programReplicationGeneration = maximumProgramReplicationGeneration;
+    agents[owner] = agent;
+}

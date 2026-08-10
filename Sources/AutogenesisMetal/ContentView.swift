@@ -52,37 +52,30 @@ private struct ProcessPathwayView: View {
     }
 }
 
-// Keep the former scientific names available to source-level architecture checks.
-private enum ScientificCopyCompatibility {
-    static let molecularScale = "Intracellular molecules in physical cells"
-    static let waveScale = "Wave state coupled to physical cells and organisms"
-    static let moleculePanel = "VISIBLE INTRACELLULAR POOLS"
-}
-
 private enum InterfaceMode: String, CaseIterable, Identifiable {
-    case simple
-    case classic
+    case story
+    case research
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .simple: "Simple / Story"
-        case .classic: "Classic / Research"
+        case .story: "Story"
+        case .research: "Research"
         }
     }
 
     var description: String {
         switch self {
-        case .simple: "Plain-language controls and a story sidebar"
-        case .classic: "Full controls and scientific measurements"
+        case .story: "Plain-language controls and an evidence-backed story"
+        case .research: "Chemistry, physiology, lineages, audits, and evidence"
         }
     }
 }
 
 struct ContentView: View {
     @StateObject private var store = EvolutionStore()
-    @AppStorage("numi.interfaceMode") private var interfaceModeRaw = InterfaceMode.simple.rawValue
+    @AppStorage("numi.interfaceMode") private var interfaceModeRaw = InterfaceMode.story.rawValue
     @State private var showsInspector = ProcessInfo.processInfo.environment[
         "NUMI_SHOW_INSPECTOR"
     ] == "1"
@@ -97,14 +90,14 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                if interfaceMode == .simple {
-                    simpleCommandBar
+                if interfaceMode == .story {
+                    storyCommandBar
                 } else {
                     commandBar
                 }
                 Spacer()
-                if interfaceMode == .simple {
-                    simpleContextHUD
+                if interfaceMode == .story {
+                    storyContextHUD
                 } else {
                     compactContextHUD
                 }
@@ -115,8 +108,8 @@ struct ContentView: View {
                 Spacer()
                 if showsInspector {
                     Group {
-                        if interfaceMode == .simple {
-                            simpleInspectorPanel
+                        if interfaceMode == .story {
+                            storyInspectorPanel
                         } else {
                             inspectorPanel
                         }
@@ -145,29 +138,33 @@ struct ContentView: View {
         .animation(.snappy(duration: 0.22), value: showsInspector)
         .animation(.snappy(duration: 0.22), value: interfaceModeRaw)
         .onAppear {
-            if interfaceMode == .simple {
+            if interfaceModeRaw == "simple" { interfaceModeRaw = InterfaceMode.story.rawValue }
+            if interfaceModeRaw == "classic" { interfaceModeRaw = InterfaceMode.research.rawValue }
+            if interfaceMode == .story {
                 showsInspector = true
+                store.ensureLivingFocus()
             }
         }
         .onChange(of: interfaceModeRaw) { _, rawValue in
-            showsInspector = InterfaceMode(rawValue: rawValue) == .simple
-        }
-        .onChange(of: activeObservationStop) { _, index in
-            store.displayMode = observationStops[index].displayMode
+            let entersStory = InterfaceMode(rawValue: rawValue) == .story
+            showsInspector = entersStory
+            if entersStory {
+                store.ensureLivingFocus()
+            }
         }
     }
 
     private var interfaceMode: InterfaceMode {
-        InterfaceMode(rawValue: interfaceModeRaw) ?? .simple
+        InterfaceMode(rawValue: interfaceModeRaw) ?? .story
     }
 
-    private var simpleCommandBar: some View {
+    private var storyCommandBar: some View {
         HStack(spacing: 7) {
             brandLockup
 
             commandDivider
 
-            simpleCommandButton(
+            storyCommandButton(
                 store.isRunning ? "Pause" : "Play",
                 systemImage: store.isRunning ? "pause.fill" : "play.fill",
                 tint: .cyan
@@ -175,7 +172,7 @@ struct ContentView: View {
                 store.isRunning.toggle()
             }
 
-            simpleCommandButton("Add life", systemImage: "plus", tint: .mint) {
+            storyCommandButton("Add life", systemImage: "plus", tint: .mint) {
                 store.addColony()
             }
 
@@ -194,7 +191,7 @@ struct ContentView: View {
             } label: {
                 Label("View: \(scaleName)", systemImage: observationStops[activeObservationStop].symbol)
             }
-            .simpleMenuStyle()
+            .storyMenuStyle()
 
             Menu {
                 Section("Simulation speed") {
@@ -215,51 +212,26 @@ struct ContentView: View {
             } label: {
                 Label(speedTitle(for: store.stepsPerFrame), systemImage: "gauge.with.dots.needle.67percent")
             }
-            .simpleMenuStyle()
+            .storyMenuStyle()
 
-            Menu {
-                Section("Move around") {
-                    Button("Zoom out", systemImage: "minus.magnifyingglass") {
-                        store.zoom(by: 1 / 1.8, around: .init(repeating: 0.5), aspect: 1)
-                    }
-                    Button("Reset view", systemImage: "viewfinder") {
-                        store.resetCamera()
-                    }
-                    Button("Zoom in", systemImage: "plus.magnifyingglass") {
-                        store.zoom(by: 1.8, around: .init(repeating: 0.5), aspect: 1)
-                    }
+            storyCommandButton(
+                store.observableAgentCount > 1 ? "Next life" : "Show life",
+                systemImage: store.observableAgentCount > 1 ? "chevron.right" : "scope",
+                tint: .orange
+            ) {
+                if store.observableAgentCount > 1 {
+                    store.followAdjacentOrganism(direction: 1)
+                    store.frameLivingFocus()
+                } else {
+                    store.frameLivingFocus()
                 }
-                Section("Follow life") {
-                    Button("Follow a life-form", systemImage: "scope") {
-                        store.followRandomOrganism()
-                    }
-                    Button("Previous life-form", systemImage: "chevron.left") {
-                        store.followAdjacentOrganism(direction: -1)
-                    }
-                    .disabled(store.observableAgentCount < 2)
-                    Button("Next life-form", systemImage: "chevron.right") {
-                        store.followAdjacentOrganism(direction: 1)
-                    }
-                    .disabled(store.observableAgentCount < 2)
-                }
-                Section("Experiment") {
-                    Button(
-                        store.mechanosensingBlocked ? "Turn touch sensing on" : "Turn touch sensing off",
-                        systemImage: "waveform.path.ecg"
-                    ) {
-                        store.toggleMechanosensingIntervention()
-                    }
-                }
-            } label: {
-                Label("Explore", systemImage: "scope")
             }
-            .simpleMenuStyle()
 
             HStack(spacing: 5) {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 7, height: 7)
-                Text(simplePopulationLabel)
+                Text(storyPopulationLabel)
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -268,7 +240,7 @@ struct ContentView: View {
 
             settingsMenu(showLabel: true)
 
-            simpleCommandButton(
+            storyCommandButton(
                 showsInspector ? "Hide story" : "Story",
                 systemImage: "sidebar.right",
                 tint: scaleAccent
@@ -287,7 +259,7 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.34), radius: 16, y: 6)
     }
 
-    private var simpleInspectorPanel: some View {
+    private var storyInspectorPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 15) {
                 HStack(spacing: 10) {
@@ -298,7 +270,7 @@ struct ContentView: View {
                         .background(scaleAccent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("SIMPLE VIEW")
+                        Text("STORY")
                             .font(.system(size: 9, weight: .semibold, design: .monospaced))
                         Text(scaleName)
                             .font(.system(size: 12, weight: .medium, design: .rounded))
@@ -311,7 +283,7 @@ struct ContentView: View {
                         showsInspector = false
                     }
                 }
-                .id("simple-inspector-top")
+                .id("story-inspector-top")
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(worldHeadline)
@@ -338,9 +310,9 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
 
                 Button {
-                    interfaceModeRaw = InterfaceMode.classic.rawValue
+                    interfaceModeRaw = InterfaceMode.research.rawValue
                 } label: {
-                    Label("Switch to Classic / Research view", systemImage: "flask")
+                    Label("Switch to Research", systemImage: "flask")
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
@@ -364,7 +336,7 @@ struct ContentView: View {
         .shadow(color: .black.opacity(0.38), radius: 18, x: -5, y: 7)
     }
 
-    private var simpleContextHUD: some View {
+    private var storyContextHUD: some View {
         HStack(spacing: 10) {
             Image(systemName: observationStops[activeObservationStop].symbol)
                 .font(.system(size: 12, weight: .semibold))
@@ -382,7 +354,7 @@ struct ContentView: View {
 
             Spacer()
 
-            Text(simplePopulationLabel)
+            Text(storyPopulationLabel)
                 .font(.system(size: 9, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
         }
@@ -422,7 +394,7 @@ struct ContentView: View {
         .frame(width: 78, alignment: .leading)
     }
 
-    private func simpleCommandButton(
+    private func storyCommandButton(
         _ title: String,
         systemImage: String,
         tint: Color = .white,
@@ -468,6 +440,15 @@ struct ContentView: View {
             ) {
                 showsInspector.toggle()
             }
+            Divider()
+            Section("Experiment") {
+                Button(
+                    store.mechanosensingBlocked ? "Turn touch sensing on" : "Turn touch sensing off",
+                    systemImage: "waveform.path.ecg"
+                ) {
+                    store.toggleMechanosensingIntervention()
+                }
+            }
         } label: {
             if showLabel {
                 Label("Settings", systemImage: "gearshape")
@@ -475,7 +456,7 @@ struct ContentView: View {
                 Image(systemName: "gearshape")
             }
         }
-        .simpleMenuStyle()
+        .storyMenuStyle()
         .help("Settings")
     }
 
@@ -497,7 +478,7 @@ struct ContentView: View {
         }
     }
 
-    private var simplePopulationLabel: String {
+    private var storyPopulationLabel: String {
         if store.resolvedIndividualCount > 0 {
             return "\(store.resolvedIndividualCount) life-form\(store.resolvedIndividualCount == 1 ? "" : "s")"
         }
@@ -678,7 +659,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(scaleName.uppercased())
                             .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        Text("VIEW 0\(activeObservationStop + 1) OF 06")
+                        Text("CONTINUOUS VIEW · SCROLL FOR DETAIL")
                             .font(.system(size: 8, weight: .medium, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -720,7 +701,7 @@ struct ContentView: View {
 
                 Rectangle().fill(Color.white.opacity(0.10)).frame(height: 1)
 
-                if activeObservationStop == 2 {
+                if store.observationZoom >= 64, store.observationZoom < 160 {
                     intracellularMoleculePanel
                 } else {
                     scaleProcessPathway
@@ -849,7 +830,7 @@ struct ContentView: View {
             sectionLabel("THIS LIFE")
             HStack(spacing: 8) {
                 storyStateValue("LIFE", value: storyLifeStatus, tint: .orange)
-                storyStateValue("ROLE", value: storyRoleStatus, tint: .cyan)
+                storyStateValue("OBSERVED FUNCTION", value: storyRoleStatus, tint: .cyan)
             }
             HStack(spacing: 8) {
                 storyStateValue("LEARNING", value: storyLearningStatus, tint: .blue)
@@ -932,7 +913,7 @@ struct ContentView: View {
         if storyLifeStatus == "Mature" {
             return "A mature life-form is ready to create a new generation."
         }
-        if store.snapshot.metrics.resourceDensity < 0.015 {
+        if store.snapshot.metrics.basisMaterialDensity < 0.015 {
             return "Life is searching for enough food to continue."
         }
         if storyGrowthStatus == "Growing" {
@@ -956,6 +937,9 @@ struct ContentView: View {
     private var storyDescription: String {
         let cellCount = store.snapshot.cellCount
         guard cellCount > 0 else {
+            if store.observableAgentCount > 0 {
+                return "A membrane-connected group has formed. Its cell-level measurements are being collected now."
+            }
             return "No cells are active yet. The world is ready for a new beginning."
         }
         let lifeCount = store.resolvedIndividualCount
@@ -987,30 +971,30 @@ struct ContentView: View {
 
     private var storyLifeStatus: String {
         guard store.snapshot.cellCount > 0 else { return "Waiting" }
-        if store.snapshot.meanRegenerativeReopening >= 0.10 &&
+        if store.snapshot.meanInjuryReopening >= 0.10 &&
             (store.snapshot.meanCellIntegrity < 0.92 || store.snapshot.meanCellStress > 0.18) {
             return "Healing"
         }
-        if store.snapshot.meanSenescentLoad >= 0.22 { return "Aging" }
-        if store.snapshot.meanReproductiveMaturity >= 0.55 { return "Mature" }
-        if store.snapshot.meanOntogeneticProgress < 0.18 { return "New life" }
+        if store.snapshot.meanProteostasisBurden >= 0.22 { return "Aging" }
+        if store.snapshot.meanReplicationBurden >= 0.55 { return "Mature" }
+        if store.snapshot.meanChronologicalAge < 0.18 { return "New life" }
         return "Growing up"
     }
 
     private var storyRoleStatus: String {
         guard store.snapshot.cellCount > 0 else { return "Waiting" }
-        let roles = [
-            (store.snapshot.meanGermlineRole, "Future young"),
-            (store.snapshot.meanSomaRole, "Body"),
-            (store.snapshot.meanNeuralRole, "Nerve"),
-            (store.snapshot.meanBuilderRole, "Builder")
+        let functionalActivity = [
+            (store.snapshot.meanReplicationActivity, "Reproduction"),
+            (store.snapshot.meanMaintenanceActivity, "Maintenance"),
+            (store.snapshot.meanSignalActivity, "Signaling"),
+            (store.snapshot.meanConstructionActivity, "Construction")
         ]
-        return roles.max { $0.0 < $1.0 }?.1 ?? "Undecided"
+        return functionalActivity.max { $0.0 < $1.0 }?.1 ?? "Undecided"
     }
 
     private var storyLearningStatus: String {
         guard store.snapshot.cellCount > 0 else { return "Waiting" }
-        guard store.snapshot.meanNeuralRole >= 0.12 else { return "Not yet" }
+        guard store.snapshot.meanSignalActivity >= 0.12 else { return "Not yet" }
         if abs(store.snapshot.meanAcquiredBehavior) >= 0.06 { return "Learned" }
         if store.snapshot.meanPredictionError >= 0.12 { return "Adapting" }
         if store.snapshot.meanHabituation >= 0.48 { return "Familiar" }
@@ -1020,10 +1004,10 @@ struct ContentView: View {
     private var storyNicheStatus: String {
         guard store.snapshot.cellCount > 0 else { return "Waiting" }
         let works = [
-            (store.snapshot.meanShelterConstruction, "Shelter"),
-            (store.snapshot.meanReservoirConstruction, "Food store"),
-            (store.snapshot.meanRecyclingConstruction, "Recycler"),
-            (store.snapshot.meanDetoxificationConstruction, "Cleanup")
+            (store.snapshot.meanStiffnessDeposition, "Rigid material"),
+            (store.snapshot.meanStorageDeposition, "Porous storage"),
+            (store.snapshot.meanCatalyticDeposition, "Catalytic surface"),
+            (store.snapshot.meanReactiveBindingDeposition, "Reactive binding")
         ]
         guard let strongest = works.max(by: { $0.0 < $1.0 }), strongest.0 >= 0.002 else {
             return "None yet"
@@ -1038,13 +1022,13 @@ struct ContentView: View {
             if store.observationZoom >= 512 {
                 observerMetric("Spinor norm Σρ", value: quantumNormLabel, tint: .cyan, values: store.history.map(\.quantumNorm))
                 observerMetric("Mean spinor order Q", value: decimal(store.snapshot.meanQuantumOrder), tint: .pink, values: store.history.map(\.meanQuantumOrder))
-                observerMetric("Q, mechanics → ΔC", value: scientific(store.snapshot.meanCatalystProduction), tint: .purple, values: store.history.map(\.meanCatalystProduction))
+                observerMetric("Quantum-biased reaction flux", value: scientific(store.snapshot.meanCatalyticReactionFlux), tint: .purple, values: store.history.map(\.meanCatalyticReactionFlux))
                 observerMetric("C, Q → ΔE", value: scientific(store.snapshot.meanPrebioticEnergyProduction), tint: .yellow, values: store.history.map(\.meanPrebioticEnergyProduction))
             } else if store.observationZoom >= 160 {
                 observerMetric("Spinor norm Σρ", value: quantumNormLabel, tint: .cyan, values: store.history.map(\.quantumNorm))
                 observerMetric("Mean spinor order Q", value: decimal(store.snapshot.meanQuantumOrder), tint: .pink, values: store.history.map(\.meanQuantumOrder))
                 observerMetric("Chemical affinity A·B", value: decimal(store.snapshot.meanChemicalAffinity), tint: .blue, values: store.history.map(\.meanChemicalAffinity))
-                observerMetric("Catalyst synthesis ΔC", value: scientific(store.snapshot.meanCatalystProduction), tint: .purple, values: store.history.map(\.meanCatalystProduction))
+                observerMetric("Catalytic reaction flux", value: scientific(store.snapshot.meanCatalyticReactionFlux), tint: .purple, values: store.history.map(\.meanCatalyticReactionFlux))
                 observerMetric("Energy synthesis ΔE", value: scientific(store.snapshot.meanPrebioticEnergyProduction), tint: .yellow, values: store.history.map(\.meanPrebioticEnergyProduction))
             } else if store.observationZoom >= 64 {
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(store.observableAgentCount)", tint: .white, values: store.history.map { Double($0.cellCount) })
@@ -1053,24 +1037,24 @@ struct ContentView: View {
                 observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                 observerMetric("Membrane voltage", value: signedDecimal(store.snapshot.meanMembraneVoltage), tint: .mint, values: store.history.map(\.meanMembraneVoltage))
                 observerMetric("Repair program / paid effect", value: "\(decimal(store.snapshot.meanRepairProgram)) / \(scientific(store.snapshot.meanRepairEffect))", tint: .green, values: store.history.map(\.meanRepairProgram))
-                observerMetric("Life progress / maturity", value: "\(percent(store.snapshot.meanOntogeneticProgress)) / \(percent(store.snapshot.meanReproductiveMaturity))", tint: .orange, values: store.history.map(\.meanOntogeneticProgress))
-                observerMetric("Senescence / regeneration", value: "\(percent(store.snapshot.meanSenescentLoad)) / \(percent(store.snapshot.meanRegenerativeReopening))", tint: .purple, values: store.history.map(\.meanSenescentLoad))
-                observerMetric("Germline / soma roles", value: "\(percent(store.snapshot.meanGermlineRole)) / \(percent(store.snapshot.meanSomaRole))", tint: .yellow, values: store.history.map(\.meanGermlineRole))
-                observerMetric("Neural / builder roles", value: "\(percent(store.snapshot.meanNeuralRole)) / \(percent(store.snapshot.meanBuilderRole))", tint: .cyan, values: store.history.map(\.meanNeuralRole))
+                observerMetric("Age / replication burden", value: "\(percent(store.snapshot.meanChronologicalAge)) / \(percent(store.snapshot.meanReplicationBurden))", tint: .orange, values: store.history.map(\.meanChronologicalAge))
+                observerMetric("Wear / repair reopening", value: "\(percent(store.snapshot.meanProteostasisBurden)) / \(percent(store.snapshot.meanInjuryReopening))", tint: .purple, values: store.history.map(\.meanProteostasisBurden))
+                observerMetric("Replication / maintenance", value: "\(percent(store.snapshot.meanReplicationActivity)) / \(percent(store.snapshot.meanMaintenanceActivity))", tint: .yellow, values: store.history.map(\.meanReplicationActivity))
+                observerMetric("Signaling / construction activity", value: "\(percent(store.snapshot.meanSignalActivity)) / \(percent(store.snapshot.meanConstructionActivity))", tint: .cyan, values: store.history.map(\.meanSignalActivity))
                 observerMetric("Prediction error / habituation", value: "\(decimal(store.snapshot.meanPredictionError)) / \(percent(store.snapshot.meanHabituation))", tint: .blue, values: store.history.map(\.meanPredictionError))
-                observerMetric("Shelter / reservoir work", value: "\(scientific(store.snapshot.meanShelterConstruction)) / \(scientific(store.snapshot.meanReservoirConstruction))", tint: .green, values: store.history.map(\.meanShelterConstruction))
-                observerMetric("Recycling / detox work", value: "\(scientific(store.snapshot.meanRecyclingConstruction)) / \(scientific(store.snapshot.meanDetoxificationConstruction))", tint: .mint, values: store.history.map(\.meanRecyclingConstruction))
+                observerMetric("Rigid / storage deposition", value: "\(scientific(store.snapshot.meanStiffnessDeposition)) / \(scientific(store.snapshot.meanStorageDeposition))", tint: .green, values: store.history.map(\.meanStiffnessDeposition))
+                observerMetric("Catalytic / binding deposition", value: "\(scientific(store.snapshot.meanCatalyticDeposition)) / \(scientific(store.snapshot.meanReactiveBindingDeposition))", tint: .mint, values: store.history.map(\.meanCatalyticDeposition))
                 observerMetric("Exposed membrane", value: decimal(store.snapshot.meanExposedMembraneLength), tint: .blue, values: store.history.map(\.meanExposedMembraneLength))
-            } else if store.observationZoom >= 18, store.displayMode == .causality {
+            } else if store.observationZoom >= 18, store.displayMode == .interactions {
                 let tissueCount = store.observableAgentCount
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
                 observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Mean / max component", value: "\(decimal(store.snapshot.meanCellsPerOrganism)) / \(store.snapshot.largestTissueCellCount)", tint: .green, values: store.history.map(\.meanCellsPerOrganism))
                 observerMetric("Global cell pool", value: percent(store.snapshot.cellPoolUtilization), tint: .blue, values: store.history.map(\.cellPoolUtilization))
-                observerMetric("Heritable programs", value: "\(store.snapshot.heritableProgramCount) / 4096", tint: .purple, values: store.history.map(\.heritableProgramPoolUtilization))
+                observerMetric("Live genome headers", value: "\(store.snapshot.liveGenomeHeaderCount) / 4096", tint: .purple, values: store.history.map(\.genomeHeaderPoolUtilization))
                 observerMetric("Mixed-program cells", value: percent(store.snapshot.meanMixedProgramCellFraction), tint: .orange, values: store.history.map(\.meanMixedProgramCellFraction))
                 observerMetric("Program richness", value: "\(store.snapshot.maximumProgramRichness)", tint: .pink, values: store.history.map { Double($0.maximumProgramRichness) })
-                observerMetric("Recognition match", value: store.snapshot.meanProgramRecognitionCompatibility >= 0 ? decimal(store.snapshot.meanProgramRecognitionCompatibility) : "n/a", tint: .cyan, values: store.history.map { max($0.meanProgramRecognitionCompatibility, 0) })
+                observerMetric("ReceptorChemistry match", value: store.snapshot.meanProgramReceptorChemistryCompatibility >= 0 ? decimal(store.snapshot.meanProgramReceptorChemistryCompatibility) : "n/a", tint: .cyan, values: store.history.map { max($0.meanProgramReceptorChemistryCompatibility, 0) })
                 observerMetric("ATP exchange x1M", value: scaledRate(store.snapshot.meanProgramATPExchange, by: 1_000_000), tint: .mint, values: store.history.map(\.meanProgramATPExchange))
                 observerMetric("Rejection load", value: decimal(store.snapshot.meanProgramRejection), tint: .red, values: store.history.map(\.meanProgramRejection))
                 observerMetric("Program net x1M", value: scaledRate(store.snapshot.meanProgramNetContribution, by: 1_000_000), tint: .yellow, values: store.history.map(\.meanProgramNetContribution))
@@ -1081,7 +1065,7 @@ struct ContentView: View {
                 observerMetric("ERK* → traction ×10k", value: scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000), tint: .mint, values: store.history.map(\.meanERKTractionEffect))
                 observerMetric("Env f / match", value: "\(scaledRate(store.snapshot.meanEnvironmentalFrequency, by: 1_000)) / \(percent(store.snapshot.meanFrequencyMatch))", tint: .cyan, values: store.history.map(\.meanFrequencyMatch))
                 observerMetric("Barrier load", value: percent(store.snapshot.meanBarrierLoad), tint: .orange, values: store.history.map(\.meanBarrierLoad))
-                observerMetric("Armor / predatory", value: "\(decimal(store.snapshot.meanArmorConstruction)) / \(decimal(store.snapshot.meanPredatoryConstruction))", tint: .red, values: store.history.map(\.meanArmorConstruction))
+                observerMetric("Stiffness / thickness", value: "\(decimal(store.snapshot.meanMembraneStiffness)) / \(decimal(store.snapshot.meanMembraneThickness))", tint: .red, values: store.history.map(\.meanMembraneStiffness))
                 observerMetric("Signal ATP cost ×10k", value: scaledRate(store.snapshot.cellularSignalingCost, by: 10_000), tint: .orange, values: store.history.map(\.cellularSignalingCost))
                 observerMetric("Substrate → ATP", value: "\(decimal(store.snapshot.auditedSubstrateEnergy)) / \(decimal(store.snapshot.auditedATPHarvest))", tint: .yellow, values: store.history.map(\.auditedATPHarvest))
                 observerMetric("Conservation residual", value: signedDecimal(store.snapshot.energyConservationResidual), tint: .white, values: store.history.map { abs($0.energyConservationResidual) })
@@ -1096,15 +1080,15 @@ struct ContentView: View {
                 let tissueCount = store.observableAgentCount
                 observerMetric("Cells / components", value: "\(store.snapshot.cellCount) / \(tissueCount)", tint: .cyan, values: store.history.map { Double($0.cellCount) })
                 observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
-                observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanDevelopmentalEdgeCount))
+                observerMetric("Regulation pages / links", value: developmentalTopologyLabel, tint: .mint, values: store.history.map(\.meanGenomeLinkCount))
                 observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                 observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
-                observerMetric("Life progress / maturity", value: "\(percent(store.snapshot.meanOntogeneticProgress)) / \(percent(store.snapshot.meanReproductiveMaturity))", tint: .orange, values: store.history.map(\.meanOntogeneticProgress))
-                observerMetric("Senescence / regeneration", value: "\(percent(store.snapshot.meanSenescentLoad)) / \(percent(store.snapshot.meanRegenerativeReopening))", tint: .purple, values: store.history.map(\.meanSenescentLoad))
-                observerMetric("Germline / soma roles", value: "\(percent(store.snapshot.meanGermlineRole)) / \(percent(store.snapshot.meanSomaRole))", tint: .yellow, values: store.history.map(\.meanGermlineRole))
-                observerMetric("Neural / builder roles", value: "\(percent(store.snapshot.meanNeuralRole)) / \(percent(store.snapshot.meanBuilderRole))", tint: .cyan, values: store.history.map(\.meanNeuralRole))
+                observerMetric("Age / replication burden", value: "\(percent(store.snapshot.meanChronologicalAge)) / \(percent(store.snapshot.meanReplicationBurden))", tint: .orange, values: store.history.map(\.meanChronologicalAge))
+                observerMetric("Wear / repair reopening", value: "\(percent(store.snapshot.meanProteostasisBurden)) / \(percent(store.snapshot.meanInjuryReopening))", tint: .purple, values: store.history.map(\.meanProteostasisBurden))
+                observerMetric("Replication / maintenance", value: "\(percent(store.snapshot.meanReplicationActivity)) / \(percent(store.snapshot.meanMaintenanceActivity))", tint: .yellow, values: store.history.map(\.meanReplicationActivity))
+                observerMetric("Signaling / construction activity", value: "\(percent(store.snapshot.meanSignalActivity)) / \(percent(store.snapshot.meanConstructionActivity))", tint: .cyan, values: store.history.map(\.meanSignalActivity))
                 observerMetric("Prediction error / learned bias", value: "\(decimal(store.snapshot.meanPredictionError)) / \(signedDecimal(store.snapshot.meanAcquiredBehavior))", tint: .blue, values: store.history.map(\.meanPredictionError))
-                observerMetric("Niche work S/R/R/D", value: "\(scientific(store.snapshot.meanShelterConstruction)) / \(scientific(store.snapshot.meanReservoirConstruction)) / \(scientific(store.snapshot.meanRecyclingConstruction)) / \(scientific(store.snapshot.meanDetoxificationConstruction))", tint: .green, values: store.history.map(\.meanShelterConstruction))
+                observerMetric("Material deposition R/S/C/B", value: "\(scientific(store.snapshot.meanStiffnessDeposition)) / \(scientific(store.snapshot.meanStorageDeposition)) / \(scientific(store.snapshot.meanCatalyticDeposition)) / \(scientific(store.snapshot.meanReactiveBindingDeposition))", tint: .green, values: store.history.map(\.meanStiffnessDeposition))
                 observerMetric("Junction transport / polarity", value: "\(decimal(store.snapshot.meanJunctionMorphogenTransport)) / \(percent(store.snapshot.meanDevelopmentalPolarityCoherence))", tint: .mint, values: store.history.map(\.meanJunctionMorphogenTransport))
                 observerMetric("Morphogen source / work", value: "\(scientific(store.snapshot.meanMorphogenSynthesisRate)) / \(scientific(store.snapshot.meanMorphogenTransportWork))", tint: .orange, values: store.history.map(\.meanMorphogenSynthesisRate))
                 observerMetric("Membrane A / P", value: membraneGeometryLabel, tint: .blue, values: store.history.map(\.meanMembraneShapeIndex))
@@ -1114,22 +1098,22 @@ struct ContentView: View {
                 observerMetric("Response / junction F", value: resonanceResponseLabel, tint: .orange, values: store.history.map(\.meanResonanceAmplitude))
                 observerMetric("Env f / match", value: "\(scaledRate(store.snapshot.meanEnvironmentalFrequency, by: 1_000)) / \(percent(store.snapshot.meanFrequencyMatch))", tint: .cyan, values: store.history.map(\.meanFrequencyMatch))
                 observerMetric("Barrier load", value: percent(store.snapshot.meanBarrierLoad), tint: .orange, values: store.history.map(\.meanBarrierLoad))
-                observerMetric("Armor / predatory", value: "\(decimal(store.snapshot.meanArmorConstruction)) / \(decimal(store.snapshot.meanPredatoryConstruction))", tint: .red, values: store.history.map(\.meanArmorConstruction))
+                observerMetric("Stiffness / thickness", value: "\(decimal(store.snapshot.meanMembraneStiffness)) / \(decimal(store.snapshot.meanMembraneThickness))", tint: .red, values: store.history.map(\.meanMembraneStiffness))
                 observerMetric("Ca* / ERK* / refractory", value: signalStateLabel, tint: .pink, values: store.history.map(\.meanCalciumActivity))
                 observerMetric("Inherited gₘ꜀ / g꜀ₑ", value: "\(decimal(store.snapshot.meanMechanicsCalciumGain)) / \(decimal(store.snapshot.meanCalciumERKGain))", tint: .cyan, values: store.history.map(\.meanMechanicsCalciumGain))
                 observerMetric("Inherited gⱼ / r", value: "\(decimal(store.snapshot.meanJunctionTransmissionGain)) / \(decimal(store.snapshot.meanRefractoryRecoveryGain))", tint: .mint, values: store.history.map(\.meanJunctionTransmissionGain))
                 observerMetric("Detach θ / investment", value: "\(decimal(store.snapshot.meanDetachmentThreshold)) / \(decimal(store.snapshot.meanPropaguleInvestment))", tint: .yellow, values: store.history.map(\.meanDetachmentScore))
                 observerMetric("Junction adhesion / cortex", value: "\(decimal(store.snapshot.meanJunctionAdhesion)) / \(decimal(store.snapshot.meanJunctionCorticalTension))", tint: .mint, values: store.history.map(\.meanJunctionAdhesion))
                 observerMetric("Junction damping / permeability", value: "\(decimal(store.snapshot.meanJunctionDamping)) / \(decimal(store.snapshot.meanJunctionPermeability))", tint: .blue, values: store.history.map(\.meanJunctionPermeability))
-                observerMetric("Toxin tolerance / scavenging", value: "\(decimal(store.snapshot.meanToxinTolerance)) / \(decimal(store.snapshot.meanDetritalScavenging))", tint: .orange, values: store.history.map(\.meanToxinTolerance))
+                observerMetric("Reactive tolerance / scavenging", value: "\(decimal(store.snapshot.meanReactiveMoleculeTolerance)) / \(decimal(store.snapshot.meanMoleculeScavenging))", tint: .orange, values: store.history.map(\.meanReactiveMoleculeTolerance))
                 observerMetric("Shear anchoring / quiescence", value: "\(decimal(store.snapshot.meanShearAnchoring)) / \(decimal(store.snapshot.meanStarvationQuiescence))", tint: .cyan, values: store.history.map(\.meanShearAnchoring))
                 observerMetric("ATP / Vₘ", value: "\(decimal(store.snapshot.meanCellATP)) / \(signedDecimal(store.snapshot.meanMembraneVoltage))", tint: .yellow, values: store.history.map(\.meanCellATP))
                 observerMetric("Substrate → ATP", value: "\(decimal(store.snapshot.auditedSubstrateEnergy)) / \(decimal(store.snapshot.auditedATPHarvest))", tint: .yellow, values: store.history.map(\.auditedATPHarvest))
                 observerMetric("Work / resonant work", value: "\(decimal(store.snapshot.auditedActiveWork)) / \(decimal(store.snapshot.auditedFrequencyWork))", tint: .green, values: store.history.map(\.auditedActiveWork))
-                observerMetric("Heat / detritus E", value: "\(decimal(store.snapshot.auditedHeatExport)) / \(decimal(store.snapshot.auditedDetritusReturn))", tint: .orange, values: store.history.map(\.auditedHeatExport))
+                observerMetric("Heat / recycled matter", value: "\(decimal(store.snapshot.auditedHeatExport)) / \(decimal(store.snapshot.auditedRecycledMaterial))", tint: .orange, values: store.history.map(\.auditedHeatExport))
                 observerMetric("Conservation residual", value: signedDecimal(store.snapshot.energyConservationResidual), tint: .white, values: store.history.map { abs($0.energyConservationResidual) })
             } else if store.observationZoom >= 6 {
-                if store.displayMode == .causality {
+                if store.displayMode == .interactions {
                     observerMetric("Direct ΔVₘ ×1k", value: causalRate(store.snapshot.meanMechanotransductionEffect), tint: .cyan, values: store.history.map(\.meanMechanotransductionEffect))
                     observerMetric("Mechanics → Ca* ×1k", value: causalRate(store.snapshot.meanMechanicsCalciumEffect), tint: .cyan, values: store.history.map(\.meanMechanicsCalciumEffect))
                     observerMetric("Ca* → ERK* ×1k", value: causalRate(store.snapshot.meanCalciumERKEffect), tint: .pink, values: store.history.map(\.meanCalciumERKEffect))
@@ -1140,13 +1124,13 @@ struct ContentView: View {
                 } else {
                     observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                     observerMetric("Cells / component", value: "\(store.snapshot.cellCount) / \(decimal(store.snapshot.meanCellsPerOrganism))", tint: .blue, values: store.history.map { Double($0.cellCount) })
-                    observerMetric("GRN nodes / edges", value: developmentalTopologyLabel, tint: .pink, values: store.history.map(\.meanDevelopmentalEdgeCount))
-                    if store.displayMode == .development {
+                    observerMetric("Regulation pages / links", value: developmentalTopologyLabel, tint: .pink, values: store.history.map(\.meanGenomeLinkCount))
+                    if store.displayMode == .physiology {
                         observerMetric("Morphogen A / B", value: "\(decimal(store.snapshot.meanMorphogenActivator)) / \(decimal(store.snapshot.meanMorphogenInhibitor))", tint: .cyan, values: store.history.map(\.meanMorphogenActivator))
                         observerMetric("Differentiation / fate", value: "\(decimal(store.snapshot.meanMorphogenDifferentiation)) / \(decimal(store.snapshot.meanDevelopmentalFateMemory))", tint: .pink, values: store.history.map(\.meanMorphogenDifferentiation))
-                        observerMetric("Life progress / maturity", value: "\(percent(store.snapshot.meanOntogeneticProgress)) / \(percent(store.snapshot.meanReproductiveMaturity))", tint: .orange, values: store.history.map(\.meanOntogeneticProgress))
-                        observerMetric("Senescence / regeneration", value: "\(percent(store.snapshot.meanSenescentLoad)) / \(percent(store.snapshot.meanRegenerativeReopening))", tint: .purple, values: store.history.map(\.meanSenescentLoad))
-                        observerMetric("Cell roles G/S/N/B", value: "\(percent(store.snapshot.meanGermlineRole)) / \(percent(store.snapshot.meanSomaRole)) / \(percent(store.snapshot.meanNeuralRole)) / \(percent(store.snapshot.meanBuilderRole))", tint: .cyan, values: store.history.map(\.meanNeuralRole))
+                        observerMetric("Age / replication burden", value: "\(percent(store.snapshot.meanChronologicalAge)) / \(percent(store.snapshot.meanReplicationBurden))", tint: .orange, values: store.history.map(\.meanChronologicalAge))
+                        observerMetric("Wear / repair reopening", value: "\(percent(store.snapshot.meanProteostasisBurden)) / \(percent(store.snapshot.meanInjuryReopening))", tint: .purple, values: store.history.map(\.meanProteostasisBurden))
+                        observerMetric("Cell activity R/M/S/C", value: "\(percent(store.snapshot.meanReplicationActivity)) / \(percent(store.snapshot.meanMaintenanceActivity)) / \(percent(store.snapshot.meanSignalActivity)) / \(percent(store.snapshot.meanConstructionActivity))", tint: .cyan, values: store.history.map(\.meanSignalActivity))
                         observerMetric("Transport / polarity", value: "\(decimal(store.snapshot.meanJunctionMorphogenTransport)) / \(percent(store.snapshot.meanDevelopmentalPolarityCoherence))", tint: .mint, values: store.history.map(\.meanJunctionMorphogenTransport))
                     }
                     observerMetric("Mean |v|", value: speedLabel, tint: .cyan, values: store.history.map(\.meanOrganismSpeed))
@@ -1159,14 +1143,14 @@ struct ContentView: View {
                 observerMetric("Components / inferred individuals", value: individualityCountLabel, tint: .mint, values: store.history.map { Double($0.organismCount) })
                 observerMetric("Cells / mean component", value: "\(store.snapshot.cellCount) / \(decimal(store.snapshot.meanCellsPerOrganism))", tint: .blue, values: store.history.map { Double($0.cellCount) })
                 observerMetric("Largest component", value: "\(store.snapshot.largestTissueCellCount) cells", tint: .green, values: store.history.map { Double($0.largestTissueCellCount) })
-                observerMetric("Mean free R", value: resourceLabel, tint: .cyan, values: store.history.map(\.metrics.resourceDensity))
-                observerMetric("Substrate forcing", value: decimal(store.snapshot.metrics.substrateFluctuation), tint: .cyan, values: store.history.map(\.metrics.substrateFluctuation))
-                observerMetric("Detritus density", value: decimal(store.snapshot.metrics.detritusDensity), tint: .orange, values: store.history.map(\.metrics.detritusDensity))
-                observerMetric("Constructed niche S/R/R/D", value: "\(scientific(store.snapshot.meanShelterConstruction)) / \(scientific(store.snapshot.meanReservoirConstruction)) / \(scientific(store.snapshot.meanRecyclingConstruction)) / \(scientific(store.snapshot.meanDetoxificationConstruction))", tint: .green, values: store.history.map(\.meanShelterConstruction))
+                observerMetric("Available basis material", value: resourceLabel, tint: .cyan, values: store.history.map(\.metrics.basisMaterialDensity))
+                observerMetric("External energy variation", value: decimal(store.snapshot.metrics.externalEnergyVariation), tint: .cyan, values: store.history.map(\.metrics.externalEnergyVariation))
+                observerMetric("Recycled matter density", value: decimal(store.snapshot.metrics.recycledMatterDensity), tint: .orange, values: store.history.map(\.metrics.recycledMatterDensity))
+                observerMetric("Constructed material R/S/C/B", value: "\(scientific(store.snapshot.meanStiffnessDeposition)) / \(scientific(store.snapshot.meanStorageDeposition)) / \(scientific(store.snapshot.meanCatalyticDeposition)) / \(scientific(store.snapshot.meanReactiveBindingDeposition))", tint: .green, values: store.history.map(\.meanStiffnessDeposition))
                 observerMetric("Barrier area", value: percent(store.snapshot.metrics.barrierFraction), tint: .gray, values: store.history.map(\.metrics.barrierFraction))
                 observerMetric("Mechanical drive", value: decimal(store.snapshot.metrics.environmentalMechanicalDrive), tint: .pink, values: store.history.map(\.metrics.environmentalMechanicalDrive))
                 observerMetric("Mean |ΔB|", value: activityLabel, tint: .orange, values: store.history.map(\.metrics.temporalActivity))
-                observerMetric("Predatory trait", value: "\(store.snapshot.hunterCount) units", tint: .red, values: store.history.map { Double($0.hunterCount) })
+                observerMetric("Trophic interactions", value: "\(store.snapshot.trophicInteractionCount) observed", tint: .red, values: store.history.map { Double($0.trophicInteractionCount) })
                 observerMetric("Junction ATP exchange ×1M", value: scaledRate(store.snapshot.meanProgramATPExchange, by: 1_000_000), tint: .mint, values: store.history.map(\.meanProgramATPExchange))
                 observerMetric("Trophic transfer", value: "\(store.snapshot.trophicTransferSamples) / \(compactScientific(store.snapshot.transferredEnergy)) E", tint: .yellow, values: store.history.map { Double($0.trophicTransferSamples) })
                 observerMetric("Persistent clades", value: "\(store.snapshot.persistentCladeCount)", tint: .pink, values: store.history.map { Double($0.persistentCladeCount) })
@@ -1591,14 +1575,14 @@ struct ContentView: View {
             return [
                 .init(label: "FIELD", value: quantumNormLabel, symbol: "waveform.path", tint: .cyan),
                 .init(label: "ORDER", value: decimal(store.snapshot.meanQuantumOrder), symbol: "circle.grid.cross", tint: .purple),
-                .init(label: "CATALYST", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
+                .init(label: "REACTIONS", value: compactScientific(store.snapshot.meanCatalyticReactionFlux), symbol: "aqi.medium", tint: .pink),
                 .init(label: "ENERGY", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
             ]
         case 1:
             return [
                 .init(label: "ORDER", value: decimal(store.snapshot.meanQuantumOrder), symbol: "waveform.path", tint: .cyan),
                 .init(label: "CHEMISTRY", value: decimal(store.snapshot.meanChemicalAffinity), symbol: "point.3.connected.trianglepath.dotted", tint: .blue),
-                .init(label: "CATALYST", value: compactScientific(store.snapshot.meanCatalystProduction), symbol: "aqi.medium", tint: .pink),
+                .init(label: "REACTIONS", value: compactScientific(store.snapshot.meanCatalyticReactionFlux), symbol: "aqi.medium", tint: .pink),
                 .init(label: "ENERGY", value: compactScientific(store.snapshot.meanPrebioticEnergyProduction), symbol: "bolt.fill", tint: .yellow)
             ]
         case 3:
@@ -1617,10 +1601,10 @@ struct ContentView: View {
             ]
         default:
             return [
-                .init(label: "FOOD", value: decimal(store.snapshot.metrics.resourceDensity), symbol: "drop.fill", tint: .cyan),
+                .init(label: "BASIS", value: decimal(store.snapshot.metrics.basisMaterialDensity), symbol: "drop.fill", tint: .cyan),
                 .init(label: "ENERGY", value: compactScientific(store.snapshot.auditedATPHarvest), symbol: "bolt.fill", tint: .yellow),
                 .init(label: "ACTIVITY", value: compactScientific(ecologicalWork), symbol: "waveform.path", tint: .green),
-                .init(label: "REMAINS", value: decimal(store.snapshot.metrics.detritusDensity), symbol: "arrow.triangle.2.circlepath", tint: .orange)
+                .init(label: "RECYCLED", value: decimal(store.snapshot.metrics.recycledMatterDensity), symbol: "arrow.triangle.2.circlepath", tint: .orange)
             ]
         }
     }
@@ -1661,7 +1645,7 @@ struct ContentView: View {
                 Text(scaleName)
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .lineLimit(1)
-                Text("\(zoomLabel) · scale 0\(activeObservationStop + 1)")
+                Text("\(zoomLabel) · continuous scale")
                     .font(.system(size: 8, weight: .semibold, design: .monospaced))
                     .foregroundStyle(scaleAccent)
             }
@@ -1756,10 +1740,10 @@ struct ContentView: View {
         return switch label {
         case "Spinor norm Σρ": "Field strength"
         case "Mean spinor order Q": "Field order"
-        case "Q, mechanics → ΔC": "Order → catalyst"
-        case "C, Q → ΔE": "Catalyst → energy"
+        case "Q, mechanics → ΔC": "Order → pathway bias"
+        case "C, Q → ΔE": "Pathway → usable energy"
         case "Chemical affinity A·B": "Chemical attraction"
-        case "Catalyst synthesis ΔC": "New catalyst"
+        case "Catalyst synthesis ΔC": "Catalytic molecules formed"
         case "Energy synthesis ΔE": "New energy"
         case "Cells / components": "Cells / groups"
         case "Cells / component": "Cells / group"
@@ -1772,24 +1756,24 @@ struct ContentView: View {
         case "Morphogen A / B": "Growth signals A / B"
         case "Membrane voltage": "Cell charge"
         case "Repair program / paid effect": "Healing effort / result"
-        case "Life progress / maturity": "Growing up / ready for young"
-        case "Senescence / regeneration": "Aging / healing"
-        case "Germline / soma roles": "Future-young / body cells"
-        case "Neural / builder roles": "Learning / world-building cells"
+        case "Age / replication burden": "Time alive / accumulated copying load"
+        case "Wear / repair reopening": "Accumulated wear / renewed growth after injury"
+        case "Replication / maintenance": "Making cells / keeping cells working"
+        case "Signaling / construction activity": "Signaling / world-building activity"
         case "Prediction error / habituation": "Surprise / familiarity"
         case "Prediction error / learned bias": "Surprise / learned response"
         case "Shelter / reservoir work": "Shelter / food storage"
         case "Recycling / detox work": "Recycling / cleanup"
-        case "Niche work S/R/R/D", "Constructed niche S/R/R/D": "Shelter / storage / recycling / cleanup"
-        case "Cell roles G/S/N/B": "Future-young / body / learning / builder cells"
+        case "Niche work S/R/R/D", "Constructed constructionFlux S/R/R/D": "Shelter / storage / recycling / cleanup"
+        case "Cell activity R/M/S/C": "Reproduction / maintenance / signaling / construction"
         case "Exposed membrane": "Outer edge"
         case "Components / inferred individuals": "Groups / life-forms"
         case "Mean / max component": "Average / largest group"
         case "Global cell pool": "Cells in use"
-        case "Heritable programs": "Inherited traits"
+        case "Live genome headers": "Inherited program records"
         case "Mixed-program cells": "Mixed-trait cells"
         case "Program richness": "Trait variety"
-        case "Recognition match": "Recognition"
+        case "ReceptorChemistry match": "Receptor match"
         case "ATP exchange x1M": "Energy sharing"
         case "Rejection load": "Rejection"
         case "Program net x1M": "Net group effect"
@@ -1799,7 +1783,7 @@ struct ContentView: View {
         case "ERK* → traction ×10k": "Signal B → movement"
         case "Env f / match": "World rhythm / match"
         case "Barrier load": "Obstacle pressure"
-        case "Armor / predatory": "Protection / hunting"
+        case "Stiffness / thickness": "How rigid / how thick membranes are"
         case "Signal ATP cost ×10k": "Signal energy cost"
         case "Substrate → ATP": "Food → energy"
         case "Conservation residual": "Energy mismatch"
@@ -1825,22 +1809,22 @@ struct ContentView: View {
         case "Detach θ / investment": "Separation / investment"
         case "Junction adhesion / cortex": "Cell sticking / tension"
         case "Junction damping / permeability": "Cell connection / sharing"
-        case "Toxin tolerance / scavenging": "Toxin defense / cleanup"
+        case "Toxin tolerance / scavenging": "Harmful binding / detox reactions"
         case "Shear anchoring / quiescence": "Grip / rest"
         case "Work / resonant work": "Activity / rhythm work"
-        case "Heat / detritus E": "Heat / remains"
+        case "Heat / detritus E": "Heat / recycled matter"
         case "Mean |v|": "Movement"
         case "Elongation / exposed P": "Stretch / outer edge"
         case "Force / torque ×10k": "Push / turning"
         case "Persistent clades": "Long-lived families"
         case "Largest component": "Largest group"
-        case "Mean free R": "Free food"
-        case "Substrate forcing": "Food changes"
-        case "Detritus density": "Remains"
+        case "Mean free R": "Available basis material"
+        case "Substrate forcing": "External energy variation"
+        case "Detritus density": "Recycled matter"
         case "Barrier area": "Obstacle area"
         case "Mechanical drive": "Touch pressure"
         case "Mean |ΔB|": "Recent change"
-        case "Predatory trait": "Hunters"
+        case "Trophic interactions": "Measured feeding contacts"
         case "Junction ATP exchange ×1M": "Energy shared"
         case "Trophic transfer": "Feeding"
         case "Energy residual": "Energy mismatch"
@@ -1963,11 +1947,13 @@ struct ContentView: View {
         case .cellDivision: "A cell split in two"
         case .programMutation: "A new trait appeared"
         case .crossbreeding: "Two traits combined"
-        case .maturation: "A life-form grew up"
+        case .speciesBirth: "A novel lineage persisted"
+        case .crossFeeding: "A possible exchange loop appeared"
+        case .construction: "A life-form deposited material"
+        case .chemicalArmsRace: "A possible chemical conflict appeared"
+        case .collectiveReproduction: "A collective reproduced its organization"
         case .regeneration: "A life-form began healing"
-        case .senescence: "A life-form began aging"
         case .learning: "A life-form learned from experience"
-        case .nicheConstruction: "A life-form changed its home"
         }
     }
 
@@ -1999,16 +1985,20 @@ struct ContentView: View {
             "A small inherited change created a possible new trait."
         case .crossbreeding:
             "Two existing traits were combined in a new cell."
-        case .maturation:
-            "Inherited rules and present conditions made reproduction possible."
+        case .speciesBirth:
+            "A changed inherited program persisted while capturing its own energy."
+        case .crossFeeding:
+            "Matter transfer and energy capture persisted together; an ablation is still needed to prove the exchange causes the benefit."
+        case .construction:
+            "Cells repeatedly paid energy to deposit physical material; its ecological function is not assumed."
+        case .chemicalArmsRace:
+            "Reactive chemistry, breaches, and resistance changed together; an ablation is still needed to prove causation."
+        case .collectiveReproduction:
+            "A separated descendant preserved a parent-like organization and sustained its own boundary and energy flow."
         case .regeneration:
-            "Injury reopened growth programs so damaged tissue could rebuild."
-        case .senescence:
-            "Wear is accumulating, and continued life now costs more repair."
+            "Repair, reopening, and restored integrity persisted after injury; the paired wound experiment tests causation."
         case .learning:
             "Experience changed this individual's response without rewriting its genes."
-        case .nicheConstruction:
-            "Cells spent energy changing the local world into shelter, storage, recycling, or cleanup."
         }
     }
 
@@ -2020,7 +2010,7 @@ struct ContentView: View {
 
     private var worldHeadline: String {
         let zoom = store.observationZoom
-        if store.displayMode == .causality, zoom < 64 {
+        if store.displayMode == .interactions, zoom < 64 {
             return zoom >= 18
                 ? "How movement changes the body"
                 : "Cause and effect in the living world"
@@ -2031,8 +2021,11 @@ struct ContentView: View {
             return "What is happening inside cells"
         }
         if zoom >= 18 {
-            return store.displayMode == .development
-                ? "Cells growing and taking on different roles"
+            if store.snapshot.cellCount == 1 {
+                return "A membrane-bounded cell building itself"
+            }
+            return store.displayMode == .physiology
+                ? "Cells growing and taking on different functions"
                 : "Cells working together as a body"
         }
         if zoom >= 6 {
@@ -2047,12 +2040,20 @@ struct ContentView: View {
         let cells = store.snapshot.cellCount
         let groups = store.observableAgentCount
         if cells == 0 {
+            if groups > 0 {
+                return "A membrane-connected group is present; the cell census is catching up with the live renderer."
+            }
             return "The world is ready for its first life-form."
         }
         if store.observationZoom >= 64 {
-            return "Cells use energy, pass signals, and repair their outer boundaries."
+            return cells == 1
+                ? "This cell is using energy, signaling internally, and maintaining its living boundary."
+                : "Cells use energy, pass signals, and repair their outer boundaries."
         }
         if store.observationZoom >= 18 {
+            if cells == 1 {
+                return "One physical cell is changing shape, using energy, and maintaining its membrane."
+            }
             return "\(cells) cells are sharing signals, changing shape, and working together."
         }
         if store.observationZoom >= 6 {
@@ -2071,7 +2072,7 @@ struct ContentView: View {
     private var worldSummary: String {
         let zoom = store.observationZoom
         let units = store.observableAgentCount
-        if store.displayMode == .causality, zoom < 64 {
+        if store.displayMode == .interactions, zoom < 64 {
             let edgeState = store.mechanosensingBlocked ? "ablated (gain = 0)" : "active (gain = 1)"
             return "Mechanics→Ca* and Ca*→ERK* are factual-minus-single-edge-zero update differences. ERK*→traction and signaling ATP cost are direct equation terms. Mean values are \(causalRate(store.snapshot.meanMechanicsCalciumEffect)) ×10⁻³, \(causalRate(store.snapshot.meanCalciumERKEffect)) ×10⁻³, and \(scaledRate(store.snapshot.meanERKTractionEffect, by: 10_000)) ×10⁻⁴ for the first three terms. Ca* and ERK* are dimensionless excitable-state variables, not resolved molecular concentrations. Mechanics gating is \(edgeState). Observational rows use predeclared one-sample-lag first-difference correlations with autocorrelation-adjusted 95% intervals; they are not causal effects."
         }
@@ -2082,17 +2083,17 @@ struct ContentView: View {
             return "ρ = |ψ₀|² + |ψ₁|². Color encodes local phase direction and spin balance; brightness includes component coherence. Mint-to-amber structure samples the exact prepared matter coupling consumed by the quantum update. Faint membranes are the same persistent physical cells shown at lower scales, not field glyphs or additional forces."
         }
         if zoom >= 64 {
-            return "The molecular instrument draws only physical cells and organisms. Amber, cyan, magenta, blue, and pink glyphs are driven by each cell's ATP, Ca*, ERK*, morphogen A, and morphogen B state; abundance controls glyph occupancy. Membrane lipids, integrity, ATP-paid repair, wounds, and the shared integument remain attached to the same cell geometry. The extracellular reaction field and junction ribbons are intentionally absent at this scale."
+            return "The same physical world remains underneath this close view. Amber, cyan, magenta, blue, and pink glyphs are driven by each cell's ATP, Ca*, ERK*, morphogen A, and morphogen B state; abundance controls glyph occupancy. Membrane lipids, integrity, ATP-paid repair, wounds, junctions, the surrounding chemistry, and the shared integument remain attached to the same world coordinates while finer detail fades in."
         }
         if zoom >= 18 {
-            if store.displayMode == .development {
+            if store.displayMode == .physiology {
                 return "Morphogen A and B are synthesized and degraded using inherited kinetic constants, then diffuse only through recent persistent cell junctions. Their receptor-weighted imbalance updates continuous fate memory and tissue polarity, which alter division axes, membrane allocation, traction, feeding, and defense. Mean A/B is \(decimal(store.snapshot.meanMorphogenActivator))/\(decimal(store.snapshot.meanMorphogenInhibitor)); differentiation is \(decimal(store.snapshot.meanMorphogenDifferentiation))."
             }
             return "\(store.snapshot.cellCount) persistent cells are active across \(units) physical components. Exposed membrane arcs determine covariance axes, elongation, polarity, and boundary length. Cell-local chemistry, Ca*/ERK* signaling, adhesion, and traction produce component force and torque; observer labels do not alter these equations."
         }
         if zoom >= 6 {
             return units == 0
-                ? "No biological component is active. Founder nucleation remains driven by measured biomass, stored energy, membrane precursor, and catalyst concentrations."
+                ? "No biological component is active. Protocell nucleation requires a locally closed autocatalytic loop with sufficient basis material, stored energy, and membrane precursors."
                 : "Every nonempty membrane-connected component has an independent handle immediately after separation. Endogenous predictability is tested against block-shuffled nulls; IND = \(store.resolvedIndividualCount) additionally requires sustained energetic uptake, boundary repair, mechanochemical closure, and junction cooperation for multicellular partitions. Observer results never alter survival, division, or reproduction."
         }
         let occupied = percent(store.snapshot.metrics.occupiedFraction)
@@ -2100,16 +2101,16 @@ struct ContentView: View {
     }
 
     private var scaleRelation: String {
-        if store.displayMode == .causality, store.observationZoom < 64 {
+        if store.displayMode == .interactions, store.observationZoom < 64 {
             return "Mechanical strain drives the inherited resonator, membrane voltage, and mechanogated Ca*-like influx. Inherited gains scale Ca* and ERK* contact propagation, refractory recovery, signaling cost, and traction. Exposed cells combine local substrate gradients, ERK* wave direction, and developmental polarity into external force; the tissue reduction converts summed force and torque into organism motion. The intervention sets direct mechanics→voltage and mechanics→Ca* gains to zero while leaving neighbor propagation and downstream dynamics active."
         }
         return switch activeObservationStop {
-        case 0: "ρ and normalized component overlap define quantumOrder, which enters the catalyst-production term in reactWorld."
-        case 1: "Physical cells shape the prepared coin angle θ and local phase V shown beneath their membranes; spinor density and component overlap feed back into catalyst and stored-energy production."
+        case 0: "ρ and normalized component overlap define quantum order. It biases audited activation barriers and pathway choice in the unified chemistry update without creating matter or free energy."
+        case 1: "Physical cells shape the prepared coin angle θ and local phase V beneath their membranes; spinor density and component overlap bias audited reaction pathways and stored-energy conversion."
         case 2: "Each glyph reads the state of the cell that contains it: ATP from physiology, Ca* and ERK* from the excitable signaling state, and morphogens A and B from development. Membrane condition, paid repair, local failure, and supracellular integument are rendered on the physical boundary. Glyph density is a monotonic abundance cue, not a separate particle simulation."
-        case 3: "A bounded sparse graph maps twenty local mechanochemical, ecological, body-position, segmentation, and plasticity inputs into eight cellular activities plus predatory, armor, sensory, and locomotor construction. Cell-cycle and biomass dynamics use measured substrate harvest relative to maintenance, work, and dissipation together with ATP reserve, exposed membrane, crowding, stress, and inherited regulation. Persistent junction ribbons read physical load and strain directly; amber packets show signed ATP sharing, cyan and magenta lanes show conductance-gated Ca*/ERK* propagation, and blue-green wound boundaries show ATP-funded repair. These render diagnostics never feed the cell update."
+        case 3: "Linked genome pages turn local chemistry, mechanics, voltage, body position, damage, and memory into cellular activity. Pages can duplicate, split, disappear, recombine, or mutate without a fixed graph ceiling. Cell division and biomass change follow settled molecular uptake, ATP reserve, membrane integrity, crowding, stress, and inherited regulation. Junction ribbons show measured load and signaling; wound boundaries show paid repair. These diagnostics never feed the cell update."
         case 4: "GPU union-find labels membrane-connected cells independently of storage position. Every detached nonempty component receives a handle immediately. Cross-owner fusion follows membrane contact and reciprocal ligand-receptor mechanics. Lineage-colored junction rails identify contact between different generation-tagged programs. Fission transmits programs already present in cells without mutation; ATP-funded cell division can mutate one program or crossbreed two compatible junction-linked programs."
-        default: "Resources and hazards act through cell-local uptake, stress, and traction. Hunting requires specialized exposed cells to make physical contact; membrane support must fail locally before ATP and biomass transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
+        default: "Basis materials and harmful chemistry act through cell-local uptake, stress, and traction. Feeding on another body requires physical contact and local membrane failure before ATP and matter can transfer. Differential survival and reproduction therefore arise without an organism-level fitness function."
         }
     }
 
@@ -2125,7 +2126,7 @@ struct ContentView: View {
     }
 
     private var resourceLabel: String {
-        decimal(store.snapshot.metrics.resourceDensity)
+        decimal(store.snapshot.metrics.basisMaterialDensity)
     }
 
     private var quantumNormLabel: String {
@@ -2213,27 +2214,27 @@ struct ContentView: View {
         [
             ObservationStop(
                 label: "Field", symbol: "atom", magnification: 900,
-                displayMode: .ecology
+                displayMode: .chemistry
             ),
             ObservationStop(
                 label: "Signals", symbol: "waveform.path", magnification: 240,
-                displayMode: .ecology
+                displayMode: .chemistry
             ),
             ObservationStop(
                 label: "Inside", symbol: "scope", magnification: 96,
-                displayMode: .energy
+                displayMode: .materials
             ),
             ObservationStop(
                 label: "Cells", symbol: "circle.hexagonpath.fill", magnification: 36,
-                displayMode: .development
+                displayMode: .physiology
             ),
             ObservationStop(
                 label: "Body", symbol: "microbe.fill", magnification: 10,
-                displayMode: .genome
+                displayMode: .lineages
             ),
             ObservationStop(
                 label: "World", symbol: "circle.hexagongrid.fill", magnification: 1,
-                displayMode: .ecology
+                displayMode: .chemistry
             )
         ]
     }
@@ -2253,12 +2254,12 @@ struct ContentView: View {
         if store.snapshot.metrics.temporalActivity > 0.03 { return .orange }
         if store.snapshot.metrics.occupiedFraction > 0.75,
            store.snapshot.metrics.temporalActivity < 0.003 { return .cyan }
-        if store.snapshot.fitness.diversification > 0.35 { return .pink }
+        if store.snapshot.openEndedness.current.functionalDiversity > 0.35 { return .pink }
         return .green
     }
 
     private var legendItems: [(label: String, color: Color)] {
-        if store.displayMode == .causality, store.observationZoom < 64 {
+        if store.displayMode == .interactions, store.observationZoom < 64 {
             return [("Touch → signal", .cyan), ("Signal → response", .pink), ("Response → movement", .mint), ("Energy used", .orange)]
         }
         if store.observationZoom >= 512 {
@@ -2271,7 +2272,7 @@ struct ContentView: View {
             return [("Energy", .yellow), ("Signal A", .cyan), ("Signal B", .pink), ("Growth A", .blue), ("Growth B", .pink), ("Boundary", .mint)]
         }
         if store.observationZoom >= 18 {
-            if store.displayMode == .development {
+            if store.displayMode == .physiology {
                 return [
                     ("Growth A", .cyan), ("Growth B", .pink),
                     ("Cell role", .mint), ("Direction", .white), ("Cell-to-cell flow", .blue)
@@ -2290,30 +2291,30 @@ struct ContentView: View {
                 ("Healing", .blue), ("Family mix", .purple)
             ]
         }
-        if store.displayMode == .ecology {
+        if store.displayMode == .chemistry {
             return [("Life", .cyan), ("Food A", .green), ("Food B", .yellow), ("Obstacle", .gray), ("Harm", .red), ("Pressure", .pink)]
         }
         switch store.displayMode {
-        case .ecology:
+        case .chemistry:
             return []
-        case .energy:
+        case .materials:
             return [("Food A", .cyan), ("Food B", .purple), ("Stored power", .yellow), ("Remains", .orange)]
-        case .genome:
+        case .lineages:
             return [("Energy use", .red), ("Sticking", .green), ("Splitting", .blue), ("Family", .pink)]
-        case .niches:
+        case .signals:
             return [("Food A", .red), ("Food B", .green), ("Cleanup", .blue), ("Hunting", .pink)]
-        case .development:
+        case .physiology:
             return [("Growth", .yellow), ("Sticking", .mint), ("Movement", .pink), ("Healing", .blue)]
-        case .causality:
+        case .interactions:
             return [("Touch → signal", .cyan), ("Signal → response", .pink), ("Response → movement", .mint), ("Energy used", .orange)]
         }
     }
 
     private var legendTitle: String {
-        if store.displayMode == .causality, store.observationZoom < 64 {
+        if store.displayMode == .interactions, store.observationZoom < 64 {
             return "Tested cause and effect"
         }
-        if store.displayMode == .development, store.observationZoom >= 18,
+        if store.displayMode == .physiology, store.observationZoom >= 18,
            store.observationZoom < 64 {
             return "Cell teamwork and growth"
         }
@@ -2373,8 +2374,8 @@ struct ContentView: View {
     }
 
     private func laggedAssociation(
-        cause: (EvolutionSnapshot) -> Double,
-        effect: (EvolutionSnapshot) -> Double
+        cause: (WorldObservation) -> Double,
+        effect: (WorldObservation) -> Double
     ) -> String {
         guard let estimate = CausalAnalysis.laggedDifferenceAssociation(
             cause: store.history.map(cause),
@@ -2434,8 +2435,8 @@ struct ContentView: View {
     private var developmentalTopologyLabel: String {
         String(
             format: "%.1f / %.1f",
-            store.snapshot.meanDevelopmentalNodeCount,
-            store.snapshot.meanDevelopmentalEdgeCount
+            store.snapshot.meanRegulationPageCount,
+            store.snapshot.meanGenomeLinkCount
         )
     }
 
@@ -2454,11 +2455,13 @@ struct ContentView: View {
         case .cellDivision: "arrow.triangle.2.circlepath"
         case .programMutation: "point.3.filled.connected.trianglepath.dotted"
         case .crossbreeding: "arrow.triangle.merge"
-        case .maturation: "figure.arms.open"
+        case .speciesBirth: "sparkle.magnifyingglass"
+        case .crossFeeding: "arrow.left.arrow.right"
+        case .construction: "square.stack.3d.up"
+        case .chemicalArmsRace: "bolt.trianglebadge.exclamationmark"
+        case .collectiveReproduction: "circle.grid.cross"
         case .regeneration: "bandage"
-        case .senescence: "hourglass"
         case .learning: "brain.head.profile"
-        case .nicheConstruction: "leaf"
         }
     }
 
@@ -2476,11 +2479,13 @@ struct ContentView: View {
         case .cellDivision: .cyan
         case .programMutation: .pink
         case .crossbreeding: .purple
-        case .maturation: .orange
+        case .speciesBirth: .orange
+        case .crossFeeding: .mint
+        case .construction: .green
+        case .chemicalArmsRace: .red
+        case .collectiveReproduction: .cyan
         case .regeneration: .mint
-        case .senescence: .purple
         case .learning: .blue
-        case .nicheConstruction: .green
         }
     }
 
@@ -2488,7 +2493,8 @@ struct ContentView: View {
         switch kind {
         case .branching, .fusion: "FAMILY"
         case .cellDivision, .programMutation, .crossbreeding: "TRAIT"
-        case .maturation, .regeneration, .senescence, .learning, .nicheConstruction: "LIFE"
+        case .speciesBirth, .regeneration, .learning, .collectiveReproduction: "LIFE"
+        case .crossFeeding, .construction, .chemicalArmsRace: "ECOLOGY"
         default: "TIME"
         }
     }
@@ -2499,7 +2505,7 @@ struct ContentView: View {
 }
 
 private extension View {
-    func simpleMenuStyle() -> some View {
+    func storyMenuStyle() -> some View {
         self
             .font(.system(size: 10, weight: .semibold, design: .rounded))
             .foregroundStyle(Color.primary)

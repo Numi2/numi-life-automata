@@ -37,17 +37,17 @@ struct MechanosensingSchedule: Codable, Sendable, Equatable {
 }
 
 struct EnvironmentalScaffoldSchedule: Codable, Sendable, Equatable {
-    var baselineResourceFlux: Float = 1
+    var baselineExternalEnergyFlux: Float = 1
     var baselineBarrierGain: Float = 1
     var interventionStep: UInt64?
-    var postInterventionResourceFlux: Float?
+    var postInterventionExternalEnergyFlux: Float?
     var postInterventionBarrierGain: Float?
 
-    func resourceFlux(forCompletedStep step: UInt64) -> Float {
+    func externalEnergyFlux(forCompletedStep step: UInt64) -> Float {
         guard let interventionStep,
-              let postInterventionResourceFlux,
-              step > interventionStep else { return baselineResourceFlux }
-        return postInterventionResourceFlux
+              let postInterventionExternalEnergyFlux,
+              step > interventionStep else { return baselineExternalEnergyFlux }
+        return postInterventionExternalEnergyFlux
     }
 
     func barrierGain(forCompletedStep step: UInt64) -> Float {
@@ -109,11 +109,11 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
       --audit-every N       GPU invariant interval (default: 1)
       --quantum-stride N    Biological steps per quantum step (default: 3)
       --mechanosensing-gain X  Baseline mechanics input gain in 0...2 (default: 1)
-      --resource-flux X      Baseline substrate replenishment in 0...2 (default: 1)
+      --external-energy-flux X Baseline external energy forcing in 0...2 (default: 1)
       --barrier-gain X       Baseline mechanical barrier gain in 0...1 (default: 1)
       --intervention-step N    Last baseline step before a scheduled gain change
       --post-mechanosensing-gain X  Gain after --intervention-step
-      --post-resource-flux X  Resource replenishment after --intervention-step
+      --post-external-energy-flux X External energy forcing after --intervention-step
       --post-barrier-gain X   Mechanical barrier gain after --intervention-step
       --founder X,Y          Introduce a founder at normalized coordinates; repeatable
       --output PATH         JSONL output path
@@ -175,15 +175,15 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
                     )
                 }
                 configuration.mechanosensing.baselineGain = value
-            case "--resource-flux":
+            case "--external-energy-flux":
                 guard let value = Float(try value(after: argument)),
                       value.isFinite,
                       (0...2).contains(value) else {
                     throw HeadlessExperimentError.invalidArgument(
-                        "--resource-flux must be finite and in 0...2."
+                        "--external-energy-flux must be finite and in 0...2."
                     )
                 }
-                configuration.environmentalScaffold.baselineResourceFlux = value
+                configuration.environmentalScaffold.baselineExternalEnergyFlux = value
             case "--barrier-gain":
                 guard let value = Float(try value(after: argument)),
                       value.isFinite,
@@ -210,15 +210,15 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
                     )
                 }
                 configuration.mechanosensing.postInterventionGain = value
-            case "--post-resource-flux":
+            case "--post-external-energy-flux":
                 guard let value = Float(try value(after: argument)),
                       value.isFinite,
                       (0...2).contains(value) else {
                     throw HeadlessExperimentError.invalidArgument(
-                        "--post-resource-flux must be finite and in 0...2."
+                        "--post-external-energy-flux must be finite and in 0...2."
                     )
                 }
-                configuration.environmentalScaffold.postInterventionResourceFlux = value
+                configuration.environmentalScaffold.postInterventionExternalEnergyFlux = value
             case "--post-barrier-gain":
                 guard let value = Float(try value(after: argument)),
                       value.isFinite,
@@ -259,7 +259,7 @@ struct HeadlessExperimentConfiguration: Codable, Sendable {
         }
         let hasInterventionStep = configuration.interventionStep != nil
         let hasPostGain = configuration.mechanosensing.postInterventionGain != nil ||
-            configuration.environmentalScaffold.postInterventionResourceFlux != nil ||
+            configuration.environmentalScaffold.postInterventionExternalEnergyFlux != nil ||
             configuration.environmentalScaffold.postInterventionBarrierGain != nil
         guard hasInterventionStep == hasPostGain else {
             throw HeadlessExperimentError.invalidArgument(
@@ -321,17 +321,17 @@ struct ExperimentComponentSnapshot: Codable, Sendable, Equatable {
     let challenged: Bool
     let homeostatic: Bool
     let ontogeneticProgress: Double
-    let reproductiveMaturity: Double
-    let senescentLoad: Double
+    let replicationBurden: Double
+    let proteostasisBurden: Double
     let regenerativeReopening: Double
-    let germlineRole: Double
-    let somaRole: Double
-    let neuralRole: Double
-    let builderRole: Double
+    let replicationActivity: Double
+    let maintenanceActivity: Double
+    let signalActivity: Double
+    let constructionActivity: Double
     let predictionError: Double
     let habituation: Double
     let acquiredBehavior: Double
-    let nicheConstruction: [Double]
+    let materialSynthesis: [Double]
     let morphology: [Double]
 }
 
@@ -450,21 +450,21 @@ struct ExperimentSample: Codable {
     let meanDevelopmentalPolarityCoherence: Double
     let meanMorphogenSynthesisRate: Double
     let meanMorphogenTransportWork: Double
-    let meanOntogeneticProgress: Double
-    let meanReproductiveMaturity: Double
-    let meanSenescentLoad: Double
-    let meanRegenerativeReopening: Double
-    let meanGermlineRole: Double
-    let meanSomaRole: Double
-    let meanNeuralRole: Double
-    let meanBuilderRole: Double
+    let meanChronologicalAge: Double
+    let meanReplicationBurden: Double
+    let meanProteostasisBurden: Double
+    let meanInjuryReopening: Double
+    let meanReplicationActivity: Double
+    let meanMaintenanceActivity: Double
+    let meanSignalActivity: Double
+    let meanConstructionActivity: Double
     let meanPredictionError: Double
     let meanHabituation: Double
     let meanAcquiredBehavior: Double
-    let meanShelterConstruction: Double
-    let meanReservoirConstruction: Double
-    let meanRecyclingConstruction: Double
-    let meanDetoxificationConstruction: Double
+    let meanStiffnessDeposition: Double
+    let meanStorageDeposition: Double
+    let meanCatalyticDeposition: Double
+    let meanReactiveBindingDeposition: Double
     let meanEnergeticIndependence: Double
     let meanBoundaryMaintenance: Double
     let meanMechanochemicalClosure: Double

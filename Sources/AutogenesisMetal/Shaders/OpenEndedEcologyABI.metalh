@@ -1,0 +1,112 @@
+#pragma once
+
+// Shared causal ABI for the unified quantum-origin ecology. Keep these records
+// naturally aligned so their Swift mirrors can be validated with MemoryLayout.
+
+constant uint denseBasisCount = 8u;
+constant uint moleculeSlotsPerTile = 8u;
+constant uint speciesRegistryCapacity = 65536u;
+constant uint genomePageCapacity = 65536u;
+constant uint genomePageByteCount = 256u;
+constant uint chemistryIntentWidth = 4u;
+constant uint tileCellCapacity = 64u;
+
+constant uint genomePageRegulation = 1u;
+constant uint genomePageReaction = 2u;
+constant uint genomePageTransport = 3u;
+constant uint genomePageReceptor = 4u;
+constant uint genomePageMaterial = 5u;
+constant uint genomePageJunction = 6u;
+constant uint genomePageElectrical = 7u;
+constant uint genomePagePlasticity = 8u;
+
+constant uint moleculeFlagCatalytic = 1u << 0u;
+constant uint moleculeFlagMembraneForming = 1u << 1u;
+constant uint moleculeFlagSignalCarrier = 1u << 2u;
+constant uint moleculeFlagPersistentMaterial = 1u << 3u;
+
+struct SpeciesDefinition {
+    uint4 basisA;
+    uint4 basisB;
+    // Bond/free energy, diffusion, charge, and polarity.
+    float4 physical;
+    // Stability, receptor affinity, catalytic reach, and membrane affinity.
+    float4 behavior;
+    uint contentHash;
+    uint flags;
+    uint generation;
+    uint reserved;
+};
+
+struct MoleculePacket {
+    uint speciesID;
+    float amount;
+    float freeEnergy;
+    uint flags;
+};
+
+struct GenomeHeader {
+    uint firstPage;
+    uint secondaryFirstPage;
+    uint pageCount;
+    uint generation;
+    uint genomeHash;
+    uint parentGenomeHash;
+    uint secondParentGenomeHash;
+    uint originBirthID;
+    uint parentProgramIndex;
+    uint parentProgramGeneration;
+    uint secondParentProgramIndex;
+    uint secondParentProgramGeneration;
+    float mutationDistance;
+    float lastMutationDistance;
+    uint replicationGeneration;
+    uint flags;
+};
+
+struct GenomePage {
+    // Type, next immutable page, module/innovation ID, and generation.
+    uint4 header;
+    // Type-specific operators. Fifteen float4 values make this record 256 B.
+    float4 payload[15];
+};
+
+struct CellChemistryIntent {
+    uint tileIndex;
+    uint persistentCellID;
+    uint flags;
+    uint reserved;
+    uint4 uptakeSpecies;
+    float4 uptakeAmount;
+    uint4 outputSpecies;
+    float4 outputAmount;
+    float4 outputFreeEnergy;
+};
+
+struct CellChemistrySettlement {
+    float4 consumedAmount;
+    float capturedFreeEnergy;
+    float rejectedAmount;
+    float exportedHeat;
+    uint settledStep;
+};
+
+struct MaterialTileProperties {
+    // Stiffness, porosity, permeability, and adhesion.
+    float4 mechanics;
+    // Conductivity, storage, erosion resistance, and retained mass.
+    float4 transport;
+};
+
+struct ChemistryAuditState {
+    atomic_int basisIn[8];
+    atomic_int basisOut[8];
+    atomic_int externalMatter[8];
+    atomic_int externalEnergy;
+    atomic_int chemicalFreeEnergy;
+    atomic_int heat;
+    atomic_uint sparseOverflowCount;
+    atomic_uint tileCellOverflowCount;
+    atomic_uint skippedGenomeMutationCount;
+    atomic_uint protocellOriginCount;
+};
