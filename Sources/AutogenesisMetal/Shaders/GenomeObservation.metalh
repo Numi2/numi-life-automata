@@ -434,6 +434,7 @@ kernel void evolveAgents(
     device const atomic_uint* activeComponentCount [[buffer(11)]],
     device const atomic_uint* cellOccupancy [[buffer(12)]],
     device const CellIdentity* cellIdentities [[buffer(13)]],
+    device const atomic_uint* ownerCellHeads [[buffer(14)]],
     texture2d_array<float, access::read> state [[texture(0)]],
     texture2d_array<float, access::read> ecology [[texture(1)]],
     texture2d_array<float, access::read> environment [[texture(2)]],
@@ -454,18 +455,18 @@ kernel void evolveAgents(
         programSlots, agent.dominantProgramIndex, agent.dominantProgramGeneration
     );
     if (cellAggregate.physiology.x < 0.5) {
-        // A zero aggregate can be a one-step topology/read-list transition.  It
-        // must not be allowed to erase a component whose physical cells still
-        // exist.  Confirm the causal state directly before recording death.
-        bool hasLivingCell = false;
-        for (uint cellIndex = 0u; cellIndex < maxCellCount; ++cellIndex) {
-            hasLivingCell = hasLivingCell || (
-                atomic_load_explicit(
-                    &cellOccupancy[cellIndex], memory_order_relaxed
-                ) == cellOccupancyAlive &&
-                cellIdentities[cellIndex].owner == gid
-            );
-        }
+        // Aggregates and topology are double-buffered, so a zero aggregate can
+        // be a one-step transition rather than death.  The owner list is rebuilt
+        // from living cells every topology pass; checking its head preserves the
+        // causal guard without an O(agentCount * cellCount) fallback scan.
+        uint ownerHead = atomic_load_explicit(
+            &ownerCellHeads[gid], memory_order_relaxed
+        );
+        bool hasLivingCell = ownerHead < maxCellCount &&
+            atomic_load_explicit(
+                &cellOccupancy[ownerHead], memory_order_relaxed
+            ) == cellOccupancyAlive &&
+            cellIdentities[ownerHead].owner == gid;
         if (hasLivingCell) {
             agentsOut[gid] = agent;
             return;

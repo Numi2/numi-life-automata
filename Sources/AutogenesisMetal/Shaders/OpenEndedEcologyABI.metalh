@@ -85,9 +85,10 @@ struct CellChemistryIntent {
 
 struct CellChemistrySettlement {
     float4 consumedAmount;
+    float4 secretedAmount;
     float capturedFreeEnergy;
+    float committedFreeEnergy;
     float rejectedAmount;
-    float exportedHeat;
     uint settledStep;
 };
 

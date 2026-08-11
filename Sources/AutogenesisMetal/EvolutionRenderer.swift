@@ -1731,9 +1731,10 @@ private struct CellChemistryIntent {
 
 private struct CellChemistrySettlement {
     var consumedAmount: SIMD4<Float>
+    var secretedAmount: SIMD4<Float>
     var capturedFreeEnergy: Float
+    var committedFreeEnergy: Float
     var rejectedAmount: Float
-    var exportedHeat: Float
     var settledStep: UInt32
 }
 
@@ -2431,7 +2432,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         precondition(MemoryLayout<GenomeHeader>.stride == 64, "GenomeHeader Metal ABI drift")
         precondition(MemoryLayout<GenomePage>.stride == 256, "GenomePage Metal ABI drift")
         precondition(MemoryLayout<CellChemistryIntent>.stride == 96, "CellChemistryIntent Metal ABI drift")
-        precondition(MemoryLayout<CellChemistrySettlement>.stride == 32, "CellChemistrySettlement Metal ABI drift")
+        precondition(MemoryLayout<CellChemistrySettlement>.stride == 48, "CellChemistrySettlement Metal ABI drift")
         precondition(MemoryLayout<MaterialTileProperties>.stride == 32, "MaterialTileProperties Metal ABI drift")
         precondition(MemoryLayout<CellJunctionState>.stride == 64, "CellJunctionState Metal ABI drift")
         precondition(MemoryLayout<CellAggregate>.stride == 448, "CellAggregate Metal ABI drift")
@@ -4274,7 +4275,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             agentOccupancy, agentState, cellState, cellOccupancy, genomeHeaders,
             genomePages, genomeArenaState, moleculeState, originExclusion, state, ecology
         ])
-        encodeActiveComponentCompaction(encoder)
         encoder.endEncoding()
     }
 
@@ -4496,6 +4496,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(programSlots, offset: 0, index: 9)
         encoder.setBuffer(cellOccupancy, offset: 0, index: 12)
         encoder.setBuffer(cellIdentities, offset: 0, index: 13)
+        encoder.setBuffer(ownerCellHeads, offset: 0, index: 14)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
         encoder.setTexture(environmentState, index: 2)
@@ -4504,7 +4505,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(activeComponentCount, offset: 0, index: 11)
         dispatchActiveComponents(encoder, pipeline: evolveAgentPipeline)
         encoder.memoryBarrier(resources: [
-            reactionAgentState, agentOccupancy, lineageEvents, identityCounters, programSlots
+            reactionAgentState, agentOccupancy, lineageEvents, identityCounters, programSlots,
+            ownerCellHeads
         ])
         swap(&agentState, &reactionAgentState)
         encoder.endEncoding()

@@ -79,10 +79,15 @@ final class Metal4PipelineFactory {
         let descriptor = MTL4ComputePipelineDescriptor()
         descriptor.label = name
         descriptor.computeFunctionDescriptor = function
-        if let pipeline = try? archive?.makeComputePipelineState(descriptor: descriptor) {
-            archiveHits += 1
-            pipelineCount += 1
-            return pipeline
+        if let archive {
+            do {
+                let pipeline = try archive.makeComputePipelineState(descriptor: descriptor)
+                archiveHits += 1
+                pipelineCount += 1
+                return pipeline
+            } catch {
+                reportArchiveMiss(kind: "compute", name: name, error: error)
+            }
         }
         archiveMisses += 1
         let pipeline = try compiler.makeComputePipelineState(
@@ -122,10 +127,15 @@ final class Metal4PipelineFactory {
             attachment.sourceAlphaBlendFactor = .one
             attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         }
-        if let pipeline = try? archive?.makeRenderPipelineState(descriptor: descriptor) {
-            archiveHits += 1
-            pipelineCount += 1
-            return pipeline
+        if let archive {
+            do {
+                let pipeline = try archive.makeRenderPipelineState(descriptor: descriptor)
+                archiveHits += 1
+                pipelineCount += 1
+                return pipeline
+            } catch {
+                reportArchiveMiss(kind: "render", name: label, error: error)
+            }
         }
         archiveMisses += 1
         let pipeline = try compiler.makeRenderPipelineState(
@@ -168,10 +178,15 @@ final class Metal4PipelineFactory {
             attachment.sourceAlphaBlendFactor = .one
             attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         }
-        if let pipeline = try? archive?.makeRenderPipelineState(descriptor: descriptor) {
-            archiveHits += 1
-            pipelineCount += 1
-            return pipeline
+        if let archive {
+            do {
+                let pipeline = try archive.makeRenderPipelineState(descriptor: descriptor)
+                archiveHits += 1
+                pipelineCount += 1
+                return pipeline
+            } catch {
+                reportArchiveMiss(kind: "mesh", name: label, error: error)
+            }
         }
         archiveMisses += 1
         let pipeline = try compiler.makeRenderPipelineState(
@@ -216,6 +231,15 @@ final class Metal4PipelineFactory {
             )
         }
         return telemetry
+    }
+
+    private func reportArchiveMiss(kind: String, name: String, error: Error) {
+        guard ProcessInfo.processInfo.environment["NUMI_METAL4_PIPELINE_TELEMETRY"] == "1"
+        else { return }
+        FileHandle.standardError.write(Data((
+            "metal4_archive_miss kind=\(kind) name=\(name) " +
+                "error=\(error.localizedDescription)\n"
+        ).utf8))
     }
 
     private static func packagedResourceURL(name: String, extension fileExtension: String) -> URL? {

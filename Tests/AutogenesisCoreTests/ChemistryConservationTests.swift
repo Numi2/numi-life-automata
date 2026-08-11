@@ -32,3 +32,37 @@ import Testing
     #expect(overflow.basisMaterial == Array(repeating: 0, count: 8))
     #expect(overflow.heat == 0)
 }
+
+@Test func protocellAssemblyIsExactAndAllOrNothing() {
+    let debit = ChemistryConservation.debitAssembly(
+        moleculeAmounts: [0.045, 0.020, 0.030],
+        moleculeFreeEnergy: [0.0063, 0.0036, 0.0084],
+        moleculeCosts: [0.010, 0.004, 0.007],
+        basisMaterial: [0.09, 0.055, 0.034, 0.022, 0.030, 0.015, 0.020, 0.135],
+        basisCosts: [0.006, 0.004, 0, 0, 0, 0, 0, 0.012]
+    )
+    #expect(debit != nil)
+    #expect(abs(debit!.moleculeAmounts[0] - 0.035) < 1e-12)
+    #expect(abs(debit!.moleculeFreeEnergy[0] - 0.0049) < 1e-12)
+    #expect(abs(debit!.basisMaterial[7] - 0.123) < 1e-12)
+
+    let undersupplied = ChemistryConservation.debitAssembly(
+        moleculeAmounts: [0.009, 0.020, 0.030],
+        moleculeFreeEnergy: [0.001, 0.0036, 0.0084],
+        moleculeCosts: [0.010, 0.004, 0.007],
+        basisMaterial: Array(repeating: 1, count: 8),
+        basisCosts: Array(repeating: 0, count: 8)
+    )
+    #expect(undersupplied == nil)
+}
+
+@Test func secretionCannotSpendMatterOrEnergyTwice() {
+    let reserved = ChemistryConservation.reserveSecretion(
+        requestedAmounts: [0.6, 0.4],
+        requestedFreeEnergy: [0.3, 0.2],
+        availableMatter: 0.5,
+        availableEnergy: 0.1
+    )
+    #expect(abs(reserved.matterCommitted - 0.2) < 1e-12)
+    #expect(abs(reserved.energyCommitted - 0.1) < 1e-12)
+}

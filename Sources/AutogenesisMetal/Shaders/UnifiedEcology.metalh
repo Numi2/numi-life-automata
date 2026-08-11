@@ -4,6 +4,12 @@ constant uint invalidGenomePage = 0xffffffffu;
 constant uint componentInterventionFlag = 1u << 6u;
 constant float chemistryAuditScale = 1048576.0;
 constant uint protocellOriginExclusionSteps = 4096u;
+constant float protocellAmphiphileCost = 0.010;
+constant float protocellCatalystCost = 0.004;
+constant float protocellRedoxCost = 0.007;
+constant float protocellBasisAXCost = 0.006;
+constant float protocellBasisAYCost = 0.004;
+constant float protocellFreeEnergyCost = 0.012;
 
 inline uint ecologyTileIndex(uint2 coordinate, constant SimulationUniforms& uniforms) {
     return coordinate.y * uniforms.width + coordinate.x;
@@ -118,9 +124,10 @@ inline CellChemistryIntent emptyChemistryIntent() {
 inline CellChemistrySettlement emptyChemistrySettlement() {
     CellChemistrySettlement settlement;
     settlement.consumedAmount = float4(0.0);
+    settlement.secretedAmount = float4(0.0);
     settlement.capturedFreeEnergy = 0.0;
+    settlement.committedFreeEnergy = 0.0;
     settlement.rejectedAmount = 0.0;
-    settlement.exportedHeat = 0.0;
     settlement.settledStep = 0u;
     return settlement;
 }
@@ -711,13 +718,24 @@ kernel void senseAndRegulateCells(
         molecules[moleculeIndex(tile, 5u)].amount * cell.regulation.w * 0.004
     ) * exposure, float4(0.0));
     intent.outputSpecies = uint4(4u, 5u, 2u, 7u);
-    intent.outputAmount = max(float4(
+    float4 requestedOutput = max(float4(
         cell.regulationB.y * cell.signaling.y * 0.0000024,
         cell.regulation.y * cell.regulation.w * 0.0000018,
         cell.regulationB.y * cell.regulationB.x * 0.0000012,
         cell.regulation.w * max(cell.signals.z - 0.25, 0.0) * 0.0000010
     ) * readiness * exposure, float4(0.0));
-    intent.outputFreeEnergy = intent.outputAmount * float4(0.08, 0.12, 0.18, 0.16);
+    float requestedMass = dot(requestedOutput, float4(1.0));
+    float matterBudget = max(cell.physiology.y - 0.16, 0.0) * 0.00008;
+    float matterScale = requestedMass > 0.0
+        ? min(matterBudget / requestedMass, 1.0) : 1.0;
+    requestedOutput *= matterScale;
+    float4 requestedFreeEnergy = requestedOutput * float4(0.08, 0.12, 0.18, 0.16);
+    float requestedEnergy = dot(requestedFreeEnergy, float4(1.0));
+    float energyBudget = max(cell.physiology.x, 0.0) * 0.00008;
+    float energyScale = requestedEnergy > 0.0
+        ? min(energyBudget / requestedEnergy, 1.0) : 1.0;
+    intent.outputAmount = requestedOutput * energyScale;
+    intent.outputFreeEnergy = requestedFreeEnergy * energyScale;
     intents[cellIndex] = intent;
 }
 
@@ -819,7 +837,7 @@ kernel void settleTileChemistry(
                 consumed = min(basisA.x, desired);
                 basisA.x -= consumed;
                 freeEnergy = consumed * 0.34;
-            } else {
+            } else if (speciesID < speciesRegistryCapacity) {
                 for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
                     if (packets[slot].speciesID != speciesID) { continue; }
                     consumed = min(packets[slot].amount, desired);
@@ -836,10 +854,11 @@ kernel void settleTileChemistry(
         }
         for (uint output = 0u; output < chemistryIntentWidth; ++output) {
             uint speciesID = intent.outputSpecies[output];
+            if (speciesID == 0u || speciesID >= speciesRegistryCapacity) { continue; }
             float amount = max(intent.outputAmount[output], 0.0);
             float freeEnergy = min(max(intent.outputFreeEnergy[output], 0.0),
                 amount * speciesRegistry[speciesID].physical.x);
-            if (speciesID == 0u || amount <= 0.0) { continue; }
+            if (amount <= 0.0) { continue; }
             uint targetSlot = (speciesID - 1u) % moleculeSlotsPerTile;
             if (packets[targetSlot].speciesID != 0u &&
                 packets[targetSlot].speciesID != speciesID) {
@@ -854,6 +873,8 @@ kernel void settleTileChemistry(
             packets[targetSlot].flags = speciesRegistry[speciesID].flags;
             packets[targetSlot].amount += amount;
             packets[targetSlot].freeEnergy += freeEnergy;
+            settlement.secretedAmount[output] = amount;
+            settlement.committedFreeEnergy += freeEnergy;
             if ((speciesRegistry[speciesID].flags & moleculeFlagPersistentMaterial) != 0u) {
                 material.transport.w += amount;
             }
@@ -1019,6 +1040,17 @@ inline bool createPhysicalProtocell(
     uint step,
     bool intervention
 ) {
+    if (localPackets[0].speciesID != 1u ||
+        localPackets[1].speciesID != 2u ||
+        localPackets[2].speciesID != 3u ||
+        localPackets[0].amount < protocellAmphiphileCost ||
+        localPackets[1].amount < protocellCatalystCost ||
+        localPackets[2].amount < protocellRedoxCost ||
+        localBasisA.x < protocellBasisAXCost ||
+        localBasisA.y < protocellBasisAYCost ||
+        localBasisB.w < protocellFreeEnergyCost) {
+        return false;
+    }
     uint owner = claimFreeAgent(occupancy, seed);
     if (owner == maxAgentCount) { return false; }
     uint programGeneration = 0u;
@@ -1106,24 +1138,18 @@ inline bool createPhysicalProtocell(
         atomic_store_explicit(&occupancy[owner], 0u, memory_order_relaxed);
         return false;
     }
-    float amphiphileCost = min(localPackets[0].amount, 0.010);
-    float catalyticMoleculeCost = min(localPackets[1].amount, 0.004);
-    float redoxCost = min(localPackets[2].amount, 0.007);
-    localPackets[0].amount -= amphiphileCost;
-    localPackets[1].amount -= catalyticMoleculeCost;
-    localPackets[2].amount -= redoxCost;
-    localPackets[0].freeEnergy = max(
-        localPackets[0].freeEnergy - amphiphileCost * 0.14, 0.0
-    );
-    localPackets[1].freeEnergy = max(
-        localPackets[1].freeEnergy - catalyticMoleculeCost * 0.18, 0.0
-    );
-    localPackets[2].freeEnergy = max(
-        localPackets[2].freeEnergy - redoxCost * 0.28, 0.0
-    );
-    localBasisA.x = max(localBasisA.x - 0.006, 0.0);
-    localBasisA.y = max(localBasisA.y - 0.004, 0.0);
-    localBasisB.w = max(localBasisB.w - 0.012, 0.0);
+    float packet0Fraction = protocellAmphiphileCost / localPackets[0].amount;
+    float packet1Fraction = protocellCatalystCost / localPackets[1].amount;
+    float packet2Fraction = protocellRedoxCost / localPackets[2].amount;
+    localPackets[0].amount -= protocellAmphiphileCost;
+    localPackets[1].amount -= protocellCatalystCost;
+    localPackets[2].amount -= protocellRedoxCost;
+    localPackets[0].freeEnergy *= max(1.0 - packet0Fraction, 0.0);
+    localPackets[1].freeEnergy *= max(1.0 - packet1Fraction, 0.0);
+    localPackets[2].freeEnergy *= max(1.0 - packet2Fraction, 0.0);
+    localBasisA.x -= protocellBasisAXCost;
+    localBasisA.y -= protocellBasisAYCost;
+    localBasisB.w -= protocellFreeEnergyCost;
     recordLineageEvent(
         lineageEvents, identityCounters, 1u, founder,
         programExpressionCaches[programIndex], resonance, cellAggregates[owner], step
@@ -1176,8 +1202,15 @@ kernel void nucleateProtocells(
     }
     float4 basisA = basisAField.read(gid, 0);
     float4 basisB = basisBField.read(gid, 0);
-    if (localPackets[0].amount < 0.006 || localPackets[1].amount < 0.0025 ||
-        localPackets[2].amount < 0.004 || basisA.x < 0.012 || basisB.w < 0.016) {
+    if (localPackets[0].speciesID != 1u ||
+        localPackets[1].speciesID != 2u ||
+        localPackets[2].speciesID != 3u ||
+        localPackets[0].amount < protocellAmphiphileCost ||
+        localPackets[1].amount < protocellCatalystCost ||
+        localPackets[2].amount < protocellRedoxCost ||
+        basisA.x < max(0.012, protocellBasisAXCost) ||
+        basisA.y < protocellBasisAYCost ||
+        basisB.w < max(0.016, protocellFreeEnergyCost)) {
         return;
     }
     float localClosure = localPackets[0].amount + localPackets[1].amount * 1.6 +
@@ -1200,7 +1233,9 @@ kernel void nucleateProtocells(
         MoleculePacket neighborC = molecules[moleculeIndex(neighborTile, 2u)];
         float neighborClosure = neighborA.amount + neighborB.amount * 1.6 +
             neighborC.freeEnergy * 2.0;
-        if (neighborClosure > localClosure) { return; }
+        if (neighborClosure > localClosure ||
+            (abs(neighborClosure - localClosure) <= 0.000000001 &&
+                neighborTile < tile)) { return; }
     }
     uint expected = previousOrigin;
     if (!atomic_compare_exchange_weak_explicit(
@@ -1338,6 +1373,8 @@ kernel void injectProtocell(
     basisB += suppliedB;
     for (uint index = 0u; index < 4u; ++index) {
         auditChemistry(&chemistryAudit->externalMatter[index], suppliedA[index]);
+    }
+    for (uint index = 0u; index < 3u; ++index) {
         auditChemistry(&chemistryAudit->externalMatter[index + 4u], suppliedB[index]);
     }
     auditChemistry(&chemistryAudit->externalEnergy, suppliedB.w);
@@ -1386,7 +1423,17 @@ kernel void injectProtocell(
         chemistryAudit, localPackets, basisA, basisB, placementPosition,
         random01(seed + 1u), 0.62, seed, uniforms.step, true
     );
-    if (!created) { return; }
+    if (!created) {
+        // Capacity pressure can reject the organism, but it cannot erase the
+        // already-audited intervention packet. Leave that matter and energy in
+        // the ordinary environment for existing or future chemistry to use.
+        for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
+            molecules[moleculeIndex(tile, slot)] = localPackets[slot];
+        }
+        basisAField.write(basisA, coordinate, 0);
+        basisBField.write(basisB, coordinate, 0);
+        return;
+    }
     // Reserve a physical nursery around the intervention.  Without this mark,
     // the ordinary nucleation pass could create another independent founder in
     // the same membrane footprint on the very next solver step.

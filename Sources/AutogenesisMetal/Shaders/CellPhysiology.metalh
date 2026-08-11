@@ -1103,6 +1103,11 @@ kernel void evolveOrganismCells(
     bool settlementIsCurrent = chemistrySettlement.settledStep == uniforms.step;
     float4 settledAmounts = settlementIsCurrent
         ? max(chemistrySettlement.consumedAmount, float4(0.0)) : float4(0.0);
+    float settledSecretedMass = settlementIsCurrent
+        ? dot(max(chemistrySettlement.secretedAmount, float4(0.0)), float4(1.0))
+        : 0.0;
+    float committedChemicalWork = settlementIsCurrent
+        ? max(chemistrySettlement.committedFreeEnergy, 0.0) : 0.0;
     float consumedRecycledMatter = settledAmounts.z;
     float substrateEnergy = settlementIsCurrent
         ? max(chemistrySettlement.capturedFreeEnergy, 0.0) : 0.0;
@@ -1190,8 +1195,10 @@ kernel void evolveOrganismCells(
     float plannedATPExpense = maintenance + activeWork + dissipation +
         rejectionCost + rejectionDamage;
     float availableATP = max(cell.physiology.x + uptake + atpSharingFlux, 0.0);
+    committedChemicalWork = min(committedChemicalWork, availableATP);
+    float discretionaryATP = max(availableATP - committedChemicalWork, 0.0);
     float expenseScale = plannedATPExpense > 0.0
-        ? min(availableATP / plannedATPExpense, 1.0) : 1.0;
+        ? min(discretionaryATP / plannedATPExpense, 1.0) : 1.0;
     maintenance *= expenseScale;
     activeWork *= expenseScale;
     frequencyWork *= expenseScale;
@@ -1199,8 +1206,8 @@ kernel void evolveOrganismCells(
     rejectionCost *= expenseScale;
     rejectionDamage *= expenseScale;
     float paidRepairWork = requestedRepairWork * expenseScale;
-    float paidATPExpense = maintenance + activeWork + dissipation +
-        rejectionCost + rejectionDamage;
+    float paidATPExpense = committedChemicalWork + maintenance + activeWork +
+        dissipation + rejectionCost + rejectionDamage;
     float unclampedATP = availableATP - paidATPExpense;
     float overflowHeat = max(unclampedATP - 1.2, 0.0);
     float atp = clamp(unclampedATP, 0.0, 1.2);
@@ -1282,11 +1289,12 @@ kernel void evolveOrganismCells(
     );
     float atpStorageDelta = atp - cell.physiology.x;
     float conservationResidual = substrateEnergy + atpSharingFlux -
-        (atpStorageDelta + activeWork + recycledMatterEnergy + heatExport);
+        (atpStorageDelta + activeWork + committedChemicalWork +
+            recycledMatterEnergy + heatExport);
     addEnergyAudit(energyAudit, 0u, substrateEnergy);
     addEnergyAudit(energyAudit, 1u, uptake);
     addEnergyAudit(energyAudit, 2u, atpStorageDelta);
-    addEnergyAudit(energyAudit, 3u, activeWork);
+    addEnergyAudit(energyAudit, 3u, activeWork + committedChemicalWork);
     addEnergyAudit(energyAudit, 4u, frequencyWork);
     addEnergyAudit(energyAudit, 5u, maintenance);
     addEnergyAudit(energyAudit, 6u, heatExport);
@@ -1358,6 +1366,10 @@ kernel void evolveOrganismCells(
     float biomass = biomassDelta > 0.0
         ? cell.physiology.y + biosynthesisCost / 0.18
         : proposedBiomass;
+    // Settled secretions are physical exports, not free world-side molecules.
+    // Their material leaves the cell after settlement and their free energy was
+    // reserved above before discretionary work could spend it.
+    biomass = max(biomass - settledSecretedMass, 0.16);
     float atpBeforeBiomass = atp;
     atp -= biosynthesisCost;
     float releasedBiomassEnergy = max(-biomassEnergyDelta, 0.0);
