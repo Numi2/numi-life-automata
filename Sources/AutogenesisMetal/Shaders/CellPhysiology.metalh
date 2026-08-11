@@ -51,6 +51,10 @@ kernel void evolveOrganismCells(
             float2 abandonedPosition = cellWorldPosition(
                 agents[owner], abandonedCell.position, uniforms
             );
+            recycleTerminalCellEnergy(
+                cellEnergyExchange, energyAudit, abandonedPosition,
+                abandonedCell, uniforms
+            );
             uint abandonedGenomeHash = cellIdentity.programIndex < maxGenomeHeaderCount
                 ? programLineageRecords[cellIdentity.programIndex].genomeHash : 0u;
             invalidateCellJunctions(
@@ -88,6 +92,10 @@ kernel void evolveOrganismCells(
         CellState orphanedCell = cellsIn[gid];
         float2 orphanedPosition = cellWorldPosition(
             agents[owner], orphanedCell.position, uniforms
+        );
+        recycleTerminalCellEnergy(
+            cellEnergyExchange, energyAudit, orphanedPosition,
+            orphanedCell, uniforms
         );
         invalidateCellJunctions(
             cellJunctions, cellOccupancy, cellIdentities,
@@ -434,7 +442,7 @@ kernel void evolveOrganismCells(
         saturate(uniforms.intervention.y);
     float2 barrierNormalWorld = length(rockGradientWorld) > 0.00001
         ? -normalize(rockGradientWorld)
-        : -normalize(agent.velocity + heading * 0.000001);
+        : -normalizedOr(agent.velocity + heading * 0.000001, heading);
     float2 barrierForceLocal = rotateWorldToTissue(
         barrierNormalWorld * barrierLoad *
             (0.000060 + saturate(length(agent.velocity) * 720.0) * 0.000115),
@@ -965,8 +973,10 @@ kernel void evolveOrganismCells(
         ? normalize(morphogenGradient)
         : previousPolarity;
     float polarityResponse = 0.010 + saturate(length(morphogenGradient) * 4.0) * 0.035;
-    float2 developmentalPolarity = normalize(
-        mix(previousPolarity, polarityTarget, polarityResponse) + previousPolarity * 0.0001
+    float2 developmentalPolarity = normalizedOr(
+        mix(previousPolarity, polarityTarget, polarityResponse) +
+            previousPolarity * 0.0001,
+        previousPolarity
     );
     float junctionTransport = abs(morphogenDiffusion.x) + abs(morphogenDiffusion.y);
     float morphogenWork =
@@ -1259,33 +1269,39 @@ kernel void evolveOrganismCells(
     addEnergyExchange(cellEnergyExchange, energyTileBase, 0u, recycledMatterReturn);
     addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, heatExport);
     float developmentalOutputScale = expenseScale * metabolicReadiness;
+    float signalAOutput = morphogenProduction.x * secretionProgram *
+        membraneExposure * developmentalOutputScale * 0.22;
+    float signalBOutput = morphogenProduction.y * secretionProgram *
+        membraneExposure * developmentalOutputScale * 0.22;
+    float matrixOutput = extracellularMatrixConstruction *
+        developmentalOutputScale * 0.00016;
+    float remodelingOutput = (
+        extracellularMatrixRemodeling * 0.000060 +
+        max(1.0 - cell.physiology.w, 0.0) * repairProgram * 0.000075
+    ) * developmentalOutputScale;
+    float catalyticOutput = cellularCatalyticMoleculeSecretion * expenseScale;
+    float counterOutput = cellularReactiveMoleculeNeutralization * expenseScale;
+    // These five channels become ordinary extracellular molecule packets on
+    // the next chemistry pass. Remodeling is a paid control flux, not matter.
+    float deferredSecretedMass = signalAOutput + signalBOutput + matrixOutput +
+        catalyticOutput + counterOutput;
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 2u,
-        morphogenProduction.x * secretionProgram * membraneExposure *
-            developmentalOutputScale * 0.22
+        cellEnergyExchange, energyTileBase, 2u, signalAOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 3u,
-        morphogenProduction.y * secretionProgram * membraneExposure *
-            developmentalOutputScale * 0.22
+        cellEnergyExchange, energyTileBase, 3u, signalBOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 4u,
-        extracellularMatrixConstruction * developmentalOutputScale * 0.00016
+        cellEnergyExchange, energyTileBase, 4u, matrixOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 5u,
-        (extracellularMatrixRemodeling * 0.000060 +
-            max(1.0 - cell.physiology.w, 0.0) * repairProgram * 0.000075) *
-            developmentalOutputScale
+        cellEnergyExchange, energyTileBase, 5u, remodelingOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 6u,
-        cellularCatalyticMoleculeSecretion * expenseScale
+        cellEnergyExchange, energyTileBase, 6u, catalyticOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 7u,
-        cellularReactiveMoleculeNeutralization * expenseScale
+        cellEnergyExchange, energyTileBase, 7u, counterOutput
     );
     float atpStorageDelta = atp - cell.physiology.x;
     float conservationResidual = substrateEnergy + atpSharingFlux -
@@ -1366,10 +1382,12 @@ kernel void evolveOrganismCells(
     float biomass = biomassDelta > 0.0
         ? cell.physiology.y + biosynthesisCost / 0.18
         : proposedBiomass;
-    // Settled secretions are physical exports, not free world-side molecules.
-    // Their material leaves the cell after settlement and their free energy was
-    // reserved above before discretionary work could spend it.
-    biomass = max(biomass - settledSecretedMass, 0.16);
+    // Both settlement-time and deferred secretions are physical exports. Their
+    // matter leaves cellular biomass exactly once; a low-biomass cell is not
+    // protected by the old 0.16 clamp from paying for molecules already emitted.
+    biomass = max(
+        biomass - settledSecretedMass - deferredSecretedMass, 0.0
+    );
     float atpBeforeBiomass = atp;
     atp -= biosynthesisCost;
     float releasedBiomassEnergy = max(-biomassEnergyDelta, 0.0);
@@ -1601,20 +1619,8 @@ kernel void evolveOrganismCells(
             cellJunctions, cellOccupancy, cellIdentities,
             ownerCellHeads, ownerCellNext, owner, gid, emptySpatialHashEntry
         );
-        float terminalATP = max(atp, 0.0);
-        float terminalBiomassEnergy = max(biomass, 0.0) * 0.18;
-        float terminalEnergy = terminalATP + terminalBiomassEnergy;
-        float terminalRecycledMatterEnergy = terminalEnergy * 0.72;
-        float terminalHeat = terminalEnergy * 0.28;
-        addEnergyExchange(
-            cellEnergyExchange, energyTileBase, 0u, terminalRecycledMatterEnergy / 0.62
-        );
-        addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, terminalHeat);
-        addEnergyAudit(energyAudit, 2u, -terminalEnergy);
-        addEnergyAudit(energyAudit, 6u, terminalHeat);
-        addEnergyAudit(energyAudit, 7u, terminalRecycledMatterEnergy);
-        addEnergyAudit(
-            energyAudit, 9u, terminalEnergy - terminalHeat - terminalRecycledMatterEnergy
+        recycleTerminalCellEnergy(
+            cellEnergyExchange, energyAudit, worldPosition, cell, uniforms
         );
         publishCellCorpse(
             cellCorpses, gid, embodiedMemory, worldPosition,
@@ -1704,8 +1710,9 @@ kernel void evolveCellMembranes(
         ? normalize(cell.tissueForce.xy) : boundaryNormal;
     float sensorAngle = cell.dynamics.z * 2.0 * M_PI_F +
         agent.dynamicExpression.w * M_PI_F + cell.resonance.x * 1.8;
-    float2 sensorDirection = normalize(
-        boundaryNormal * 0.52 + float2(cos(sensorAngle), sin(sensorAngle)) * 0.48
+    float2 sensorDirection = normalizedOr(
+        boundaryNormal * 0.52 + float2(cos(sensorAngle), sin(sensorAngle)) * 0.48,
+        boundaryNormal
     );
     float membraneThickness = exposure * saturate(cell.membraneProperties.x);
     float membraneStiffness = exposure * saturate(cell.membraneProperties.y);
@@ -1721,13 +1728,15 @@ kernel void evolveCellMembranes(
     float lateralBoundaryAffinity = smoothstep(0.30, 0.76, abs(boundaryNormal.y));
     float sidePhase = boundaryNormal.y >= 0.0 ? 0.0 : M_PI_F;
     float strideWave = sin(gaitPhase * 2.0 * M_PI_F + sidePhase);
-    float2 appendageDirection = normalize(
+    float2 appendageDirection = normalizedOr(
         boundaryNormal * 0.90 + float2(strideWave * 0.34, 0.0) +
-        boundaryNormal * 0.0001
+        boundaryNormal * 0.0001,
+        boundaryNormal
     );
-    float2 footPadDirection = normalize(
+    float2 footPadDirection = normalizedOr(
         appendageDirection + float2(strideWave * 0.22, 0.0) +
-        appendageDirection * 0.0001
+        appendageDirection * 0.0001,
+        appendageDirection
     );
     float appendageExtension = protrusionGrowth * lateralBoundaryAffinity *
         (0.62 + 0.38 * (0.5 + 0.5 * strideWave));

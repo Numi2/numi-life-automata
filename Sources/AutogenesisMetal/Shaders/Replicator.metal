@@ -59,7 +59,11 @@ constant uint cellJunctionCapacity = 32768u;
 constant uint cellJunctionMask = cellJunctionCapacity - 1u;
 constant uint registeredJunctionCountIndex = 4u;
 constant uint registeredJunctionFlag = 0x80000000u;
-constant uint cellContactEffectChannelCount = 10u;
+constant uint cellContactEffectChannelCount = 14u;
+constant uint trophicSourceBudgetChannel = 10u;
+constant uint trophicReceiverBudgetChannel = 11u;
+constant uint reproductiveSourceBudgetChannel = 12u;
+constant uint reproductiveReceiverBudgetChannel = 13u;
 constant uint cellOccupancyFree = 0u;
 constant uint cellOccupancyAlive = 1u;
 constant uint cellOccupancyCorpse = 2u;
@@ -68,10 +72,10 @@ constant uint corpseStructureScale = 1048576u;
 constant uint corpseMaximumPersistenceSteps = 720u;
 constant uint sexualPartnerIndexBits = 14u;
 constant uint sexualPartnerIndexMask = (1u << sexualPartnerIndexBits) - 1u;
-// Substrate/energy exchange occupies channels 0...7. Channels 8...13 carry
-// cell-produced developmental matter into the next extracellular-field step:
-// ligand A, ligand B, matrix deposition, wound/remodeling cue, catalyticMolecule
-// secretion, and reactiveMolecule neutralization.
+// Channels 0...1 return reduced matter and heat. Channels 2...7 carry
+// cell-produced developmental outputs into the next extracellular-field step:
+// ligand A, ligand B, matrix deposition, wound/remodeling cue, catalytic
+// molecule secretion, and reactive-molecule neutralization.
 constant uint worldExchangeChannelCount = 8u;
 constant uint componentMulticellularFlag = 1u << 0u;
 constant uint componentRegeneratedFlag = 1u << 1u;
@@ -469,6 +473,13 @@ inline float random01(uint value) {
 
 inline float signedRandom(uint value) {
     return random01(value) * 2.0 - 1.0;
+}
+
+inline float2 normalizedOr(float2 value, float2 fallback) {
+    float magnitudeSquared = dot(value, value);
+    return magnitudeSquared > 0.000000000001 && all(isfinite(value))
+        ? value * rsqrt(magnitudeSquared)
+        : fallback;
 }
 
 inline float4 unpackEmbodiedMemory(uint2 packed) {

@@ -483,6 +483,22 @@ inline float2 damageCenter(uint world, uint generation) {
     return float2(0.2 + 0.6 * random01(seed + 1u), 0.2 + 0.6 * random01(seed + 2u));
 }
 
+inline void redistributeDamagedBasis(
+    thread float4& basisA,
+    thread float4& basisB,
+    float impact
+) {
+    float removedY = min(basisA.y, basisA.y * impact * 0.82);
+    float removedZ = min(basisA.z, basisA.z * impact * 0.85);
+    float removedW = min(basisA.w, basisA.w * impact);
+    basisA.y -= removedY;
+    basisA.z -= removedZ;
+    basisA.w -= removedW;
+    basisA.x += removedY * 0.35 + removedZ * 0.20;
+    basisB.y += removedY * 0.65 + removedZ * 0.80;
+    basisB.z += removedW;
+}
+
 kernel void damageWorld(
     texture2d_array<float, access::read_write> state [[texture(0)]],
     texture2d_array<float, access::read_write> ecology [[texture(1)]],
@@ -500,13 +516,11 @@ kernel void damageWorld(
     );
     if (impact <= 0.0) { return; }
     float4 value = state.read(gid.xy, gid.z);
-    float removed = value.y * impact * 0.82;
-    value.x = min(2.0, value.x + removed * 0.35);
-    value.y -= removed;
-    value.z *= 1.0 - impact * 0.85;
-    value.w *= 1.0 - impact;
     float4 chemistry = ecology.read(gid.xy, gid.z);
-    chemistry.y = min(2.0, chemistry.y + removed * 0.88);
+    // Damage transforms and mobilizes basis matter; it does not erase or mint
+    // atoms. The previous coefficients returned 123% of the removed Y stock
+    // while silently deleting Z and W.
+    redistributeDamagedBasis(value, chemistry, impact);
     state.write(value, gid.xy, gid.z);
     ecology.write(chemistry, gid.xy, gid.z);
     float4 visibleEvents = events.read(gid.xy, gid.z);

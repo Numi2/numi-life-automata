@@ -2205,9 +2205,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let collectAgentObservationPipeline: MTLComputePipelineState
     private let collectCellObservationPipeline: MTLComputePipelineState
     private let collectProgramMetricPipeline: MTLComputePipelineState
-    private let resetActiveComponentDispatchPipeline: MTLComputePipelineState
     private let compactActiveComponentsPipeline: MTLComputePipelineState
-    private let prepareActiveComponentDispatchPipeline: MTLComputePipelineState
     private let compactActiveCellsPipeline: MTLComputePipelineState
     private let evolveCellPipeline: MTLComputePipelineState
     private let evolveMembranePipeline: MTLComputePipelineState
@@ -2518,9 +2516,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         collectAgentObservationPipeline = try pipelineFactory.makeComputePipeline(named: "collectAgentObservations")
         collectCellObservationPipeline = try pipelineFactory.makeComputePipeline(named: "collectCellObservations")
         collectProgramMetricPipeline = try pipelineFactory.makeComputePipeline(named: "collectProgramMetricRecords")
-        resetActiveComponentDispatchPipeline = try pipelineFactory.makeComputePipeline(named: "resetActiveComponentDispatch")
         compactActiveComponentsPipeline = try pipelineFactory.makeComputePipeline(named: "compactActiveComponents")
-        prepareActiveComponentDispatchPipeline = try pipelineFactory.makeComputePipeline(named: "prepareActiveComponentDispatch")
         compactActiveCellsPipeline = try pipelineFactory.makeComputePipeline(named: "compactActiveCellsOrdered")
         evolveCellPipeline = try pipelineFactory.makeComputePipeline(named: "evolveOrganismCells")
         evolveMembranePipeline = try pipelineFactory.makeComputePipeline(named: "evolveCellMembranes")
@@ -2803,7 +2799,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let contactWorkStateLength = Self.contactWorkStateCount * MemoryLayout<UInt32>.stride
         let cellTopologySignatureLength = Self.maxCellCount * 4 * MemoryLayout<UInt32>.stride
         let contactPairDispatchLength = 3 * MemoryLayout<UInt32>.stride
-        let cellContactEffectLength = Self.maxCellCount * 10 * MemoryLayout<Int32>.stride
+        let cellContactEffectLength = Self.maxCellCount * 14 * MemoryLayout<Int32>.stride
         let membraneContactEffectLength = Self.maxCellCount * Self.membraneVertexCount * 3 *
             MemoryLayout<Int32>.stride
         let cellJunctionLength = Self.cellJunctionCapacity * MemoryLayout<CellJunctionState>.stride
@@ -3742,8 +3738,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             initializeAgentPipeline, nucleateFounderPipeline, evolveAgentPipeline,
             injectProtocellPipeline, expandAgentPipeline, collectAgentObservationPipeline,
             collectCellObservationPipeline, collectProgramMetricPipeline,
-            resetActiveComponentDispatchPipeline, compactActiveComponentsPipeline,
-            prepareActiveComponentDispatchPipeline, compactActiveCellsPipeline,
+            compactActiveComponentsPipeline, compactActiveCellsPipeline,
             evolveCellPipeline,
             evolveMembranePipeline, clearCellSpatialHashPipeline,
             clearActiveCellContactEffectsPipeline,
@@ -4591,7 +4586,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellIdentities, offset: 0, index: 4)
         encoder.setBuffer(moleculeState, offset: 0, index: 5)
         encoder.setBuffer(speciesRegistry, offset: 0, index: 6)
-        encoder.setBuffer(materialProperties, offset: 0, index: 7)
         encoder.setBuffer(chemistryAudit, offset: 0, index: 8)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
@@ -4609,8 +4603,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             )
         )
         encoder.memoryBarrier(resources: [
-            chemistrySettlements, moleculeState, materialProperties,
-            chemistryAudit, state, ecology
+            chemistrySettlements, moleculeState, chemistryAudit, state, ecology
         ])
 
         encoder.setComputePipelineState(evolveCellPipeline)
@@ -4936,6 +4929,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(membraneContactEffects, offset: 0, index: 1)
         encoder.setBuffer(cellTopologySignatures, offset: 0, index: 2)
         encoder.setBuffer(cellIdentities, offset: 0, index: 3)
+        encoder.setBuffer(cellState, offset: 0, index: 4)
         dispatchCells(encoder, pipeline: clearActiveCellContactEffectsPipeline)
 
         encoder.setComputePipelineState(clearOwnerCellListsPipeline)
@@ -6673,30 +6667,19 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func encodeActiveComponentCompaction(_ encoder: Metal4ComputeCommandEncoderAdapter) {
-        encoder.setComputePipelineState(resetActiveComponentDispatchPipeline)
-        encoder.setBuffer(activeComponentCount, offset: 0, index: 0)
-        encoder.setBuffer(activeComponentDispatchArguments, offset: 0, index: 1)
-        encoder.dispatchThreads(
-            MTLSize(width: 1, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
-        )
-        encoder.memoryBarrier(resources: [activeComponentCount, activeComponentDispatchArguments])
-
         encoder.setComputePipelineState(compactActiveComponentsPipeline)
         encoder.setBuffer(agentOccupancy, offset: 0, index: 0)
         encoder.setBuffer(activeComponentIndices, offset: 0, index: 1)
         encoder.setBuffer(activeComponentCount, offset: 0, index: 2)
-        dispatchAgents(encoder, pipeline: compactActiveComponentsPipeline)
-        encoder.memoryBarrier(resources: [activeComponentIndices, activeComponentCount])
-
-        encoder.setComputePipelineState(prepareActiveComponentDispatchPipeline)
-        encoder.setBuffer(activeComponentCount, offset: 0, index: 0)
-        encoder.setBuffer(activeComponentDispatchArguments, offset: 0, index: 1)
+        encoder.setBuffer(activeComponentDispatchArguments, offset: 0, index: 3)
         encoder.dispatchThreads(
-            MTLSize(width: 1, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            MTLSize(width: 256, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
         )
-        encoder.memoryBarrier(resources: [activeComponentDispatchArguments])
+        encoder.memoryBarrier(resources: [
+            activeComponentIndices, activeComponentCount,
+            activeComponentDispatchArguments
+        ])
     }
 
     private func encodeActiveCellCompaction(_ encoder: Metal4ComputeCommandEncoderAdapter) {

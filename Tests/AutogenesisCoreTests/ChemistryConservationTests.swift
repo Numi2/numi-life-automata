@@ -2,14 +2,61 @@ import Testing
 @testable import AutogenesisCore
 
 @Test func sparseOverflowReturnsEveryBasisMaterialAndFreeEnergyAsHeat() {
-    let composition = [2.0, 1.0, 0.5, 0, 3, 0, 0.25, 1.25]
+    let composition = [2.0, 1.0, 0.5, 0, 0.25, 0, 0.25, 0]
     let result = ChemistryConservation.decomposeOverflow(
         amount: 0.4,
         composition: composition,
         freeEnergyPerUnit: 1.5
     )
-    #expect(result.basisMaterial == composition.map { $0 * 0.4 })
+    let compositionTotal = composition.reduce(0, +)
+    #expect(result.basisMaterial == composition.map { $0 / compositionTotal * 0.4 })
+    #expect(abs(result.basisMaterial.reduce(0, +) - 0.4) < 1e-12)
     #expect(abs(result.heat - 0.6) < 1e-12)
+}
+
+@Test func exhaustedGenomeArenaDoesNotAdvanceItsCursor() {
+    #expect(ChemistryConservation.reserveArenaRange(
+        cursor: 65_530, requestedCount: 8, capacity: 65_536
+    ) == nil)
+    #expect(ChemistryConservation.reserveArenaRange(
+        cursor: 65_530, requestedCount: 6, capacity: 65_536
+    ) == 65_530..<65_536)
+}
+
+@Test func damageRedistributesBasisMatterWithoutCreatingOrDeletingIt() {
+    let a = [0.8, 0.7, 0.6, 0.5]
+    let b = [0.4, 0.3, 0.2, 0.1]
+    let before = (a + b).reduce(0, +)
+    let result = ChemistryConservation.redistributeDamage(
+        basisA: a, basisB: b, impact: 0.73
+    )
+    let after = (result.basisA + result.basisB).reduce(0, +)
+    #expect(abs(after - before) < 1e-12)
+}
+
+@Test func persistentPolymerCannotBeCountedAsFreeAndRetainedMatter() {
+    let result = ChemistryConservation.advancePersistentStructure(
+        freePolymer: 0.8,
+        retainedPolymer: 0.3,
+        depositionFraction: 0.25,
+        erosion: 0.1
+    )
+    #expect(abs(result.free - 0.6) < 1e-12)
+    #expect(abs(result.retained - 0.4) < 1e-12)
+    #expect(abs(result.returnedToBasis - 0.1) < 1e-12)
+    #expect(abs(result.free + result.retained + result.returnedToBasis - 1.1) < 1e-12)
+}
+
+@Test func parallelContactRequestsCannotDuplicateSourceOrOverflowReceiver() {
+    let accepted = ChemistryConservation.settleContactTransfers(
+        requested: [0.09, 0.07, 0.12],
+        sourceCapacity: 0.14,
+        receiverCapacity: 0.11
+    )
+    #expect(abs(accepted[0] - 0.09) < 1e-12)
+    #expect(abs(accepted[1] - 0.02) < 1e-12)
+    #expect(accepted[2] == 0.0)
+    #expect(abs(accepted.reduce(0, +) - 0.11) < 1e-12)
 }
 
 @Test func reactionMutationCannotChangeCompositionOrCreateWork() {

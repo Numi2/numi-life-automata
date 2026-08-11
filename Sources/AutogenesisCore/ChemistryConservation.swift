@@ -37,11 +37,84 @@ public enum ChemistryConservation {
         let normalized = Array(composition.prefix(8)).map {
             $0.isFinite ? max($0, 0) : 0
         } + Array(repeating: 0, count: max(8 - composition.count, 0))
+        let compositionTotal = normalized.reduce(0, +)
         return Decomposition(
-            basisMaterial: normalized.map { $0 * finiteAmount },
+            basisMaterial: compositionTotal > 0
+                ? normalized.map { $0 / compositionTotal * finiteAmount }
+                : Array(repeating: 0, count: 8),
             heat: max(freeEnergyPerUnit.isFinite ? freeEnergyPerUnit : 0, 0) *
                 finiteAmount
         )
+    }
+
+    /// CPU contract for the bounded CAS allocator used by immutable genome
+    /// pages. Failed reservations leave the cursor unchanged.
+    public static func reserveArenaRange(
+        cursor: Int,
+        requestedCount: Int,
+        capacity: Int
+    ) -> Range<Int>? {
+        guard cursor >= 0, requestedCount > 0, capacity >= 0,
+              cursor <= capacity, requestedCount <= capacity - cursor else {
+            return nil
+        }
+        return cursor..<(cursor + requestedCount)
+    }
+
+    /// Reference for the manual damage transform. All eight basis stocks are
+    /// redistributed; damage is not an external source or sink.
+    public static func redistributeDamage(
+        basisA: [Double],
+        basisB: [Double],
+        impact: Double
+    ) -> (basisA: [Double], basisB: [Double]) {
+        var a = Array(basisA.prefix(4)).map(Self.nonnegativeFinite)
+        var b = Array(basisB.prefix(4)).map(Self.nonnegativeFinite)
+        a += Array(repeating: 0, count: max(4 - a.count, 0))
+        b += Array(repeating: 0, count: max(4 - b.count, 0))
+        let boundedImpact = min(nonnegativeFinite(impact), 1)
+        let removedY = a[1] * boundedImpact * 0.82
+        let removedZ = a[2] * boundedImpact * 0.85
+        let removedW = a[3] * boundedImpact
+        a[1] -= removedY
+        a[2] -= removedZ
+        a[3] -= removedW
+        a[0] += removedY * 0.35 + removedZ * 0.20
+        b[1] += removedY * 0.65 + removedZ * 0.80
+        b[2] += removedW
+        return (a, b)
+    }
+
+    public static func advancePersistentStructure(
+        freePolymer: Double,
+        retainedPolymer: Double,
+        depositionFraction: Double,
+        erosion: Double
+    ) -> (free: Double, retained: Double, returnedToBasis: Double) {
+        let free = nonnegativeFinite(freePolymer)
+        let retained = nonnegativeFinite(retainedPolymer)
+        let deposited = free * min(nonnegativeFinite(depositionFraction), 1)
+        let beforeErosion = retained + deposited
+        let eroded = min(beforeErosion, nonnegativeFinite(erosion))
+        return (free - deposited, beforeErosion - eroded, eroded)
+    }
+
+    /// CPU reference for the source and receiver allowances used by parallel
+    /// contact settlement. Regardless of request order, accepted transfers can
+    /// never overdraw the donor or disappear into a saturated receiver.
+    public static func settleContactTransfers(
+        requested: [Double],
+        sourceCapacity: Double,
+        receiverCapacity: Double
+    ) -> [Double] {
+        var source = nonnegativeFinite(sourceCapacity)
+        var receiver = nonnegativeFinite(receiverCapacity)
+        return requested.map { request in
+            let accepted = min(nonnegativeFinite(request), source, receiver)
+            source -= accepted
+            receiver -= accepted
+            return accepted
+        }
     }
 
     /// Reaction mutation may change rates and activation barriers, but never

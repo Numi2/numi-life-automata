@@ -641,11 +641,12 @@ kernel void divideAndReduceOrganismCells(
                 ? normalize(parent.development.xy) : phaseAxis;
             float2 boundaryAxis = length(parent.tissueGeometry.xy) > 0.0001
                 ? normalize(parent.tissueGeometry.xy) : polarityAxis;
-            float2 axis = normalize(
+            float2 axis = normalizedOr(
                 polarityAxis * (0.52 + parent.regulation.x * 0.36) +
                 phaseAxis * (0.18 + parent.regulation.z * 0.24) +
                 boundaryAxis * (0.10 + parent.tissueGeometry.z * 0.22) +
-                float2(parent.signals.x - parent.signals.y, parent.mechanics.y - 0.5) * 0.12
+                float2(parent.signals.x - parent.signals.y, parent.mechanics.y - 0.5) * 0.12,
+                polarityAxis
             );
             if (sexualBodyPair) {
                 CellState donorCell = cells[recombinationDonor];
@@ -661,8 +662,9 @@ kernel void divideAndReduceOrganismCells(
                     float2 localBirthDirection = rotateWorldToTissue(
                         normalize(interBodyDirection), agent
                     );
-                    axis = normalize(
-                        localBirthDirection * 0.78 + boundaryAxis * 0.22
+                    axis = normalizedOr(
+                        localBirthDirection * 0.78 + boundaryAxis * 0.22,
+                        localBirthDirection
                     );
                 }
             }
@@ -731,14 +733,14 @@ kernel void divideAndReduceOrganismCells(
             float rotationCosine = cos(polarityRotation);
             float rotationSine = sin(polarityRotation);
             float2 inheritedPolarity = polarityAxis;
-            parent.development.xy = normalize(float2(
+            parent.development.xy = normalizedOr(float2(
                 inheritedPolarity.x * rotationCosine + inheritedPolarity.y * rotationSine,
                 -inheritedPolarity.x * rotationSine + inheritedPolarity.y * rotationCosine
-            ));
-            child.development.xy = normalize(float2(
+            ), inheritedPolarity);
+            child.development.xy = normalizedOr(float2(
                 inheritedPolarity.x * rotationCosine - inheritedPolarity.y * rotationSine,
                 inheritedPolarity.x * rotationSine + inheritedPolarity.y * rotationCosine
-            ));
+            ), inheritedPolarity);
             parent.development.w = 0.0;
             child.development.w = 0.0;
             child.interaction = float4(0.0);
@@ -804,6 +806,8 @@ kernel void divideAndReduceOrganismCells(
 
             uint parentStateBase = divisionParent * regulatoryStateChannelCount;
             uint childStateBase = divisionTarget * regulatoryStateChannelCount;
+            float stagedParentRegulation[regulatoryStateChannelCount];
+            float stagedChildRegulation[regulatoryStateChannelCount];
             for (uint channel = 0u; channel < regulatoryStateChannelCount; ++channel) {
                 float state = regulatoryStates[parentStateBase + channel];
                 float stateDelta = conservativeDivisionDelta(
@@ -811,13 +815,15 @@ kernel void divideAndReduceOrganismCells(
                     signedRandom(divisionSeed + 101u + channel) *
                         partitionAmplitude * 0.12
                 );
-                regulatoryStates[parentStateBase + channel] = state - stateDelta;
-                regulatoryStates[childStateBase + channel] = state + stateDelta;
+                stagedParentRegulation[channel] = state - stateDelta;
+                stagedChildRegulation[channel] = state + stateDelta;
             }
             uint parentMembraneBase = divisionParent * membraneVertexCount;
             uint childMembraneBase = divisionTarget * membraneVertexCount;
             float parentRadiusShare = sqrt(parentMaterialShare);
             float childRadiusShare = sqrt(childMaterialShare);
+            MembraneVertex stagedParentMembrane[membraneVertexCount];
+            MembraneVertex stagedChildMembrane[membraneVertexCount];
             for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
                 MembraneVertex inheritedMembrane =
                     membraneVertices[parentMembraneBase + vertexIndex];
@@ -825,13 +831,13 @@ kernel void divideAndReduceOrganismCells(
                 parentMembrane.position *= parentRadiusShare;
                 parentMembrane.velocity *= 0.25;
                 parentMembrane.mechanics.x *= parentRadiusShare;
-                membraneVertices[parentMembraneBase + vertexIndex] = parentMembrane;
+                stagedParentMembrane[vertexIndex] = parentMembrane;
                 MembraneVertex daughterMembrane = inheritedMembrane;
                 daughterMembrane.position *= childRadiusShare;
                 daughterMembrane.velocity *= -0.25;
                 daughterMembrane.mechanics.x *= childRadiusShare;
                 daughterMembrane.mechanics.zw = float2(0.0);
-                membraneVertices[childMembraneBase + vertexIndex] = daughterMembrane;
+                stagedChildMembrane[vertexIndex] = daughterMembrane;
             }
             float4 inheritedMembraneMeasurement = parent.membrane;
             parent.membrane = float4(
@@ -844,8 +850,6 @@ kernel void divideAndReduceOrganismCells(
                 inheritedMembraneMeasurement.y * childRadiusShare,
                 inheritedMembraneMeasurement.zw
             );
-            cells[divisionParent] = parent;
-            cells[divisionTarget] = child;
             CellIdentity childIdentity;
             childIdentity.owner = owner;
             childIdentity.programIndex = parentIdentity.programIndex;
@@ -875,6 +879,7 @@ kernel void divideAndReduceOrganismCells(
             );
             bool programMutated = false;
             bool programCrossbred = false;
+            bool childOwnsProgramReference = false;
             uint donorPersistentID = 0xffffffffu;
             if (recombinationDonor < maxCellCount &&
                 (sexualBodyPair || random01(divisionSeed + 1741u) <
@@ -923,6 +928,7 @@ kernel void divideAndReduceOrganismCells(
                             programSlots, daughterProgram,
                             genomeHeaders[daughterProgram].genomeHash
                         );
+                        childOwnsProgramReference = true;
                     }
                     if (!programCrossbred) {
                         abandonGenomeHeaderSlot(
@@ -984,6 +990,7 @@ kernel void divideAndReduceOrganismCells(
                             programSlots, daughterProgram,
                             genomeHeaders[daughterProgram].genomeHash
                         );
+                        childOwnsProgramReference = true;
                     }
                     if (!programMutated) {
                         abandonGenomeHeaderSlot(
@@ -995,9 +1002,10 @@ kernel void divideAndReduceOrganismCells(
                     }
                 }
             }
-            if (!retainGenomeHeaderSlot(
-                programSlots, childIdentity.programIndex, childIdentity.programGeneration
-            )) {
+            if (!childOwnsProgramReference && !retainGenomeHeaderSlot(
+                    programSlots, childIdentity.programIndex,
+                    childIdentity.programGeneration
+                )) {
                 if (childIdentity.programIndex != parentIdentity.programIndex) {
                     abandonGenomeHeaderSlot(
                         programSlots, identityCounters, childIdentity.programIndex
@@ -1007,6 +1015,25 @@ kernel void divideAndReduceOrganismCells(
                     &cellOccupancy[divisionTarget], 0u, memory_order_relaxed
                 );
                 return;
+            }
+            // Commit the physical split only after the daughter owns a valid
+            // immutable program reference. Previously a rare pool race could
+            // reject that reference after parent ATP, biomass, regulation, and
+            // membrane material had already been divided, deleting half of a
+            // living cell with no corpse or recycling path.
+            cells[divisionParent] = parent;
+            cells[divisionTarget] = child;
+            for (uint channel = 0u; channel < regulatoryStateChannelCount; ++channel) {
+                regulatoryStates[parentStateBase + channel] =
+                    stagedParentRegulation[channel];
+                regulatoryStates[childStateBase + channel] =
+                    stagedChildRegulation[channel];
+            }
+            for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
+                membraneVertices[parentMembraneBase + vertexIndex] =
+                    stagedParentMembrane[vertexIndex];
+                membraneVertices[childMembraneBase + vertexIndex] =
+                    stagedChildMembrane[vertexIndex];
             }
             CellMemoryState childMemory = cellMemories[divisionParent];
             float experientialInheritance = clamp(

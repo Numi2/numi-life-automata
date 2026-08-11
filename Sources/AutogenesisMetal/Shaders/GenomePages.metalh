@@ -165,6 +165,31 @@ inline void enforceAtomBalancedReactionPage(thread GenomePage& page) {
     page.payload[4].y = min(max(page.payload[4].y, 0.0), declaredSource);
 }
 
+/// Reserve an immutable range without allowing a failed allocation to advance
+/// the arena cursor beyond its physical capacity. The previous fetch-add path
+/// permanently poisoned the cursor after the first exhausted mutation, so all
+/// later founders and offspring were rejected even though the failed range was
+/// never usable.
+inline uint reserveGenomePageRange(
+    device atomic_uint* arenaCursor,
+    uint requestedCount
+) {
+    if (requestedCount == 0u || requestedCount > genomePageCapacity) {
+        return genomePageCapacity;
+    }
+    uint observed = atomic_load_explicit(arenaCursor, memory_order_relaxed);
+    while (observed <= genomePageCapacity - requestedCount) {
+        uint desired = observed + requestedCount;
+        if (atomic_compare_exchange_weak_explicit(
+            arenaCursor, &observed, desired,
+            memory_order_relaxed, memory_order_relaxed
+        )) {
+            return observed;
+        }
+    }
+    return genomePageCapacity;
+}
+
 inline bool publishGenomeOverlay(
     device GenomeHeader* headers,
     device GenomePage* pages,
@@ -212,11 +237,10 @@ inline bool publishGenomeOverlay(
     }
     bool splitPage = !recombined && operation == 2u;
     uint allocatedPageCount = splitPage ? 2u : 1u;
-    uint pageIndex = atomic_fetch_add_explicit(
-        &arenaState[0], allocatedPageCount, memory_order_relaxed
+    uint pageIndex = reserveGenomePageRange(
+        &arenaState[0], allocatedPageCount
     );
-    if (pageIndex >= genomePageCapacity ||
-        allocatedPageCount > genomePageCapacity - pageIndex) {
+    if (pageIndex >= genomePageCapacity) {
         atomic_fetch_add_explicit(
             &chemistryAudit->skippedGenomeMutationCount, 1u, memory_order_relaxed
         );
@@ -289,10 +313,10 @@ inline bool publishGenomeOverlay(
         parent.pageCount + allocatedPageCount, 0xfffffffeu
     );
     child.generation = childGeneration;
-        child.genomeHash = hash32(
-            childGenomeHash ^ pageIndex ^ (pageType * 0x9e3779b9u) ^
-            (recombined ? 0x85ebca6bu : 0u)
-        );
+    child.genomeHash = hash32(
+        childGenomeHash ^ pageIndex ^ (pageType * 0x9e3779b9u) ^
+        (recombined ? 0x85ebca6bu : 0u)
+    );
     child.parentGenomeHash = parent.genomeHash;
     child.secondParentGenomeHash = recombined &&
         secondaryProgram < maxGenomeHeaderCount

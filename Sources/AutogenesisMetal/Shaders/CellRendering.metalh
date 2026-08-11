@@ -554,7 +554,9 @@ fragment float4 molecularCellFragment(
         0.055, 0.16, abs(fract(membraneAngle * 26.0) - 0.5)
     );
     float3 lineage = hsvToRGB(float3(input.lineageHue, 0.72, 0.52));
-    float2 nuclearDirection = normalize(input.development.xy + float2(0.0001));
+    float2 nuclearDirection = normalizedOr(
+        input.development.xy, float2(1.0, 0.0)
+    );
     float2 nuclearPosition = nuclearDirection * (input.development.z - 0.5) * 0.22;
     float nuclearDistance = length(p - nuclearPosition);
     float nucleus = (1.0 - smoothstep(0.20, 0.29, nuclearDistance)) * cytoplasm;

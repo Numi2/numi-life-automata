@@ -37,7 +37,8 @@ kernel void damageOrganismCells(
     for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
         MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
         float directionalExposure = saturate(
-            0.35 + 0.65 * dot(normalize(membranePoint.position + float2(0.000001)),
+            0.35 + 0.65 * dot(normalizedOr(
+                membranePoint.position, float2(1.0, 0.0)),
                 -impactDirectionLocal)
         );
         float localDamage = impact * directionalExposure;
@@ -173,13 +174,8 @@ kernel void damageSelectedTargetWorld(
     );
     if (impact <= 0.0) { return; }
     float4 value = state.read(gid.xy, gid.z);
-    float removed = value.y * impact * 0.82;
-    value.x = min(2.0, value.x + removed * 0.35);
-    value.y -= removed;
-    value.z *= 1.0 - impact * 0.85;
-    value.w *= 1.0 - impact;
     float4 chemistry = ecology.read(gid.xy, gid.z);
-    chemistry.y = min(2.0, chemistry.y + removed * 0.88);
+    redistributeDamagedBasis(value, chemistry, impact);
     state.write(value, gid.xy, gid.z);
     ecology.write(chemistry, gid.xy, gid.z);
     float4 visibleEvents = events.read(gid.xy, gid.z);
@@ -231,7 +227,8 @@ kernel void damageSelectedTargetCells(
     for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
         MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
         float directionalExposure = saturate(
-            0.35 + 0.65 * dot(normalize(membranePoint.position + float2(0.000001)),
+            0.35 + 0.65 * dot(normalizedOr(
+                membranePoint.position, float2(1.0, 0.0)),
                 -impactDirectionLocal)
         );
         float localDamage = impact * directionalExposure;
@@ -677,6 +674,13 @@ inline void publishGenomeHeaderSlot(
 ) {
     if (programIndex >= maxGenomeHeaderCount) { return; }
     programSlots[programIndex].lineageHash = lineageHash;
+    // Publication transfers the claimed slot's first reference directly to
+    // the cell being constructed. Starting published slots at zero allowed a
+    // concurrent final release to race a retain and revive an already-freed
+    // generation.
+    atomic_store_explicit(
+        &programSlots[programIndex].referenceCount, 1u, memory_order_relaxed
+    );
     atomic_store_explicit(
         &programSlots[programIndex].occupied, 1u, memory_order_relaxed
     );
@@ -687,11 +691,32 @@ inline bool retainGenomeHeaderSlot(
     uint programIndex,
     uint programGeneration
 ) {
-    if (!programSlotMatches(programSlots, programIndex, programGeneration)) { return false; }
-    atomic_fetch_add_explicit(
-        &programSlots[programIndex].referenceCount, 1u, memory_order_relaxed
+    if (!programSlotMatches(programSlots, programIndex, programGeneration)) {
+        return false;
+    }
+    uint references = atomic_load_explicit(
+        &programSlots[programIndex].referenceCount, memory_order_relaxed
     );
-    return true;
+    while (references > 0u && references < 0xffffffffu) {
+        uint expected = references;
+        if (atomic_compare_exchange_weak_explicit(
+            &programSlots[programIndex].referenceCount, &expected,
+            references + 1u, memory_order_relaxed, memory_order_relaxed
+        )) {
+            if (programSlotMatches(
+                programSlots, programIndex, programGeneration
+            )) {
+                return true;
+            }
+            atomic_fetch_sub_explicit(
+                &programSlots[programIndex].referenceCount,
+                1u, memory_order_relaxed
+            );
+            return false;
+        }
+        references = expected;
+    }
+    return false;
 }
 
 inline void releaseGenomeHeaderSlot(
@@ -704,18 +729,34 @@ inline void releaseGenomeHeaderSlot(
     uint references = atomic_load_explicit(
         &programSlots[programIndex].referenceCount, memory_order_relaxed
     );
-    if (references == 0u) { return; }
-    uint previous = atomic_fetch_sub_explicit(
-        &programSlots[programIndex].referenceCount, 1u, memory_order_relaxed
-    );
-    if (previous == 1u) {
-        uint expected = 1u;
+    while (references > 0u) {
+        uint expected = references;
         if (atomic_compare_exchange_weak_explicit(
-            &programSlots[programIndex].occupied, &expected, 0u,
-            memory_order_relaxed, memory_order_relaxed
+            &programSlots[programIndex].referenceCount, &expected,
+            references - 1u, memory_order_relaxed, memory_order_relaxed
         )) {
-            atomic_fetch_sub_explicit(&identityCounters[4], 1u, memory_order_relaxed);
+            if (references == 1u) {
+                // No retain may revive a zero reference count. We therefore own
+                // the terminal transition and can publish the slot as free
+                // without a GPU spin lock.
+                atomic_store_explicit(
+                    &programSlots[programIndex].mutationHazard, 0u,
+                    memory_order_relaxed
+                );
+                // Publish the free state last. A claimant may reuse the slot as
+                // soon as this store lands, so no old-generation cleanup may
+                // write into the slot afterward.
+                atomic_store_explicit(
+                    &programSlots[programIndex].occupied, 0u,
+                    memory_order_relaxed
+                );
+                atomic_fetch_sub_explicit(
+                    &identityCounters[4], 1u, memory_order_relaxed
+                );
+            }
+            return;
         }
+        references = expected;
     }
 }
 
@@ -725,14 +766,17 @@ inline void abandonGenomeHeaderSlot(
     uint programIndex
 ) {
     if (programIndex >= maxGenomeHeaderCount) { return; }
-    uint occupied = atomic_exchange_explicit(
-        &programSlots[programIndex].occupied, 0u, memory_order_relaxed
-    );
     atomic_store_explicit(
         &programSlots[programIndex].referenceCount, 0u, memory_order_relaxed
     );
     atomic_store_explicit(
         &programSlots[programIndex].mutationHazard, 0u, memory_order_relaxed
+    );
+    // As with terminal release, make availability the final slot write so a
+    // new claimant cannot have its initialization overwritten by cleanup from
+    // the abandoned generation.
+    uint occupied = atomic_exchange_explicit(
+        &programSlots[programIndex].occupied, 0u, memory_order_relaxed
     );
     if (occupied != 0u) {
         atomic_fetch_sub_explicit(&identityCounters[4], 1u, memory_order_relaxed);
@@ -788,6 +832,39 @@ inline void addEnergyExchange(
             &cellEnergyExchange[tileBase + channel], fixed, memory_order_relaxed
         );
     }
+}
+
+/// Close terminal storage on every death path, including defensive cleanup of
+/// orphaned cells. Corpse structure is informational and mechanical; ATP and
+/// biomass energy must still return to local chemistry exactly once.
+inline void recycleTerminalCellEnergy(
+    device atomic_uint* cellEnergyExchange,
+    device atomic_int* energyAudit,
+    float2 worldPosition,
+    CellState cell,
+    constant SimulationUniforms& uniforms
+) {
+    uint2 coordinate = min(
+        uint2(clamp(worldPosition, float2(0.0), float2(1.0)) *
+            float2(uniforms.width, uniforms.height)),
+        uint2(uniforms.width - 1u, uniforms.height - 1u)
+    );
+    uint tileBase = (coordinate.y * uniforms.width + coordinate.x) *
+        worldExchangeChannelCount;
+    float terminalEnergy = max(cell.physiology.x, 0.0) +
+        max(cell.physiology.y, 0.0) * 0.18;
+    float recycledMatterEnergy = terminalEnergy * 0.72;
+    float heat = terminalEnergy - recycledMatterEnergy;
+    addEnergyExchange(
+        cellEnergyExchange, tileBase, 0u, recycledMatterEnergy / 0.62
+    );
+    addEnergyExchange(cellEnergyExchange, tileBase, 1u, heat);
+    addEnergyAudit(energyAudit, 2u, -terminalEnergy);
+    addEnergyAudit(energyAudit, 6u, heat);
+    addEnergyAudit(energyAudit, 7u, recycledMatterEnergy);
+    addEnergyAudit(
+        energyAudit, 9u, terminalEnergy - heat - recycledMatterEnergy
+    );
 }
 
 inline AgentState mutateCellProgram(
@@ -1056,7 +1133,6 @@ inline uint seedOrganismCells(
     device float* regulatoryStates,
     device MembraneVertex* membraneVertices,
     device float4* programInteractions,
-    device ProgramSlotState* programSlots,
     device atomic_uint* identityCounters,
     uint owner,
     uint programIndex,
@@ -1080,10 +1156,6 @@ inline uint seedOrganismCells(
     identity.identityPadding0 = 0u;
     identity.identityPadding1 = 0u;
     identity.identityPadding2 = 0u;
-    if (!retainGenomeHeaderSlot(programSlots, programIndex, programGeneration)) {
-        atomic_store_explicit(&cellOccupancy[cellIndex], 0u, memory_order_relaxed);
-        return maxCellCount;
-    }
     cellIdentities[cellIndex] = identity;
     cellParentIDs[cellIndex] = 0xffffffffu;
     uint stateBase = cellIndex * regulatoryStateChannelCount;

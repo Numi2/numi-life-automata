@@ -12,6 +12,7 @@ kernel void clearActiveCellContactEffects(
     device atomic_int* membraneContactEffects [[buffer(1)]],
     device atomic_uint* topologySignatures [[buffer(2)]],
     device CellIdentity* cellIdentities [[buffer(3)]],
+    device const CellState* cells [[buffer(4)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
@@ -25,6 +26,47 @@ kernel void clearActiveCellContactEffects(
             0, memory_order_relaxed
         );
     }
+    CellState cell = cells[cellIndex];
+    float trophicSourceCapacity = min(
+        max(cell.physiology.x, 0.0) * 0.012 / 0.82,
+        max(cell.physiology.y - 0.16, 0.0) * 0.004 / 0.30
+    );
+    float trophicReceiverCapacity = min(
+        max(1.20 - cell.physiology.x, 0.0) / (0.68 * 0.82),
+        max(1.12 - cell.physiology.y, 0.0) / (0.68 * 0.30)
+    );
+    float reproductiveSourceCapacity = min(
+        max(cell.physiology.x - 0.08, 0.0) / 0.64,
+        max(cell.physiology.y - 0.18, 0.0) / 0.40
+    );
+    float reproductiveReceiverCapacity = min(
+        max(1.16 - cell.physiology.x, 0.0) / 0.64,
+        max(1.08 - cell.physiology.y, 0.0) / 0.40
+    );
+    atomic_store_explicit(
+        &contactEffects[cellIndex * cellContactEffectChannelCount +
+            trophicSourceBudgetChannel],
+        int(floor(trophicSourceCapacity * float(cellContactScalarScale))),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &contactEffects[cellIndex * cellContactEffectChannelCount +
+            trophicReceiverBudgetChannel],
+        int(floor(trophicReceiverCapacity * float(cellContactScalarScale))),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &contactEffects[cellIndex * cellContactEffectChannelCount +
+            reproductiveSourceBudgetChannel],
+        int(floor(reproductiveSourceCapacity * float(cellContactScalarScale))),
+        memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &contactEffects[cellIndex * cellContactEffectChannelCount +
+            reproductiveReceiverBudgetChannel],
+        int(floor(reproductiveReceiverCapacity * float(cellContactScalarScale))),
+        memory_order_relaxed
+    );
     // The selected mate is a contact-local fact and is rebuilt every step.
     // The second-parent body ID and conception step in padding 1/2 persist.
     cellIdentities[cellIndex].identityPadding0 = 0u;
@@ -37,6 +79,55 @@ kernel void clearActiveCellContactEffects(
     uint topologyBase = cellIndex * 4u;
     atomic_store_explicit(&topologySignatures[topologyBase], 0u, memory_order_relaxed);
     atomic_store_explicit(&topologySignatures[topologyBase + 1u], 0u, memory_order_relaxed);
+}
+
+/// Atomically reserve a conservative fixed-point transfer allowance. Contact
+/// pairs execute in parallel, so checking a CellState snapshot in every pair
+/// lets several attackers or donors spend the same source material. These
+/// budgets turn the snapshot into a once-only settlement without serializing
+/// the complete contact solver.
+inline float claimCellContactBudget(
+    device atomic_int* contactEffects,
+    uint cellIndex,
+    uint budgetChannel,
+    float requestedAmount
+) {
+    int requested = int(floor(
+        max(requestedAmount, 0.0) * float(cellContactScalarScale)
+    ));
+    if (requested <= 0) { return 0.0; }
+    device atomic_int* budget = &contactEffects[
+        cellIndex * cellContactEffectChannelCount + budgetChannel
+    ];
+    int observed = atomic_load_explicit(budget, memory_order_relaxed);
+    while (observed > 0) {
+        int claimed = min(observed, requested);
+        int expected = observed;
+        if (atomic_compare_exchange_weak_explicit(
+            budget, &expected, observed - claimed,
+            memory_order_relaxed, memory_order_relaxed
+        )) {
+            return float(claimed) / float(cellContactScalarScale);
+        }
+        observed = expected;
+    }
+    return 0.0;
+}
+
+inline void returnCellContactBudget(
+    device atomic_int* contactEffects,
+    uint cellIndex,
+    uint budgetChannel,
+    float returnedAmount
+) {
+    int returned = int(floor(
+        max(returnedAmount, 0.0) * float(cellContactScalarScale)
+    ));
+    if (returned <= 0) { return; }
+    atomic_fetch_add_explicit(
+        &contactEffects[cellIndex * cellContactEffectChannelCount + budgetChannel],
+        returned, memory_order_relaxed
+    );
 }
 
 kernel void clearOwnerCellLists(
@@ -918,17 +1009,9 @@ kernel void resolveMembraneContacts(
                                     reciprocalEndocrineDrive > 0.06
                                     ? pow(max(combinedSuitability, 0.000000000001), 0.11111111)
                                     : 0.0;
-                                bool conceived = sexualScore > 0.0;
-                                if (conceived) {
-                                    reproductivePleasureA = 1.0;
-                                    reproductivePleasureB = 1.0;
+                                if (sexualScore > 0.0) {
                                     uint gestatorIndex = gestateA ? gid : otherIndex;
                                     uint donorIndex = gestateA ? otherIndex : gid;
-                                    nominateSexualPartner(
-                                        cellIdentities, gestatorIndex, donorIndex,
-                                        sexualScore
-                                    );
-
                                     CellState gestator = gestateA ? cell : other;
                                     CellState donor = gestateA ? other : cell;
                                     float donorCapacity = min(
@@ -939,16 +1022,41 @@ kernel void resolveMembraneContacts(
                                         max(1.16 - gestator.physiology.x, 0.0) / 0.64,
                                         max(1.08 - gestator.physiology.y, 0.0) / 0.40
                                     );
-                                    float contributedMaterial = min(
+                                    float requestedMaterial = min(
                                         0.018 + sexualScore * 0.034,
                                         min(donorCapacity, gestatorCapacity) * 0.38
                                     );
-                                    if (gestateA) {
-                                        reproductiveContributionA += contributedMaterial;
-                                        reproductiveContributionB -= contributedMaterial;
-                                    } else {
-                                        reproductiveContributionA -= contributedMaterial;
-                                        reproductiveContributionB += contributedMaterial;
+                                    float sourceReservation = claimCellContactBudget(
+                                        contactEffects, donorIndex,
+                                        reproductiveSourceBudgetChannel,
+                                        requestedMaterial
+                                    );
+                                    float contributedMaterial = claimCellContactBudget(
+                                        contactEffects, gestatorIndex,
+                                        reproductiveReceiverBudgetChannel,
+                                        sourceReservation
+                                    );
+                                    if (contributedMaterial < sourceReservation) {
+                                        returnCellContactBudget(
+                                            contactEffects, donorIndex,
+                                            reproductiveSourceBudgetChannel,
+                                            sourceReservation - contributedMaterial
+                                        );
+                                    }
+                                    if (contributedMaterial > 0.0) {
+                                        reproductivePleasureA = 1.0;
+                                        reproductivePleasureB = 1.0;
+                                        nominateSexualPartner(
+                                            cellIdentities, gestatorIndex, donorIndex,
+                                            sexualScore
+                                        );
+                                        if (gestateA) {
+                                            reproductiveContributionA += contributedMaterial;
+                                            reproductiveContributionB -= contributedMaterial;
+                                        } else {
+                                            reproductiveContributionA -= contributedMaterial;
+                                            reproductiveContributionB += contributedMaterial;
+                                        }
                                     }
                                 }
                             }
@@ -1013,22 +1121,34 @@ kernel void resolveMembraneContacts(
                                 localFailureB * 0.78 + freshDamageB * 0.42
                             ) * other.tissueGeometry.z *
                                 (1.0 - collectiveDefenseB * 0.84);
-                            float availableFromA = min(
-                                cell.physiology.x * 0.012 / 0.82,
-                                max(cell.physiology.y - 0.16, 0.0) * 0.004 / 0.30
+                            float sourceReservationA = claimCellContactBudget(
+                                contactEffects, gid, trophicSourceBudgetChannel,
+                                contactStrength * attackB * breachA * 0.012
                             );
-                            float availableFromB = min(
-                                other.physiology.x * 0.012 / 0.82,
-                                max(other.physiology.y - 0.16, 0.0) * 0.004 / 0.30
+                            float transferFromA = claimCellContactBudget(
+                                contactEffects, otherIndex,
+                                trophicReceiverBudgetChannel, sourceReservationA
                             );
-                            float transferFromA = min(
-                                contactStrength * attackB * breachA * 0.012,
-                                availableFromA
+                            if (transferFromA < sourceReservationA) {
+                                returnCellContactBudget(
+                                    contactEffects, gid, trophicSourceBudgetChannel,
+                                    sourceReservationA - transferFromA
+                                );
+                            }
+                            float sourceReservationB = claimCellContactBudget(
+                                contactEffects, otherIndex, trophicSourceBudgetChannel,
+                                contactStrength * attackA * breachB * 0.012
                             );
-                            float transferFromB = min(
-                                contactStrength * attackA * breachB * 0.012,
-                                availableFromB
+                            float transferFromB = claimCellContactBudget(
+                                contactEffects, gid,
+                                trophicReceiverBudgetChannel, sourceReservationB
                             );
+                            if (transferFromB < sourceReservationB) {
+                                returnCellContactBudget(
+                                    contactEffects, otherIndex, trophicSourceBudgetChannel,
+                                    sourceReservationB - transferFromB
+                                );
+                            }
                             if (!sameOwner && attackA + attackB > 0.000001) {
                                 bool breached = (attackB > 0.0 && breachA > 0.05) ||
                                     (attackA > 0.0 && breachB > 0.05);

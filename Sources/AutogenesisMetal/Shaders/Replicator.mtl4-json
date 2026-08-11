@@ -229,11 +229,6 @@
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
-        "label": "BFB743093B2C7CF7B27A39A40303532A2C43337ABB471C569E3848954B793F69",
-        "name": "resetActiveComponentDispatch",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
         "label": "8EB86F24612DACFCD033F732DAAE4890C3A11DC7CFF112E95E6DC1F98CC71ED1",
         "name": "junctionVertex",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
@@ -351,11 +346,6 @@
       {
         "label": "DCAB043F450AAD5A1F71BFE1068B5A11737CAB1D464DC3F44FFA80347D1D2FF9",
         "name": "damageSelectedTargetCells",
-        "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
-      },
-      {
-        "label": "061010D4386BDDEFD49FBD29A10997FE0BAD6D0A2B2035A0D9F346F054A6BBF2",
-        "name": "prepareActiveComponentDispatch",
         "library": "33F68401FA8C6E8C58A7B93A4033DD23034BF9F732BD2774D3C29CAF880AB3D9"
       },
       {
@@ -725,23 +715,7 @@
         ]
       },
       {
-        "compute_function_descriptor": "fnd:BFB743093B2C7CF7B27A39A40303532A2C43337ABB471C569E3848954B793F69",
-        "required_threads_per_threadgroup": [
-          0,
-          0,
-          0
-        ]
-      },
-      {
         "compute_function_descriptor": "fnd:B56DFCF6C441209181A85AC50516EB75663AD995DF024EABB5D9A585E4664792",
-        "required_threads_per_threadgroup": [
-          0,
-          0,
-          0
-        ]
-      },
-      {
-        "compute_function_descriptor": "fnd:061010D4386BDDEFD49FBD29A10997FE0BAD6D0A2B2035A0D9F346F054A6BBF2",
         "required_threads_per_threadgroup": [
           0,
           0,

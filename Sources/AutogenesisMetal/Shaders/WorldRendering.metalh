@@ -573,7 +573,10 @@ inline float4 organismOverviewCellColor(
         mix(float3(0.025, 0.22, 0.16), lineage, 0.42),
         organism
     );
-    float2 nucleusOffset = normalize(input.development.xy + float2(0.0001)) * 0.16;
+    float2 developmentalDirection = normalizedOr(
+        input.development.xy, float2(1.0, 0.0)
+    );
+    float2 nucleusOffset = developmentalDirection * 0.16;
     float nucleus = (1.0 - smoothstep(
         0.18, 0.29, length(input.local - nucleusOffset)
     )) * cytoplasm;
@@ -581,7 +584,7 @@ inline float4 organismOverviewCellColor(
         0.10, 0.19, length(input.local + nucleusOffset * 1.7)
     )) * cytoplasm;
     float polarity = saturate(
-        0.5 + dot(input.local, normalize(input.development.xy + float2(0.0001))) * 0.5
+        0.5 + dot(input.local, developmentalDirection) * 0.5
     );
     float calcium = saturate(input.signaling.x);
     float erk = saturate(input.signaling.y);
@@ -733,10 +736,11 @@ inline CellRasterData makeCellRasterData(
         float renderFootCycle = fract(cell.boundaryDynamics.w + footSidePhase);
         renderFootStance = smoothstep(0.04, 0.24, renderFootCycle) *
             (1.0 - smoothstep(0.62, 0.94, renderFootCycle));
-        renderedFootDirection = normalize(
+        renderedFootDirection = normalizedOr(
             componentBoundaryNormal +
             float2((renderFootCycle * 2.0 - 1.0) * 0.26, 0.0) +
-            componentBoundaryNormal * 0.0001
+            componentBoundaryNormal * 0.0001,
+            componentBoundaryNormal
         );
         float footAlignment = saturate(dot(
             membraneDirection, renderedFootDirection
@@ -795,7 +799,7 @@ inline CellRasterData makeCellRasterData(
             heading * renderedFootDirection.x +
             lateral * renderedFootDirection.y;
         float2 screenFootDirection = worldFootDirection / viewScale;
-        screenUV += normalize(screenFootDirection) *
+        screenUV += normalizedOr(screenFootDirection, float2(1.0, 0.0)) *
             footOverviewProjection * 0.0032;
     }
     // Do not reject one vertex of an otherwise valid triangle by screen position.
