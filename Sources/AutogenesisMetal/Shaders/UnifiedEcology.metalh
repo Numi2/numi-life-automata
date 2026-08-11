@@ -2,7 +2,6 @@
 
 constant uint invalidGenomePage = 0xffffffffu;
 constant uint componentInterventionFlag = 1u << 6u;
-constant float chemistryAuditScale = 1048576.0;
 constant uint protocellOriginExclusionSteps = 4096u;
 constant float protocellAmphiphileCost = 0.010;
 constant float protocellCatalystCost = 0.004;
@@ -132,14 +131,6 @@ inline CellChemistrySettlement emptyChemistrySettlement() {
     return settlement;
 }
 
-inline void auditChemistry(
-    device atomic_int* destination,
-    float value
-) {
-    int fixed = int(clamp(value * chemistryAuditScale, -2147480000.0, 2147480000.0));
-    atomic_fetch_add_explicit(destination, fixed, memory_order_relaxed);
-}
-
 kernel void initializeUnifiedEcology(
     device SpeciesDefinition* speciesRegistry [[buffer(0)]],
     device MoleculePacket* moleculeState [[buffer(1)]],
@@ -230,6 +221,7 @@ kernel void initializeUnifiedEcology(
         atomic_store_explicit(&chemistryAudit->tileCellOverflowCount, 0u, memory_order_relaxed);
         atomic_store_explicit(&chemistryAudit->skippedGenomeMutationCount, 0u, memory_order_relaxed);
         atomic_store_explicit(&chemistryAudit->protocellOriginCount, 0u, memory_order_relaxed);
+        atomic_store_explicit(&chemistryAudit->auditSaturationCount, 0u, memory_order_relaxed);
     }
 }
 
@@ -242,35 +234,29 @@ kernel void expandUnifiedEcology(
     device atomic_uint* originOut [[buffer(5)]],
     constant SimulationUniforms& uniforms [[buffer(6)]],
     constant uint& expansionLevel [[buffer(7)]],
+    device const SpeciesDefinition* speciesRegistry [[buffer(8)]],
+    device ChemistryAuditState* chemistryAudit [[buffer(9)]],
+    texture2d_array<float, access::read_write> basisAField [[texture(0)]],
+    texture2d_array<float, access::read_write> basisBField [[texture(1)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint tileCount = uniforms.width * uniforms.height * uniforms.worldCount;
-    uint moleculeCount = tileCount * moleculeSlotsPerTile;
-    if (gid < moleculeCount) {
-        uint destinationTile = gid / moleculeSlotsPerTile;
-        uint slot = gid % moleculeSlotsPerTile;
-        uint layerArea = uniforms.width * uniforms.height;
-        uint layer = destinationTile / layerArea;
-        uint localTile = destinationTile % layerArea;
-        uint2 coordinate = uint2(
-            localTile % uniforms.width,
-            localTile / uniforms.width
-        );
-        float2 uv = (float2(coordinate) + 0.5) /
-            float2(uniforms.width, uniforms.height);
-        bool containsPreviousWorld = all(uv >= float2(0.25)) && all(uv < float2(0.75));
-        if (containsPreviousWorld) {
-            float2 oldUV = (uv - 0.25) * 2.0;
-            uint2 sourceCoordinate = min(
-                uint2(oldUV * float2(uniforms.width, uniforms.height)),
-                uint2(uniforms.width - 1u, uniforms.height - 1u)
-            );
-            uint sourceTile = layer * layerArea +
-                ecologyTileIndex(sourceCoordinate, uniforms);
-            moleculesOut[gid] = moleculesIn[moleculeIndex(sourceTile, slot)];
-        } else {
+    if (gid >= tileCount) { return; }
+    uint layerArea = uniforms.width * uniforms.height;
+    uint layer = gid / layerArea;
+    uint localTile = gid % layerArea;
+    uint2 coordinate = uint2(
+        localTile % uniforms.width,
+        localTile / uniforms.width
+    );
+    float2 uv = (float2(coordinate) + 0.5) /
+        float2(uniforms.width, uniforms.height);
+    bool containsPreviousWorld = all(uv >= float2(0.25)) &&
+        all(uv < float2(0.75));
+    if (!containsPreviousWorld) {
+        for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
             uint seed = hash32(
-                destinationTile * 0x85ebca6bu ^ slot * 0xc2b2ae35u ^
+                gid * 0x85ebca6bu ^ slot * 0xc2b2ae35u ^
                 expansionLevel * 0x27d4eb2fu ^ uniforms.seed
             );
             uint speciesID = slot + 1u;
@@ -282,42 +268,116 @@ kernel void expandUnifiedEcology(
                 ? 0.00012 + random01(seed) * 0.00026
                 : random01(seed) * 0.000018;
             packet.freeEnergy = packet.amount * species.physical.x;
-            moleculesOut[gid] = packet;
+            moleculesOut[moleculeIndex(gid, slot)] = packet;
+            float compositionTotal = max(float(
+                species.basisA.x + species.basisA.y + species.basisA.z + species.basisA.w +
+                species.basisB.x + species.basisB.y + species.basisB.z
+            ), 1.0);
+            float compositionScale = packet.amount / compositionTotal;
+            for (uint basis = 0u; basis < 4u; ++basis) {
+                auditChemistry(
+                    chemistryAudit,
+                    &chemistryAudit->externalMatter[basis],
+                    float(species.basisA[basis]) * compositionScale
+                );
+            }
+            for (uint basis = 0u; basis < 3u; ++basis) {
+                auditChemistry(
+                    chemistryAudit,
+                    &chemistryAudit->externalMatter[basis + 4u],
+                    float(species.basisB[basis]) * compositionScale
+                );
+            }
+            auditChemistry(
+                chemistryAudit, &chemistryAudit->externalEnergy, packet.freeEnergy
+            );
         }
+        MaterialTileProperties material;
+        material.mechanics = float4(0.04, 0.94, 0.92, 0.02);
+        material.transport = float4(0.01, 0.0, 0.08, 0.0);
+        materialOut[gid] = material;
+        atomic_store_explicit(&originOut[gid], 0u, memory_order_relaxed);
+        return;
     }
-    if (gid < tileCount) {
-        uint layerArea = uniforms.width * uniforms.height;
-        uint layer = gid / layerArea;
-        uint localTile = gid % layerArea;
-        uint2 coordinate = uint2(
-            localTile % uniforms.width,
-            localTile / uniforms.width
+
+    uint2 source = expandedWorldSourceBase(
+        coordinate, uint2(uniforms.width, uniforms.height)
+    );
+    uint2 sourceCoordinates[4] = {
+        source,
+        min(source + uint2(1u, 0u), uint2(uniforms.width - 1u, uniforms.height - 1u)),
+        min(source + uint2(0u, 1u), uint2(uniforms.width - 1u, uniforms.height - 1u)),
+        min(source + uint2(1u, 1u), uint2(uniforms.width - 1u, uniforms.height - 1u))
+    };
+    uint sourceTiles[4];
+    float4 basisA = basisAField.read(coordinate, layer);
+    float4 basisB = basisBField.read(coordinate, layer);
+    MaterialTileProperties material;
+    material.mechanics = float4(0.0);
+    material.transport = float4(0.0);
+    uint newestOrigin = 0u;
+    for (uint sourceIndex = 0u; sourceIndex < 4u; ++sourceIndex) {
+        sourceTiles[sourceIndex] = layer * layerArea +
+            ecologyTileIndex(sourceCoordinates[sourceIndex], uniforms);
+        material.mechanics += materialIn[sourceTiles[sourceIndex]].mechanics * 0.25;
+        material.transport += materialIn[sourceTiles[sourceIndex]].transport * 0.25;
+        newestOrigin = max(
+            newestOrigin,
+            atomic_load_explicit(&originIn[sourceTiles[sourceIndex]], memory_order_relaxed)
         );
-        float2 uv = (float2(coordinate) + 0.5) /
-            float2(uniforms.width, uniforms.height);
-        bool containsPreviousWorld = all(uv >= float2(0.25)) && all(uv < float2(0.75));
-        if (containsPreviousWorld) {
-            float2 oldUV = (uv - 0.25) * 2.0;
-            uint2 sourceCoordinate = min(
-                uint2(oldUV * float2(uniforms.width, uniforms.height)),
-                uint2(uniforms.width - 1u, uniforms.height - 1u)
-            );
-            uint sourceTile = layer * layerArea +
-                ecologyTileIndex(sourceCoordinate, uniforms);
-            materialOut[gid] = materialIn[sourceTile];
-            atomic_store_explicit(
-                &originOut[gid],
-                atomic_load_explicit(&originIn[sourceTile], memory_order_relaxed),
-                memory_order_relaxed
-            );
-        } else {
-            MaterialTileProperties material;
-            material.mechanics = float4(0.04, 0.94, 0.92, 0.02);
-            material.transport = float4(0.01, 0.0, 0.08, 0.0);
-            materialOut[gid] = material;
-            atomic_store_explicit(&originOut[gid], 0u, memory_order_relaxed);
-        }
     }
+    for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
+        uint selectedSpecies = 0u;
+        float selectedAmount = -1.0;
+        for (uint sourceIndex = 0u; sourceIndex < 4u; ++sourceIndex) {
+            MoleculePacket candidate = moleculesIn[
+                moleculeIndex(sourceTiles[sourceIndex], slot)
+            ];
+            if (candidate.speciesID > 0u && candidate.amount > selectedAmount) {
+                selectedSpecies = candidate.speciesID;
+                selectedAmount = candidate.amount;
+            }
+        }
+        MoleculePacket merged = emptyMoleculePacket();
+        if (selectedSpecies > 0u && selectedSpecies < speciesRegistryCapacity) {
+            merged.speciesID = selectedSpecies;
+            merged.flags = speciesRegistry[selectedSpecies].flags;
+        }
+        for (uint sourceIndex = 0u; sourceIndex < 4u; ++sourceIndex) {
+            MoleculePacket candidate = moleculesIn[
+                moleculeIndex(sourceTiles[sourceIndex], slot)
+            ];
+            float amount = max(candidate.amount, 0.0) * 0.25;
+            float freeEnergy = max(candidate.freeEnergy, 0.0) * 0.25;
+            if (candidate.speciesID == selectedSpecies && merged.speciesID != 0u) {
+                merged.amount += amount;
+                merged.freeEnergy += freeEnergy;
+                continue;
+            }
+            if (amount <= 0.0 && freeEnergy <= 0.0) { continue; }
+            if (candidate.speciesID > 0u &&
+                candidate.speciesID < speciesRegistryCapacity) {
+                SpeciesDefinition displaced = speciesRegistry[candidate.speciesID];
+                float compositionTotal = max(float(
+                    displaced.basisA.x + displaced.basisA.y +
+                    displaced.basisA.z + displaced.basisA.w +
+                    displaced.basisB.x + displaced.basisB.y + displaced.basisB.z
+                ), 1.0);
+                float compositionScale = amount / compositionTotal;
+                basisA += float4(displaced.basisA) * compositionScale;
+                basisB.xyz += float3(displaced.basisB.xyz) * compositionScale;
+            } else {
+                basisA.x += amount;
+            }
+            auditChemistry(chemistryAudit, &chemistryAudit->heat, freeEnergy);
+            atomicAddSaturatingUInt(&chemistryAudit->sparseOverflowCount, 1u);
+        }
+        moleculesOut[moleculeIndex(gid, slot)] = merged;
+    }
+    materialOut[gid] = material;
+    atomic_store_explicit(&originOut[gid], newestOrigin, memory_order_relaxed);
+    basisAField.write(max(basisA, float4(0.0)), coordinate, layer);
+    basisBField.write(max(basisB, float4(0.0)), coordinate, layer);
 }
 
 inline float4 basisLaplacian(
@@ -393,8 +453,8 @@ inline void decomposeSparseOverflow(
     device ChemistryAuditState* audit
 ) {
     returnMoleculeToBasis(basisA, basisB, species, amount);
-    auditChemistry(&audit->heat, freeEnergy);
-    atomic_fetch_add_explicit(&audit->sparseOverflowCount, 1u, memory_order_relaxed);
+    auditChemistry(audit, &audit->heat, freeEnergy);
+    atomicAddSaturatingUInt(&audit->sparseOverflowCount, 1u);
 }
 
 inline void decomposeDisplacedPacket(
@@ -418,10 +478,8 @@ inline void decomposeDisplacedPacket(
             // total matter in the neutral basis and thermalize its energy
             // rather than silently deleting the packet or indexing the registry.
             basisA.x += amount;
-            auditChemistry(&audit->heat, freeEnergy);
-            atomic_fetch_add_explicit(
-                &audit->sparseOverflowCount, 1u, memory_order_relaxed
-            );
+            auditChemistry(audit, &audit->heat, freeEnergy);
+            atomicAddSaturatingUInt(&audit->sparseOverflowCount, 1u);
         }
     }
     packet = emptyMoleculePacket();
@@ -494,10 +552,18 @@ kernel void evolveWorldChemistry(
     basisA.y += externalMatter * 0.72;
     basisA.z += externalMatter * 0.44;
     basisB.w += externalEnergy;
-    auditChemistry(&chemistryAudit->externalMatter[0], externalMatter);
-    auditChemistry(&chemistryAudit->externalMatter[1], externalMatter * 0.72);
-    auditChemistry(&chemistryAudit->externalMatter[2], externalMatter * 0.44);
-    auditChemistry(&chemistryAudit->externalEnergy, externalEnergy);
+    auditChemistry(
+        chemistryAudit, &chemistryAudit->externalMatter[0], externalMatter
+    );
+    auditChemistry(
+        chemistryAudit, &chemistryAudit->externalMatter[1], externalMatter * 0.72
+    );
+    auditChemistry(
+        chemistryAudit, &chemistryAudit->externalMatter[2], externalMatter * 0.44
+    );
+    auditChemistry(
+        chemistryAudit, &chemistryAudit->externalEnergy, externalEnergy
+    );
 
     float moisture = saturate(environment.z);
     float temperature = clamp(environment.w, 0.0, 1.0);
@@ -515,13 +581,17 @@ kernel void evolveWorldChemistry(
         basisB.y += ventMatter;
         basisB.w += ventEnergy;
         temperature = saturate(temperature + eventInfluence * 0.006);
-        auditChemistry(&chemistryAudit->externalMatter[5], ventMatter);
-        auditChemistry(&chemistryAudit->externalEnergy, ventEnergy);
+        auditChemistry(
+            chemistryAudit, &chemistryAudit->externalMatter[5], ventMatter
+        );
+        auditChemistry(
+            chemistryAudit, &chemistryAudit->externalEnergy, ventEnergy
+        );
     } else if (eventKind == 3u) { // fire: free energy becomes heat, matter remains
         float burned = min(basisB.w, eventInfluence * uniforms.dt * 0.000040);
         basisB.w -= burned;
         temperature = saturate(temperature + burned * 240.0);
-        auditChemistry(&chemistryAudit->heat, burned);
+        auditChemistry(chemistryAudit, &chemistryAudit->heat, burned);
     } else { // bloom: only increases reaction opportunity
         moisture = saturate(moisture + eventInfluence * 0.002);
     }
@@ -731,7 +801,7 @@ kernel void evolveWorldChemistry(
     );
     basisA = max(basisA, float4(0.0));
     basisB = max(basisB, float4(0.0));
-    auditChemistry(&chemistryAudit->heat, packetHeat);
+    auditChemistry(chemistryAudit, &chemistryAudit->heat, packetHeat);
     basisAOut.write(basisA, coordinate, layer);
     basisBOut.write(basisB, coordinate, layer);
     environmentOut.write(environment, coordinate, layer);
@@ -855,9 +925,7 @@ kernel void buildTileCellLists(
     if (offset < tileCellCapacity) {
         tileCellIndices[tile * tileCellCapacity + offset] = cellIndex;
     } else {
-        atomic_fetch_add_explicit(
-            &chemistryAudit->tileCellOverflowCount, 1u, memory_order_relaxed
-        );
+        atomicAddSaturatingUInt(&chemistryAudit->tileCellOverflowCount, 1u);
     }
 }
 
@@ -981,9 +1049,7 @@ inline bool initializeGenomePages(
     uint pageCount = 8u;
     uint firstPage = reserveGenomePageRange(&genomeArenaState[0], pageCount);
     if (firstPage >= genomePageCapacity) {
-        atomic_fetch_add_explicit(
-            &chemistryAudit->skippedGenomeMutationCount, 1u, memory_order_relaxed
-        );
+        atomicAddSaturatingUInt(&chemistryAudit->skippedGenomeMutationCount, 1u);
         return false;
     }
     for (uint pageOffset = 0u; pageOffset < pageCount; ++pageOffset) {
@@ -1229,9 +1295,7 @@ inline bool createPhysicalProtocell(
         lineageEvents, identityCounters, 1u, founder,
         programExpressionCaches[programIndex], resonance, cellAggregates[owner], step
     );
-    atomic_fetch_add_explicit(
-        &chemistryAudit->protocellOriginCount, 1u, memory_order_relaxed
-    );
+    atomicAddSaturatingUInt(&chemistryAudit->protocellOriginCount, 1u);
     return true;
 }
 
@@ -1447,12 +1511,20 @@ kernel void injectProtocell(
     basisA += suppliedA;
     basisB += suppliedB;
     for (uint index = 0u; index < 4u; ++index) {
-        auditChemistry(&chemistryAudit->externalMatter[index], suppliedA[index]);
+        auditChemistry(
+            chemistryAudit,
+            &chemistryAudit->externalMatter[index],
+            suppliedA[index]
+        );
     }
     for (uint index = 0u; index < 3u; ++index) {
-        auditChemistry(&chemistryAudit->externalMatter[index + 4u], suppliedB[index]);
+        auditChemistry(
+            chemistryAudit,
+            &chemistryAudit->externalMatter[index + 4u],
+            suppliedB[index]
+        );
     }
-    auditChemistry(&chemistryAudit->externalEnergy, suppliedB.w);
+    auditChemistry(chemistryAudit, &chemistryAudit->externalEnergy, suppliedB.w);
     MoleculePacket localPackets[moleculeSlotsPerTile];
     for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
         localPackets[slot] = molecules[moleculeIndex(tile, slot)];
@@ -1470,19 +1542,25 @@ kernel void injectProtocell(
         float compositionScale = suppliedMolecules[slot] / compositionTotal;
         for (uint index = 0u; index < 4u; ++index) {
             auditChemistry(
+                chemistryAudit,
                 &chemistryAudit->externalMatter[index],
                 float(suppliedSpecies.basisA[index]) * compositionScale
             );
         }
         for (uint index = 0u; index < 3u; ++index) {
             auditChemistry(
+                chemistryAudit,
                 &chemistryAudit->externalMatter[index + 4u],
                 float(suppliedSpecies.basisB[index]) * compositionScale
             );
         }
         float suppliedMoleculeEnergy = suppliedMolecules[slot] *
             suppliedSpecies.physical.x;
-        auditChemistry(&chemistryAudit->externalEnergy, suppliedMoleculeEnergy);
+        auditChemistry(
+            chemistryAudit,
+            &chemistryAudit->externalEnergy,
+            suppliedMoleculeEnergy
+        );
         localPackets[slot].speciesID = speciesID;
         localPackets[slot].flags = suppliedSpecies.flags;
         localPackets[slot].amount += suppliedMolecules[slot];

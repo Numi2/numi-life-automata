@@ -230,7 +230,10 @@ kernel void accumulateSimulationInvariants(
                 atomic_fetch_add_explicit(&scratch[2], 1, memory_order_relaxed);
                 atomic_fetch_add_explicit(
                     &scratch[3],
-                    int(clamp(junctionStates[gid].load * 1048576.0, 0.0, 1048576.0)),
+                    int(clamp(
+                        junctionStates[gid].load * float(energyAuditScale),
+                        0.0, float(energyAuditScale)
+                    )),
                     memory_order_relaxed
                 );
             }
@@ -277,7 +280,10 @@ kernel void finalizeSimulationInvariants(
     }
     int energyResidual = atomic_load_explicit(&energyAudit[9], memory_order_relaxed);
     uint absoluteEnergyResidual = uint(abs(energyResidual));
-    if (absoluteEnergyResidual > 256u) {
+    int sharingResidual = atomic_load_explicit(&energyAudit[8], memory_order_relaxed);
+    uint absoluteSharingResidual = uint(abs(sharingResidual));
+    if (absoluteEnergyResidual > energyAuditResidualTolerance ||
+        absoluteSharingResidual > energySharingResidualTolerance) {
         recordInvariantFailure(
             invariantState, invariantEnergyDrift, 4u, uniforms.step
         );
@@ -684,15 +690,11 @@ kernel void divideAndReduceOrganismCells(
                 )
                 : 0.50;
             float parentMaterialShare = 1.0 - childMaterialShare;
-            // Existing sheath material is divided with the two new surfaces;
-            // cytokinesis cannot duplicate a mature integument or appendage for free.
-            parent.boundaryDynamics.xy *= sqrt(parentMaterialShare);
-            child.boundaryDynamics.xy *= sqrt(childMaterialShare);
-            parent.boundaryDynamics.z *= parentMaterialShare;
-            child.boundaryDynamics.z *= childMaterialShare;
+            // Coverage, tension, protrusion state, and membrane properties are
+            // intensive surface state. The polygon area/perimeter and cellular
+            // stores below already partition the extensive material. Scaling
+            // these values as well weakened every generation exponentially.
             child.boundaryDynamics.w = fract(parent.boundaryDynamics.w + 0.5);
-            parent.membraneProperties *= parentMaterialShare;
-            child.membraneProperties *= childMaterialShare;
             float preDivisionATP = parent.physiology.x;
             float preDivisionBiomass = parent.physiology.y;
             parent.physiology.x = preDivisionATP * parentMaterialShare;
@@ -940,6 +942,10 @@ kernel void divideAndReduceOrganismCells(
                         childIdentity.identityPadding2 = 0u;
                         childProgramAgent = inheritedAgent;
                     }
+                } else {
+                    atomicAddSaturatingUInt(
+                        &chemistryAudit->skippedGenomeMutationCount, 1u
+                    );
                 }
             }
             bool mutationDue = !programCrossbred && accrueProgramMutationHazard(
@@ -1000,6 +1006,10 @@ kernel void divideAndReduceOrganismCells(
                         childIdentity.programGeneration = parentIdentity.programGeneration;
                         childProgramAgent = inheritedAgent;
                     }
+                } else {
+                    atomicAddSaturatingUInt(
+                        &chemistryAudit->skippedGenomeMutationCount, 1u
+                    );
                 }
             }
             if (!childOwnsProgramReference && !retainGenomeHeaderSlot(

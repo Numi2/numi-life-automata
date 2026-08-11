@@ -852,10 +852,17 @@ kernel void reassignCellComponents(
     CellState cell = cells[gid];
     float scale = cellWorldScale(uniforms);
     float2 worldPosition = cellWorldPosition(oldAgent, cell.position, uniforms);
-    float2 worldVelocity = rotateTissueToWorld(cell.velocity, oldAgent);
+    // A cell velocity is stored in tissue coordinates and scaled into world
+    // units. Ownership changes only its reference frame; include both component
+    // translations so fission/fusion cannot inject or erase momentum.
+    float2 worldVelocity = oldAgent.velocity +
+        rotateTissueToWorld(cell.velocity, oldAgent) * scale;
     cell.position = rotateWorldToTissue(worldPosition - newAgent.position, newAgent) /
         max(scale, 0.0000001);
-    cell.velocity = rotateWorldToTissue(worldVelocity, newAgent);
+    cell.velocity = rotateWorldToTissue(
+        (worldVelocity - newAgent.velocity) / max(scale, 0.0000001),
+        newAgent
+    );
     cell.tissueForce = float4(0.0);
     // Body-level fission completes at the exposed cleavage region. Only cells
     // carrying the local release state receive the initial climax; junction

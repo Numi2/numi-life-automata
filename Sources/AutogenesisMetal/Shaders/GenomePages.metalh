@@ -241,9 +241,7 @@ inline bool publishGenomeOverlay(
         &arenaState[0], allocatedPageCount
     );
     if (pageIndex >= genomePageCapacity) {
-        atomic_fetch_add_explicit(
-            &chemistryAudit->skippedGenomeMutationCount, 1u, memory_order_relaxed
-        );
+        atomicAddSaturatingUInt(&chemistryAudit->skippedGenomeMutationCount, 1u);
         return false;
     }
     float4 inheritedPayload[15];

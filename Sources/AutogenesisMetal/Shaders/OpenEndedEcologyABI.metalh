@@ -110,4 +110,5 @@ struct ChemistryAuditState {
     atomic_uint tileCellOverflowCount;
     atomic_uint skippedGenomeMutationCount;
     atomic_uint protocellOriginCount;
+    atomic_uint auditSaturationCount;
 };

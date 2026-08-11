@@ -540,8 +540,7 @@ kernel void evolveAgents(
     }
 
     float forceMagnitude = length(localForce);
-    float2 forceDirection = forceMagnitude > 0.000001
-        ? normalize(worldForce) : tissueHeading(agent);
+    float2 forceDirection = normalizedOr(worldForce, tissueHeading(agent));
     agent.behavior = float4(
         forceDirection * saturate(forceMagnitude * 680.0),
         saturate(cellAggregate.trophic.y * 1200.0),

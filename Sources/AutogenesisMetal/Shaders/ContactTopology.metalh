@@ -86,16 +86,21 @@ kernel void clearActiveCellContactEffects(
 /// lets several attackers or donors spend the same source material. These
 /// budgets turn the snapshot into a once-only settlement without serializing
 /// the complete contact solver.
-inline float claimCellContactBudget(
+inline int cellContactAmountToFixed(float amount) {
+    return int(floor(max(amount, 0.0) * float(cellContactScalarScale)));
+}
+
+inline float cellContactAmountFromFixed(int amount) {
+    return float(max(amount, 0)) / float(cellContactScalarScale);
+}
+
+inline int claimCellContactBudgetFixed(
     device atomic_int* contactEffects,
     uint cellIndex,
     uint budgetChannel,
-    float requestedAmount
+    int requested
 ) {
-    int requested = int(floor(
-        max(requestedAmount, 0.0) * float(cellContactScalarScale)
-    ));
-    if (requested <= 0) { return 0.0; }
+    if (requested <= 0) { return 0; }
     device atomic_int* budget = &contactEffects[
         cellIndex * cellContactEffectChannelCount + budgetChannel
     ];
@@ -107,22 +112,19 @@ inline float claimCellContactBudget(
             budget, &expected, observed - claimed,
             memory_order_relaxed, memory_order_relaxed
         )) {
-            return float(claimed) / float(cellContactScalarScale);
+            return claimed;
         }
         observed = expected;
     }
-    return 0.0;
+    return 0;
 }
 
-inline void returnCellContactBudget(
+inline void returnCellContactBudgetFixed(
     device atomic_int* contactEffects,
     uint cellIndex,
     uint budgetChannel,
-    float returnedAmount
+    int returned
 ) {
-    int returned = int(floor(
-        max(returnedAmount, 0.0) * float(cellContactScalarScale)
-    ));
     if (returned <= 0) { return; }
     atomic_fetch_add_explicit(
         &contactEffects[cellIndex * cellContactEffectChannelCount + budgetChannel],
@@ -1026,23 +1028,26 @@ kernel void resolveMembraneContacts(
                                         0.018 + sexualScore * 0.034,
                                         min(donorCapacity, gestatorCapacity) * 0.38
                                     );
-                                    float sourceReservation = claimCellContactBudget(
+                                    int sourceReservationFixed = claimCellContactBudgetFixed(
                                         contactEffects, donorIndex,
                                         reproductiveSourceBudgetChannel,
-                                        requestedMaterial
+                                        cellContactAmountToFixed(requestedMaterial)
                                     );
-                                    float contributedMaterial = claimCellContactBudget(
+                                    int contributedMaterialFixed = claimCellContactBudgetFixed(
                                         contactEffects, gestatorIndex,
                                         reproductiveReceiverBudgetChannel,
-                                        sourceReservation
+                                        sourceReservationFixed
                                     );
-                                    if (contributedMaterial < sourceReservation) {
-                                        returnCellContactBudget(
+                                    if (contributedMaterialFixed < sourceReservationFixed) {
+                                        returnCellContactBudgetFixed(
                                             contactEffects, donorIndex,
                                             reproductiveSourceBudgetChannel,
-                                            sourceReservation - contributedMaterial
+                                            sourceReservationFixed - contributedMaterialFixed
                                         );
                                     }
+                                    float contributedMaterial = cellContactAmountFromFixed(
+                                        contributedMaterialFixed
+                                    );
                                     if (contributedMaterial > 0.0) {
                                         reproductivePleasureA = 1.0;
                                         reproductivePleasureB = 1.0;
@@ -1064,17 +1069,25 @@ kernel void resolveMembraneContacts(
                                 ? normalize(cell.tissueGeometry.xy) : localDirection;
                             float2 boundaryB = length(other.tissueGeometry.xy) > 0.0001
                                 ? normalize(other.tissueGeometry.xy) : otherLocalDirection;
-                            float attackConstructionA = cell.tissueGeometry.z *
-                                saturate(cell.membraneProperties.x) *
-                                pow(saturate(dot(localDirection, boundaryA)), 6.0);
-                            float attackConstructionB = other.tissueGeometry.z *
-                                saturate(other.membraneProperties.x) *
-                                pow(saturate(dot(otherLocalDirection, boundaryB)), 6.0);
-                            float contactToughnessA = cell.tissueGeometry.z *
+                            float attackConstructionA = cell.tissueGeometry.z * sqrt(
                                 saturate(cell.membraneProperties.y) *
-                                pow(saturate(dot(localDirection, boundaryA)), 2.0);
-                            float contactToughnessB = other.tissueGeometry.z *
+                                saturate(cell.membraneChemistry.w)
+                            ) *
+                                pow(saturate(dot(localDirection, boundaryA)), 6.0);
+                            float attackConstructionB = other.tissueGeometry.z * sqrt(
                                 saturate(other.membraneProperties.y) *
+                                saturate(other.membraneChemistry.w)
+                            ) *
+                                pow(saturate(dot(otherLocalDirection, boundaryB)), 6.0);
+                            float contactToughnessA = cell.tissueGeometry.z * (
+                                saturate(cell.membraneProperties.x) * 0.34 +
+                                saturate(cell.membraneProperties.z) * 0.66
+                            ) *
+                                pow(saturate(dot(localDirection, boundaryA)), 2.0);
+                            float contactToughnessB = other.tissueGeometry.z * (
+                                saturate(other.membraneProperties.x) * 0.34 +
+                                saturate(other.membraneProperties.z) * 0.66
+                            ) *
                                 pow(saturate(dot(otherLocalDirection, boundaryB)), 2.0);
                             float collectiveDefenseA = saturate(
                                 cell.boundaryDynamics.x *
@@ -1121,34 +1134,44 @@ kernel void resolveMembraneContacts(
                                 localFailureB * 0.78 + freshDamageB * 0.42
                             ) * other.tissueGeometry.z *
                                 (1.0 - collectiveDefenseB * 0.84);
-                            float sourceReservationA = claimCellContactBudget(
+                            int sourceReservationAFixed = claimCellContactBudgetFixed(
                                 contactEffects, gid, trophicSourceBudgetChannel,
-                                contactStrength * attackB * breachA * 0.012
+                                cellContactAmountToFixed(
+                                    contactStrength * attackB * breachA * 0.012
+                                )
                             );
-                            float transferFromA = claimCellContactBudget(
+                            int transferFromAFixed = claimCellContactBudgetFixed(
                                 contactEffects, otherIndex,
-                                trophicReceiverBudgetChannel, sourceReservationA
+                                trophicReceiverBudgetChannel, sourceReservationAFixed
                             );
-                            if (transferFromA < sourceReservationA) {
-                                returnCellContactBudget(
+                            if (transferFromAFixed < sourceReservationAFixed) {
+                                returnCellContactBudgetFixed(
                                     contactEffects, gid, trophicSourceBudgetChannel,
-                                    sourceReservationA - transferFromA
+                                    sourceReservationAFixed - transferFromAFixed
                                 );
                             }
-                            float sourceReservationB = claimCellContactBudget(
+                            int sourceReservationBFixed = claimCellContactBudgetFixed(
                                 contactEffects, otherIndex, trophicSourceBudgetChannel,
-                                contactStrength * attackA * breachB * 0.012
+                                cellContactAmountToFixed(
+                                    contactStrength * attackA * breachB * 0.012
+                                )
                             );
-                            float transferFromB = claimCellContactBudget(
+                            int transferFromBFixed = claimCellContactBudgetFixed(
                                 contactEffects, gid,
-                                trophicReceiverBudgetChannel, sourceReservationB
+                                trophicReceiverBudgetChannel, sourceReservationBFixed
                             );
-                            if (transferFromB < sourceReservationB) {
-                                returnCellContactBudget(
+                            if (transferFromBFixed < sourceReservationBFixed) {
+                                returnCellContactBudgetFixed(
                                     contactEffects, otherIndex, trophicSourceBudgetChannel,
-                                    sourceReservationB - transferFromB
+                                    sourceReservationBFixed - transferFromBFixed
                                 );
                             }
+                            float transferFromA = cellContactAmountFromFixed(
+                                transferFromAFixed
+                            );
+                            float transferFromB = cellContactAmountFromFixed(
+                                transferFromBFixed
+                            );
                             if (!sameOwner && attackA + attackB > 0.000001) {
                                 bool breached = (attackB > 0.0 && breachA > 0.05) ||
                                     (attackA > 0.0 && breachB > 0.05);
@@ -1161,18 +1184,22 @@ kernel void resolveMembraneContacts(
                                     atomic_fetch_add_explicit(
                                         &identityCounters[8], 1u, memory_order_relaxed
                                     );
-                                    atomic_fetch_add_explicit(
+                                    atomicAddSaturatingUInt(
                                         &identityCounters[9],
-                                        uint(min(transferred * 1048576.0, 4294967295.0)),
-                                        memory_order_relaxed
+                                        uint(min(
+                                            transferred * interactionAuditScale,
+                                            4294967040.0
+                                        ))
                                     );
                                 }
                                 float deflected = contactStrength *
                                     (attackB * defenseA + attackA * defenseB);
-                                atomic_fetch_add_explicit(
+                                atomicAddSaturatingUInt(
                                     &identityCounters[10],
-                                    uint(min(deflected * 1048576.0, 4294967295.0)),
-                                    memory_order_relaxed
+                                    uint(min(
+                                        deflected * interactionAuditScale,
+                                        4294967040.0
+                                    ))
                                 );
                             }
                             float trophicA = transferFromB * 0.68 - transferFromA;

@@ -48,7 +48,11 @@ constant uint regulatoryStateChannelCount = 12u;
 constant uint membraneVertexCount = 12u;
 constant uint membraneRenderSubdivision = 3u;
 constant uint membraneRenderSegmentCount = membraneVertexCount * membraneRenderSubdivision;
-constant uint lineageEventCapacity = 4096u;
+// A division can publish a birth, mutation, and recombination record, while a
+// topology pass can publish one component record per cell.  Keeping four slots
+// per physical cell prevents two live GPU writers in one dispatch interval from
+// aliasing the same ring entry before the observer can consume it.
+constant uint lineageEventCapacity = maxCellCount * 4u;
 constant uint cellSpatialHashBucketCount = 16384u;
 constant uint cellSpatialHashAxisResolution = 128u;
 // A twelve-vertex membrane has at most one unoccluded nearest contact per
@@ -88,8 +92,18 @@ constant uint emptySpatialHashEntry = 0xffffffffu;
 constant int mechanicalForceScale = 1048576;
 constant int cellContactForceScale = 268435456;
 constant int cellContactScalarScale = 1048576;
-constant uint substrateFixedScale = 268435456u;
-constant int energyAuditScale = 1048576;
+// Exchange channels are accumulated per world tile.  The previous Q28 format
+// wrapped at only 16 units, so a dense local death/recycling event could turn a
+// positive export into a tiny value. Q22 covers 1,024 units while still resolving
+// the smallest developmental secretion channels.
+constant uint substrateFixedScale = 4194304u;
+// Energy audits reduce over all 9,216 cells.  Q16 covers the full-population
+// storage bound without signed 32-bit wrap and retains 15-micro-unit precision.
+constant int energyAuditScale = 65536;
+constant uint energyAuditResidualTolerance = 16u;
+constant uint energySharingResidualTolerance = 64u;
+constant float interactionAuditScale = 1048576.0;
+constant float chemistryAuditScale = 1048576.0;
 constant uint invariantStateCount = 20u;
 constant uint invariantScratchHeaderCount = 16u;
 constant uint invariantOwnerRootOffset = invariantScratchHeaderCount + maxGenomeHeaderCount;
@@ -480,6 +494,83 @@ inline float2 normalizedOr(float2 value, float2 fallback) {
     return magnitudeSquared > 0.000000000001 && all(isfinite(value))
         ? value * rsqrt(magnitudeSquared)
         : fallback;
+}
+
+/// Map a destination texel in the central half of an expanded world to the
+/// lower-left texel of its exact 2 x 2 source block. Deriving this from texel
+/// centres shifts every block by one source texel, drops the old zero edge,
+/// and duplicates the far edge.
+inline uint2 expandedWorldSourceBase(uint2 destination, uint2 dimensions) {
+    uint2 centralOrigin = dimensions / 4u;
+    return min(
+        (destination - centralOrigin) * 2u,
+        dimensions - uint2(2u)
+    );
+}
+
+inline void atomicAddSaturatingUInt(
+    device atomic_uint* destination,
+    uint increment
+) {
+    if (increment == 0u) { return; }
+    uint observed = atomic_load_explicit(destination, memory_order_relaxed);
+    while (observed != 0xffffffffu) {
+        uint desired = observed > 0xffffffffu - increment
+            ? 0xffffffffu : observed + increment;
+        uint expected = observed;
+        if (atomic_compare_exchange_weak_explicit(
+            destination, &expected, desired,
+            memory_order_relaxed, memory_order_relaxed
+        )) { return; }
+        observed = expected;
+    }
+}
+
+inline bool atomicAddSaturatingInt(
+    device atomic_int* destination,
+    int increment
+) {
+    if (increment == 0) { return false; }
+    constexpr int upperLimit = 2147483647;
+    constexpr int lowerLimit = -2147483647;
+    int observed = atomic_load_explicit(destination, memory_order_relaxed);
+    while (true) {
+        int desired;
+        if (increment > 0 && observed > upperLimit - increment) {
+            desired = upperLimit;
+        } else if (increment < 0 && observed < lowerLimit - increment) {
+            desired = lowerLimit;
+        } else {
+            desired = observed + increment;
+        }
+        bool saturated = desired == upperLimit || desired == lowerLimit;
+        if (desired == observed) { return saturated; }
+        int expected = observed;
+        if (atomic_compare_exchange_weak_explicit(
+            destination, &expected, desired,
+            memory_order_relaxed, memory_order_relaxed
+        )) { return saturated; }
+        observed = expected;
+    }
+}
+
+inline void auditChemistry(
+    device ChemistryAuditState* audit,
+    device atomic_int* destination,
+    float value
+) {
+    if (!isfinite(value)) {
+        atomicAddSaturatingUInt(&audit->auditSaturationCount, 1u);
+        return;
+    }
+    float scaled = value * chemistryAuditScale;
+    bool inputClamped = scaled < -2147480000.0 || scaled > 2147480000.0;
+    int fixed = int(clamp(
+        scaled, -2147480000.0, 2147480000.0
+    ));
+    if (inputClamped || atomicAddSaturatingInt(destination, fixed)) {
+        atomicAddSaturatingUInt(&audit->auditSaturationCount, 1u);
+    }
 }
 
 inline float4 unpackEmbodiedMemory(uint2 packed) {

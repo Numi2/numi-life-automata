@@ -1295,8 +1295,8 @@ extension EvolutionRenderer {
             membraneBreachSamples: counters[6],
             resistedAttackSamples: counters[7],
             trophicTransferSamples: counters[8],
-            transferredEnergy: Double(counters[9]) / Self.energyAuditScale,
-            deflectedAttackImpulse: Double(counters[10]) / Self.energyAuditScale,
+            transferredEnergy: Double(counters[9]) / Self.interactionAuditScale,
+            deflectedAttackImpulse: Double(counters[10]) / Self.interactionAuditScale,
             fusionContactSamples: counters[11],
             successfulFusionContactSamples: counters[12],
             fusionEligibleContactSamples: counters[16],
@@ -2136,7 +2136,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let invariantScratchHeaderCount = 16
     private static let invariantScratchCount = invariantScratchHeaderCount +
         maxGenomeHeaderCount + maxAgentCount
-    private static let lineageEventCapacity = 4_096
+    private static let lineageEventCapacity = maxCellCount * 4
     private static let agentObservationRingSize = 3
     private static let agentObservationIntervalFrames: UInt64 = 6
     private static let trackedAgentObservationIntervalFrames: UInt64 = 2
@@ -2144,7 +2144,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let metricCount = 46
     private static let metricScale = 4096.0
     private static let quantumMetricScale = 1_000_000_000.0
-    private static let energyAuditScale = 1_048_576.0
+    private static let energyAuditScale = 65_536.0
+    private static let interactionAuditScale = 1_048_576.0
     private static let maximumInteractiveInFlightSubmissions = 2
     private static let maximumInteractiveStepsPerSubmission = 24
     private static let maximumWorldExpansionsPerSubmission = 1
@@ -4309,6 +4310,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setTexture(reactionDevelopmentalField, index: 9)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 0)
         encoder.setBytes(&expansionLevel, length: MemoryLayout<UInt32>.stride, index: 1)
+        encoder.setBuffer(chemistryAudit, offset: 0, index: 2)
         dispatchWorlds(encoder, pipeline: expandWorldPipeline)
         encoder.endEncoding()
         swapWorldReactionState()
@@ -4329,10 +4331,13 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         ecologyEncoder.setBytes(
             &expansionLevel, length: MemoryLayout<UInt32>.stride, index: 7
         )
+        ecologyEncoder.setBuffer(speciesRegistry, offset: 0, index: 8)
+        ecologyEncoder.setBuffer(chemistryAudit, offset: 0, index: 9)
+        ecologyEncoder.setTexture(state, index: 0)
+        ecologyEncoder.setTexture(ecology, index: 1)
         ecologyEncoder.dispatchThreads(
             MTLSize(
-                width: Self.gridSize * Self.gridSize * Self.worldCount *
-                    Self.moleculeSlotsPerTile,
+                width: Self.gridSize * Self.gridSize * Self.worldCount,
                 height: 1,
                 depth: 1
             ),
@@ -4660,6 +4665,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(agentState, offset: 0, index: 6)
         encoder.setBuffer(programLineageRecords, offset: 0, index: 7)
         encoder.setBuffer(programSlots, offset: 0, index: 8)
+        encoder.setBuffer(programExpressionCaches, offset: 0, index: 9)
         dispatchCells(encoder, pipeline: evolveMembranePipeline)
         encoder.memoryBarrier(resources: [reactionCellState, membraneVertices])
         swap(&cellState, &reactionCellState)
@@ -6496,9 +6502,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             latestSnapshot.resistedAttackSamples = identityCounterValues[7]
             latestSnapshot.trophicTransferSamples = identityCounterValues[8]
             latestSnapshot.transferredEnergy =
-                Double(identityCounterValues[9]) / Self.energyAuditScale
+                Double(identityCounterValues[9]) / Self.interactionAuditScale
             latestSnapshot.deflectedAttackImpulse =
-                Double(identityCounterValues[10]) / Self.energyAuditScale
+                Double(identityCounterValues[10]) / Self.interactionAuditScale
             latestSnapshot.fusionContactSamples = identityCounterValues[11]
             latestSnapshot.successfulFusionContactSamples = identityCounterValues[12]
             latestSnapshot.meanChronologicalAge = meanLifecycle.x

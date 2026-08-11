@@ -341,9 +341,12 @@ kernel void evolveOrganismCells(
     }
 
     float inverseMixedContactWeight = 1.0 / max(mixedContactWeight, 0.0001);
+    // Every junction contributes an equal and opposite potential to its two
+    // cells. Per-cell normalization by total conductance broke that symmetry in
+    // irregular networks and created or destroyed ATP. Preserve the pairwise
+    // antisymmetric sum; the conductance already bounds each contribution.
     float atpSharingFlux = sharingContactWeight > 0.0001
-        ? clamp(atpSharingPotential / sharingContactWeight * 0.00034, -0.0014, 0.0014)
-        : 0.0;
+        ? atpSharingPotential * 0.00034 : 0.0;
     float incomingRejection = mixedContactWeight > 0.0001
         ? saturate(incomingRejectionTotal * inverseMixedContactWeight) : 0.0;
     float outgoingRejection = mixedContactWeight > 0.0001
@@ -1282,9 +1285,22 @@ kernel void evolveOrganismCells(
     float catalyticOutput = cellularCatalyticMoleculeSecretion * expenseScale;
     float counterOutput = cellularReactiveMoleculeNeutralization * expenseScale;
     // These five channels become ordinary extracellular molecule packets on
-    // the next chemistry pass. Remodeling is a paid control flux, not matter.
+    // the next chemistry pass. Reserve their matter before publishing any
+    // fixed-point exchange so no cell can emit more physical mass than it owns.
+    // Remodeling is a paid control flux, not matter.
     float deferredSecretedMass = signalAOutput + signalBOutput + matrixOutput +
         catalyticOutput + counterOutput;
+    float deferredMatterCapacity = max(
+        cell.physiology.y - settledSecretedMass - 0.02, 0.0
+    );
+    float deferredMatterScale = deferredSecretedMass > 0.0
+        ? min(deferredMatterCapacity / deferredSecretedMass, 1.0) : 1.0;
+    signalAOutput *= deferredMatterScale;
+    signalBOutput *= deferredMatterScale;
+    matrixOutput *= deferredMatterScale;
+    catalyticOutput *= deferredMatterScale;
+    counterOutput *= deferredMatterScale;
+    deferredSecretedMass *= deferredMatterScale;
     addEnergyExchange(
         cellEnergyExchange, energyTileBase, 2u, signalAOutput
     );
@@ -1396,6 +1412,8 @@ kernel void evolveOrganismCells(
     float exportedBiomassEnergy = releasedBiomassEnergy - biomassCatabolicATP;
     float biomassRecycledMatterEnergy = exportedBiomassEnergy * 0.64;
     float biomassHeat = exportedBiomassEnergy * 0.36;
+    float secretedBiomassEnergy =
+        (settledSecretedMass + deferredSecretedMass) * 0.18;
     atp = min(atp + biomassCatabolicATP, 1.2);
     if (releasedBiomassEnergy > 0.0) {
         addEnergyExchange(
@@ -1403,14 +1421,23 @@ kernel void evolveOrganismCells(
         );
         addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, biomassHeat);
     }
+    if (secretedBiomassEnergy > 0.0) {
+        // Molecule free energy is paid separately as committed chemical work.
+        // The lower-grade energy stored in exported biomass is thermalized so
+        // cellular storage loss has a matching environmental destination.
+        addEnergyExchange(
+            cellEnergyExchange, energyTileBase, 1u, secretedBiomassEnergy
+        );
+    }
     float storageCorrection = (atp - atpBeforeBiomass) +
         (biomass - cell.physiology.y) * 0.18;
     addEnergyAudit(energyAudit, 2u, storageCorrection);
-    addEnergyAudit(energyAudit, 6u, biomassHeat);
+    addEnergyAudit(energyAudit, 6u, biomassHeat + secretedBiomassEnergy);
     addEnergyAudit(energyAudit, 7u, biomassRecycledMatterEnergy);
     addEnergyAudit(
         energyAudit, 9u,
-        -(storageCorrection + biomassHeat + biomassRecycledMatterEnergy)
+        -(storageCorrection + biomassHeat + secretedBiomassEnergy +
+            biomassRecycledMatterEnergy)
     );
     float contactInhibition = saturate(contactCount / (3.6 + cell.phenotype.x * 1.8));
     float unconstrainedCycleDrive = cellCycleDrive(
@@ -1653,6 +1680,7 @@ kernel void evolveCellMembranes(
     device const AgentState* agents [[buffer(6)]],
     device const ProgramLineageRecord* programLineageRecords [[buffer(7)]],
     device const ProgramSlotState* programSlots [[buffer(8)]],
+    device const ProgramExpressionCache* programExpressionCaches [[buffer(9)]],
     device const atomic_uint* activeCellCount [[buffer(29)]],
     device const uint* activeCellIndices [[buffer(30)]],
     uint compactIndex [[thread_position_in_grid]]
@@ -1716,7 +1744,7 @@ kernel void evolveCellMembranes(
     );
     float membraneThickness = exposure * saturate(cell.membraneProperties.x);
     float membraneStiffness = exposure * saturate(cell.membraneProperties.y);
-    float membraneConductivity = exposure * saturate(cell.membraneProperties.z);
+    float membraneConductivity = exposure * saturate(cell.membraneChemistry.y);
     float membraneAdhesion = exposure * saturate(cell.membraneProperties.w);
     float integumentCoverage = saturate(cell.boundaryDynamics.x);
     float integumentTension = saturate(cell.boundaryDynamics.y);
@@ -1963,7 +1991,10 @@ kernel void evolveCellMembranes(
         cell.physiology.x,
         cell.physiology.w,
         cell.phenotype.x,
-        1.0
+        clamp(
+            programExpressionCaches[identity.programIndex].mechanochemistryB.w,
+            0.0, 1.80
+        )
     );
     cell.tissueGeometry = float4(
         previousBoundaryNormal, previousExposure, saturate(detachmentScore)

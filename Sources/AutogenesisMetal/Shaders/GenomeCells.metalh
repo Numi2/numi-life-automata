@@ -322,9 +322,12 @@ inline void addMetric(
     uint laneIndex
 ) {
     uint fixedValue = uint(clamp(value, 0.0, 1.0) * metricScale);
-    uint simdValue = simd_sum(fixedValue);
-    if (laneIndex == 0u) {
-        atomic_fetch_add_explicit(&metrics[metric], simdValue, memory_order_relaxed);
+    // A measurement group can be nonuniform at a world edge. A simd reduction
+    // inside the valid-lane branch is undefined when only part of a simdgroup is
+    // active, so reduce into fast threadgroup memory directly. This observer is
+    // sampled sparsely and has no write path into the simulation.
+    if (fixedValue > 0u) {
+        atomic_fetch_add_explicit(&metrics[metric], fixedValue, memory_order_relaxed);
     }
 }
 
@@ -358,10 +361,10 @@ kernel void measureWorld(
         atomic_store_explicit(&groupMetrics[metric], 0u, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (gid.x >= uniforms.width || gid.y >= uniforms.height ||
-        gid.z >= uniforms.worldCount) { return; }
-
-    uint layer = gid.z;
+    bool valid = gid.x < uniforms.width && gid.y < uniforms.height &&
+        gid.z < uniforms.worldCount;
+    uint layer = min(gid.z, uniforms.worldCount - 1u);
+    if (valid) {
     uint tile = (layer * uniforms.height + gid.y) * uniforms.width + gid.x;
     uint moleculeBase = tile * moleculeSlotsPerTile;
     float4 localA = max(basisA.read(gid.xy, layer), float4(0.0));
@@ -488,6 +491,7 @@ kernel void measureWorld(
     addMetric(groupMetrics, 43, saturate(freeEnergy) * 100.0, laneIndex);
     addMetric(groupMetrics, 44, saturate(membraneAmount) * 100.0, laneIndex);
     addMetric(groupMetrics, 45, saturate(persistentAmount) * 100.0, laneIndex);
+    }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint metric = threadIndex; metric < metricCount; metric += groupThreadCount) {
@@ -817,7 +821,7 @@ inline void addEnergyAudit(
     int fixed = int(clamp(
         value * float(energyAuditScale), -134217728.0, 134217728.0
     ));
-    atomic_fetch_add_explicit(&energyAudit[channel], fixed, memory_order_relaxed);
+    atomicAddSaturatingInt(&energyAudit[channel], fixed);
 }
 
 inline void addEnergyExchange(

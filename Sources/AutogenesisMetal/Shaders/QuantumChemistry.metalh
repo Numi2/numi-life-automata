@@ -100,8 +100,15 @@ kernel void measureQuantumField(
     if (gid.x >= quantumGridSize || gid.y >= quantumGridSize) { return; }
     float4 wave = quantum.read(gid);
     float probability = dot(wave.xy, wave.xy) + dot(wave.zw, wave.zw);
-    uint fixedProbability = uint(min(max(probability, 0.0) * 1000000000.0, 1000000.0));
-    atomic_fetch_add_explicit(norm, fixedProbability, memory_order_relaxed);
+    // Do not cap an individual site at 0.001 probability.  Localized packets
+    // legitimately exceed that density, and the old cap made a badly focused
+    // wave appear to have lost norm. Saturating the reduction preserves the
+    // measurement until the global value itself exceeds UInt32 capacity.
+    uint fixedProbability = uint(min(
+        max(probability, 0.0) * 1000000000.0,
+        4294967040.0
+    ));
+    atomicAddSaturatingUInt(norm, fixedProbability);
 }
 
 inline float4 geologyAt(float2 uv, uint geologicalEpoch) {
@@ -266,8 +273,8 @@ inline float2 environmentalMechanicalDrive(
     );
     float disturbance = environmentalDisturbance(uv, step);
     uint eventEpoch = step >= 24000u ? (step - 24000u) / 48000u : 0u;
-    float2 eventDelta = toroidalDelta(
-        uv, environmentalDisturbanceCenter(eventEpoch)
+    float2 eventDelta = signedToroidalDelta(
+        environmentalDisturbanceCenter(eventEpoch), uv
     );
     float2 eventDirection = length(eventDelta) > 0.000001
         ? normalize(float2(-eventDelta.y, eventDelta.x) + eventDelta * 0.36)
@@ -327,6 +334,7 @@ kernel void expandWorld(
     texture2d_array<float, access::write> developmentalOut [[texture(9)]],
     constant SimulationUniforms& uniforms [[buffer(0)]],
     constant uint& expansionLevel [[buffer(1)]],
+    device ChemistryAuditState* chemistryAudit [[buffer(2)]],
     uint3 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) { return; }
@@ -334,17 +342,45 @@ kernel void expandWorld(
     float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
     bool containsPreviousWorld = all(uv >= float2(0.25)) && all(uv < float2(0.75));
     if (containsPreviousWorld) {
-        float2 oldUV = (uv - 0.25) * 2.0;
-        uint2 source = min(
-            uint2(oldUV * float2(uniforms.width, uniforms.height)),
-            uint2(uniforms.width - 1u, uniforms.height - 1u)
+        uint2 source = expandedWorldSourceBase(
+            gid.xy, uint2(uniforms.width, uniforms.height)
         );
-        stateOut.write(stateIn.read(source, gid.z), gid.xy, gid.z);
-        ecologyOut.write(ecologyIn.read(source, gid.z), gid.xy, gid.z);
-        eventOut.write(eventIn.read(source, gid.z) * 0.72, gid.xy, gid.z);
-        environmentOut.write(environmentIn.read(source, gid.z), gid.xy, gid.z);
+        uint2 sourceRight = min(
+            source + uint2(1u, 0u), uint2(uniforms.width - 1u, uniforms.height - 1u)
+        );
+        uint2 sourceUp = min(
+            source + uint2(0u, 1u), uint2(uniforms.width - 1u, uniforms.height - 1u)
+        );
+        uint2 sourceDiagonal = min(
+            source + uint2(1u, 1u), uint2(uniforms.width - 1u, uniforms.height - 1u)
+        );
+        float4 stateAverage = (
+            stateIn.read(source, gid.z) + stateIn.read(sourceRight, gid.z) +
+            stateIn.read(sourceUp, gid.z) + stateIn.read(sourceDiagonal, gid.z)
+        ) * 0.25;
+        float4 ecologyAverage = (
+            ecologyIn.read(source, gid.z) + ecologyIn.read(sourceRight, gid.z) +
+            ecologyIn.read(sourceUp, gid.z) + ecologyIn.read(sourceDiagonal, gid.z)
+        ) * 0.25;
+        float4 eventAverage = (
+            eventIn.read(source, gid.z) + eventIn.read(sourceRight, gid.z) +
+            eventIn.read(sourceUp, gid.z) + eventIn.read(sourceDiagonal, gid.z)
+        ) * 0.25;
+        float4 environmentAverage = (
+            environmentIn.read(source, gid.z) + environmentIn.read(sourceRight, gid.z) +
+            environmentIn.read(sourceUp, gid.z) + environmentIn.read(sourceDiagonal, gid.z)
+        ) * 0.25;
+        float4 developmentalAverage = (
+            developmentalIn.read(source, gid.z) + developmentalIn.read(sourceRight, gid.z) +
+            developmentalIn.read(sourceUp, gid.z) +
+            developmentalIn.read(sourceDiagonal, gid.z)
+        ) * 0.25;
+        stateOut.write(stateAverage, gid.xy, gid.z);
+        ecologyOut.write(ecologyAverage, gid.xy, gid.z);
+        eventOut.write(eventAverage * 0.72, gid.xy, gid.z);
+        environmentOut.write(environmentAverage, gid.xy, gid.z);
         developmentalOut.write(
-            developmentalIn.read(source, gid.z) * float4(0.82, 0.82, 0.94, 0.76),
+            developmentalAverage * float4(0.82, 0.82, 0.94, 0.76),
             gid.xy, gid.z
         );
         return;
@@ -375,6 +411,19 @@ kernel void expandWorld(
         saturate(0.20 + geology.z * 0.62)
     ), gid.xy, gid.z);
     developmentalOut.write(float4(0.04, 0.94, 0.01, 0.0), gid.xy, gid.z);
+    for (uint basis = 0u; basis < 4u; ++basis) {
+        auditChemistry(
+            chemistryAudit, &chemistryAudit->externalMatter[basis], basisA[basis]
+        );
+    }
+    for (uint basis = 0u; basis < 3u; ++basis) {
+        auditChemistry(
+            chemistryAudit,
+            &chemistryAudit->externalMatter[basis + 4u],
+            basisB[basis]
+        );
+    }
+    auditChemistry(chemistryAudit, &chemistryAudit->externalEnergy, basisB.w);
 }
 
 kernel void initializeMechanicalField(
@@ -399,12 +448,23 @@ kernel void expandMechanicalField(
         mechanicalOut.write(float4(0.0), gid.xy, gid.z);
         return;
     }
-    float2 oldUV = (uv - 0.25) * 2.0;
-    uint2 source = min(
-        uint2(oldUV * float2(uniforms.width, uniforms.height)),
-        uint2(uniforms.width - 1u, uniforms.height - 1u)
+    uint2 source = expandedWorldSourceBase(
+        gid.xy, uint2(uniforms.width, uniforms.height)
     );
-    mechanicalOut.write(mechanicalIn.read(source, gid.z) * float4(0.5, 0.5, 0.5, 0.5), gid.xy, gid.z);
+    uint2 sourceRight = min(
+        source + uint2(1u, 0u), uint2(uniforms.width - 1u, uniforms.height - 1u)
+    );
+    uint2 sourceUp = min(
+        source + uint2(0u, 1u), uint2(uniforms.width - 1u, uniforms.height - 1u)
+    );
+    uint2 sourceDiagonal = min(
+        source + uint2(1u, 1u), uint2(uniforms.width - 1u, uniforms.height - 1u)
+    );
+    float4 average = (
+        mechanicalIn.read(source, gid.z) + mechanicalIn.read(sourceRight, gid.z) +
+        mechanicalIn.read(sourceUp, gid.z) + mechanicalIn.read(sourceDiagonal, gid.z)
+    ) * 0.25;
+    mechanicalOut.write(average * 0.5, gid.xy, gid.z);
 }
 
 kernel void evolveMechanicalField(
@@ -471,11 +531,36 @@ kernel void expandQuantumField(
         quantumOut.write(float4(0.0), gid);
         return;
     }
-    uint2 source = min(
-        (gid - quantumGridSize / 4u) * 2u,
-        uint2(quantumGridSize - 1u)
-    );
-    quantumOut.write(quantumIn.read(source) * 2.0, gid);
+    uint2 source = (gid - quantumGridSize / 4u) * 2u;
+    float4 samples[4] = {
+        quantumIn.read(source),
+        quantumIn.read(source + uint2(1u, 0u)),
+        quantumIn.read(source + uint2(0u, 1u)),
+        quantumIn.read(source + uint2(1u, 1u))
+    };
+    float totalProbability = 0.0;
+    float4 coherentSum = float4(0.0);
+    float4 strongest = samples[0];
+    float strongestProbability = -1.0;
+    for (uint sampleIndex = 0u; sampleIndex < 4u; ++sampleIndex) {
+        float sampleProbability = dot(samples[sampleIndex], samples[sampleIndex]);
+        totalProbability += max(sampleProbability, 0.0);
+        coherentSum += samples[sampleIndex];
+        if (sampleProbability > strongestProbability) {
+            strongestProbability = sampleProbability;
+            strongest = samples[sampleIndex];
+        }
+    }
+    // Spatial expansion necessarily coarse-grains each old 2x2 block into one
+    // destination site. Preserve its complete probability and coherent phase;
+    // exact cancellation falls back to the strongest deterministic contributor.
+    float coherentProbability = dot(coherentSum, coherentSum);
+    float4 representative = coherentProbability > 0.000000000000000001
+        ? coherentSum * sqrt(totalProbability / coherentProbability)
+        : (strongestProbability > 0.000000000000000001
+            ? strongest * sqrt(totalProbability / strongestProbability)
+            : float4(0.0));
+    quantumOut.write(representative, gid);
 }
 
 inline float2 damageCenter(uint world, uint generation) {
