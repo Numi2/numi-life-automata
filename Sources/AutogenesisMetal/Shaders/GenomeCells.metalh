@@ -366,7 +366,6 @@ kernel void measureWorld(
     uint layer = min(gid.z, uniforms.worldCount - 1u);
     if (valid) {
     uint tile = (layer * uniforms.height + gid.y) * uniforms.width + gid.x;
-    uint moleculeBase = tile * moleculeSlotsPerTile;
     float4 localA = max(basisA.read(gid.xy, layer), float4(0.0));
     float4 oldA = max(previousBasisA.read(gid.xy, layer), float4(0.0));
     float4 localB = max(basisB.read(gid.xy, layer), float4(0.0));
@@ -384,7 +383,7 @@ kernel void measureWorld(
     float moleculeRichness = 0.0;
     uint lineageHash = 0u;
     for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
-        MoleculePacket packet = molecules[moleculeBase + slot];
+        MoleculePacket packet = molecules[moleculeIndex(tile, slot)];
         if (packet.speciesID == 0u || packet.amount <= 0.0 ||
             packet.speciesID >= speciesRegistryCapacity) { continue; }
         SpeciesDefinition definition = species[packet.speciesID];

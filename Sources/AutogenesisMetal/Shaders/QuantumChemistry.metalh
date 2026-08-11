@@ -489,8 +489,8 @@ kernel void evolveMechanicalField(
 
     uint forceIndex = ((gid.z * uniforms.height + gid.y) * uniforms.width + gid.x) * 2u;
     float2 activeForce = float2(
-        atomic_exchange_explicit(&forcing[forceIndex], 0, memory_order_relaxed),
-        atomic_exchange_explicit(&forcing[forceIndex + 1u], 0, memory_order_relaxed)
+        consumePublishedInt(&forcing[forceIndex]),
+        consumePublishedInt(&forcing[forceIndex + 1u])
     ) / float(mechanicalForceScale);
     float2 uv = (float2(gid.xy) + 0.5) / float2(uniforms.width, uniforms.height);
     float4 geology = environment.read(gid.xy, gid.z);

@@ -14,10 +14,6 @@ inline uint ecologyTileIndex(uint2 coordinate, constant SimulationUniforms& unif
     return coordinate.y * uniforms.width + coordinate.x;
 }
 
-inline uint moleculeIndex(uint tileIndex, uint slot) {
-    return tileIndex * moleculeSlotsPerTile + slot;
-}
-
 inline SpeciesDefinition emptySpeciesDefinition() {
     SpeciesDefinition species;
     species.basisA = uint4(0u);
@@ -145,6 +141,8 @@ kernel void initializeUnifiedEcology(
     device MaterialTileProperties* materialProperties [[buffer(10)]],
     device ChemistryAuditState* chemistryAudit [[buffer(11)]],
     constant SimulationUniforms& uniforms [[buffer(12)]],
+    device atomic_uint* activeTileCount [[buffer(13)]],
+    device uint* activeTileDispatchArguments [[buffer(14)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint tileCount = uniforms.width * uniforms.height * uniforms.worldCount;
@@ -164,8 +162,9 @@ kernel void initializeUnifiedEcology(
             ? 0.00018 + random01(seed) * 0.00034
             : random01(seed) * 0.000025;
         packet.freeEnergy = packet.amount * initialSpecies.physical.x;
-        moleculeState[gid] = packet;
-        reactionMoleculeState[gid] = packet;
+        uint index = moleculeIndex(tile, slot);
+        moleculeState[index] = packet;
+        reactionMoleculeState[index] = packet;
     }
     if (gid < maxGenomeHeaderCount) {
         GenomeHeader header;
@@ -222,6 +221,10 @@ kernel void initializeUnifiedEcology(
         atomic_store_explicit(&chemistryAudit->skippedGenomeMutationCount, 0u, memory_order_relaxed);
         atomic_store_explicit(&chemistryAudit->protocellOriginCount, 0u, memory_order_relaxed);
         atomic_store_explicit(&chemistryAudit->auditSaturationCount, 0u, memory_order_relaxed);
+        atomic_store_explicit(activeTileCount, 0u, memory_order_relaxed);
+        activeTileDispatchArguments[0] = 0u;
+        activeTileDispatchArguments[1] = 1u;
+        activeTileDispatchArguments[2] = 1u;
     }
 }
 
@@ -505,11 +508,21 @@ kernel void evolveWorldChemistry(
     device ChemistryAuditState* chemistryAudit [[buffer(4)]],
     device atomic_uint* deferredCellExchange [[buffer(5)]],
     device MaterialTileProperties* materialProperties [[buffer(6)]],
-    uint3 gid [[thread_position_in_grid]]
+    uint3 gid [[thread_position_in_grid]],
+    uint threadIndex [[thread_index_in_threadgroup]],
+    uint3 threadsPerThreadgroup [[threads_per_threadgroup]]
 ) {
-    if (gid.x >= uniforms.width || gid.y >= uniforms.height || gid.z >= uniforms.worldCount) {
-        return;
+    // This kernel is dispatched with dispatchThreads over the exact world
+    // extent, so every launched lane is valid and can safely reach both
+    // barriers, including nonuniform edge threadgroups.
+    threadgroup atomic_int groupAudit[6];
+    uint groupThreadCount = threadsPerThreadgroup.x *
+        threadsPerThreadgroup.y * threadsPerThreadgroup.z;
+    for (uint auditIndex = threadIndex; auditIndex < 6u;
+        auditIndex += groupThreadCount) {
+        atomic_store_explicit(&groupAudit[auditIndex], 0, memory_order_relaxed);
     }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     uint2 coordinate = gid.xy;
     uint layer = gid.z;
     uint tile = (layer * uniforms.height + gid.y) * uniforms.width + gid.x;
@@ -552,18 +565,9 @@ kernel void evolveWorldChemistry(
     basisA.y += externalMatter * 0.72;
     basisA.z += externalMatter * 0.44;
     basisB.w += externalEnergy;
-    auditChemistry(
-        chemistryAudit, &chemistryAudit->externalMatter[0], externalMatter
-    );
-    auditChemistry(
-        chemistryAudit, &chemistryAudit->externalMatter[1], externalMatter * 0.72
-    );
-    auditChemistry(
-        chemistryAudit, &chemistryAudit->externalMatter[2], externalMatter * 0.44
-    );
-    auditChemistry(
-        chemistryAudit, &chemistryAudit->externalEnergy, externalEnergy
-    );
+    float ventMatterAudit = 0.0;
+    float ventEnergyAudit = 0.0;
+    float disturbanceHeatAudit = 0.0;
 
     float moisture = saturate(environment.z);
     float temperature = clamp(environment.w, 0.0, 1.0);
@@ -581,17 +585,13 @@ kernel void evolveWorldChemistry(
         basisB.y += ventMatter;
         basisB.w += ventEnergy;
         temperature = saturate(temperature + eventInfluence * 0.006);
-        auditChemistry(
-            chemistryAudit, &chemistryAudit->externalMatter[5], ventMatter
-        );
-        auditChemistry(
-            chemistryAudit, &chemistryAudit->externalEnergy, ventEnergy
-        );
+        ventMatterAudit = ventMatter;
+        ventEnergyAudit = ventEnergy;
     } else if (eventKind == 3u) { // fire: free energy becomes heat, matter remains
         float burned = min(basisB.w, eventInfluence * uniforms.dt * 0.000040);
         basisB.w -= burned;
         temperature = saturate(temperature + burned * 240.0);
-        auditChemistry(chemistryAudit, &chemistryAudit->heat, burned);
+        disturbanceHeatAudit = burned;
     } else { // bloom: only increases reaction opportunity
         moisture = saturate(moisture + eventInfluence * 0.002);
     }
@@ -718,33 +718,33 @@ kernel void evolveWorldChemistry(
     }
 
     uint exchangeBase = tile * worldExchangeChannelCount;
-    float returnedReducedMatter = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase], 0u, memory_order_relaxed
+    float returnedReducedMatter = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase]
     ));
-    float returnedHeat = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase + 1u], 0u, memory_order_relaxed
+    float returnedHeat = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + 1u]
     ));
     basisA.x += returnedReducedMatter * 0.42;
     basisA.y += returnedReducedMatter * 0.36;
     basisA.z += returnedReducedMatter * 0.22;
     packetHeat += returnedHeat;
-    float signalA = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase + 2u], 0u, memory_order_relaxed
+    float signalA = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + 2u]
     ));
-    float signalB = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase + 3u], 0u, memory_order_relaxed
+    float signalB = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + 3u]
     ));
-    float depositedMaterial = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase + 4u], 0u, memory_order_relaxed
+    float depositedMaterial = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + 4u]
     ));
-    float remodeling = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase + 5u], 0u, memory_order_relaxed
+    float remodeling = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + 5u]
     ));
-    float catalyticMoleculeOutput = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase + 6u], 0u, memory_order_relaxed
+    float catalyticMoleculeOutput = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + 6u]
     ));
-    float counterOutput = substrateFromFixed(atomic_exchange_explicit(
-        &deferredCellExchange[exchangeBase + 7u], 0u, memory_order_relaxed
+    float counterOutput = substrateFromFixed(consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + 7u]
     ));
     float deferredOutputs[4] = { signalA + signalB, catalyticMoleculeOutput, depositedMaterial, counterOutput };
     uint outputSpecies[4] = { 4u, 2u, 5u, 7u };
@@ -801,7 +801,60 @@ kernel void evolveWorldChemistry(
     );
     basisA = max(basisA, float4(0.0));
     basisB = max(basisB, float4(0.0));
-    auditChemistry(chemistryAudit, &chemistryAudit->heat, packetHeat);
+    float auditValues[6] = {
+        externalMatter,
+        externalMatter * 0.72,
+        externalMatter * 0.44,
+        externalEnergy + ventEnergyAudit,
+        ventMatterAudit,
+        packetHeat + disturbanceHeatAudit
+    };
+    for (uint auditIndex = 0u; auditIndex < 6u; ++auditIndex) {
+        // Preserve the M4 limit while also remaining safe if a future Apple
+        // GPU exposes a wider threadgroup: no possible group sum may wrap int.
+        float localAuditLimit = min(
+            8000000.0,
+            2040000000.0 / max(float(groupThreadCount), 1.0)
+        );
+        float scaledAudit = auditValues[auditIndex] * chemistryAuditScale;
+        bool auditClamped = !isfinite(scaledAudit) ||
+            abs(scaledAudit) > localAuditLimit;
+        int fixed = isfinite(scaledAudit) ? int(clamp(
+            scaledAudit, -localAuditLimit, localAuditLimit
+        )) : 0;
+        if (auditClamped) {
+            atomicAddSaturatingUInt(
+                &chemistryAudit->auditSaturationCount, 1u
+            );
+        }
+        if (fixed != 0) {
+            atomic_fetch_add_explicit(
+                &groupAudit[auditIndex], fixed, memory_order_relaxed
+            );
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (threadIndex < 6u) {
+        int fixed = atomic_load_explicit(
+            &groupAudit[threadIndex], memory_order_relaxed
+        );
+        if (threadIndex < 3u) {
+            auditChemistryFixed(
+                chemistryAudit,
+                &chemistryAudit->externalMatter[threadIndex], fixed
+            );
+        } else if (threadIndex == 3u) {
+            auditChemistryFixed(
+                chemistryAudit, &chemistryAudit->externalEnergy, fixed
+            );
+        } else if (threadIndex == 4u) {
+            auditChemistryFixed(
+                chemistryAudit, &chemistryAudit->externalMatter[5], fixed
+            );
+        } else {
+            auditChemistryFixed(chemistryAudit, &chemistryAudit->heat, fixed);
+        }
+    }
     basisAOut.write(basisA, coordinate, layer);
     basisBOut.write(basisB, coordinate, layer);
     environmentOut.write(environment, coordinate, layer);
@@ -824,18 +877,28 @@ kernel void evolveWorldChemistry(
 
 kernel void clearChemistrySettlementState(
     device atomic_uint* tileCellCounts [[buffer(0)]],
-    device CellChemistryIntent* intents [[buffer(1)]],
-    device CellChemistrySettlement* settlements [[buffer(2)]],
-    constant SimulationUniforms& uniforms [[buffer(3)]],
+    device const uint* activeTileIndices [[buffer(1)]],
+    device const atomic_uint* activeTileCount [[buffer(2)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    uint count = atomic_load_explicit(activeTileCount, memory_order_relaxed);
+    if (compactIndex >= count) { return; }
+    atomic_store_explicit(
+        &tileCellCounts[activeTileIndices[compactIndex]], 0u,
+        memory_order_relaxed
+    );
+}
+
+kernel void resetActiveTileChemistryState(
+    device atomic_uint* activeTileCount [[buffer(0)]],
+    device uint* activeTileDispatchArguments [[buffer(1)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    uint tileCount = uniforms.width * uniforms.height * uniforms.worldCount;
-    if (gid < tileCount) {
-        atomic_store_explicit(&tileCellCounts[gid], 0u, memory_order_relaxed);
-    }
-    if (gid < maxCellCount) {
-        intents[gid] = emptyChemistryIntent();
-        settlements[gid] = emptyChemistrySettlement();
+    if (gid == 0u) {
+        atomic_store_explicit(activeTileCount, 0u, memory_order_relaxed);
+        activeTileDispatchArguments[0] = 0u;
+        activeTileDispatchArguments[1] = 1u;
+        activeTileDispatchArguments[2] = 1u;
     }
 }
 
@@ -852,11 +915,15 @@ kernel void senseAndRegulateCells(
     texture2d_array<float, access::read> basisA [[texture(0)]],
     texture2d_array<float, access::read> basisB [[texture(1)]],
     constant SimulationUniforms& uniforms [[buffer(9)]],
+    device CellChemistrySettlement* settlements [[buffer(10)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint cellIndex = activeCellIndices[compactIndex];
-    if (cellIndex >= maxCellCount || atomic_load_explicit(
+    if (cellIndex >= maxCellCount) { return; }
+    intents[cellIndex] = emptyChemistryIntent();
+    settlements[cellIndex] = emptyChemistrySettlement();
+    if (atomic_load_explicit(
         &cellOccupancy[cellIndex], memory_order_relaxed
     ) != cellOccupancyAlive) { return; }
     CellIdentity identity = identities[cellIndex];
@@ -915,6 +982,8 @@ kernel void buildTileCellLists(
     device ChemistryAuditState* chemistryAudit [[buffer(3)]],
     device const atomic_uint* activeCellCount [[buffer(4)]],
     device const uint* activeCellIndices [[buffer(5)]],
+    device uint* activeTileIndices [[buffer(6)]],
+    device atomic_uint* activeTileCount [[buffer(7)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
@@ -922,11 +991,29 @@ kernel void buildTileCellLists(
     if (cellIndex >= maxCellCount || (intents[cellIndex].flags & 1u) == 0u) { return; }
     uint tile = intents[cellIndex].tileIndex;
     uint offset = atomic_fetch_add_explicit(&tileCellCounts[tile], 1u, memory_order_relaxed);
+    if (offset == 0u) {
+        uint activeIndex = atomic_fetch_add_explicit(
+            activeTileCount, 1u, memory_order_relaxed
+        );
+        activeTileIndices[activeIndex] = tile;
+    }
     if (offset < tileCellCapacity) {
         tileCellIndices[tile * tileCellCapacity + offset] = cellIndex;
     } else {
         atomicAddSaturatingUInt(&chemistryAudit->tileCellOverflowCount, 1u);
     }
+}
+
+kernel void prepareTileChemistryDispatch(
+    device const atomic_uint* activeTileCount [[buffer(0)]],
+    device uint* dispatchArguments [[buffer(1)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid != 0u) { return; }
+    uint count = atomic_load_explicit(activeTileCount, memory_order_relaxed);
+    dispatchArguments[0] = (count + 63u) / 64u;
+    dispatchArguments[1] = 1u;
+    dispatchArguments[2] = 1u;
 }
 
 kernel void settleTileChemistry(
@@ -937,12 +1024,17 @@ kernel void settleTileChemistry(
     device const CellIdentity* identities [[buffer(4)]],
     device MoleculePacket* molecules [[buffer(5)]],
     device const SpeciesDefinition* speciesRegistry [[buffer(6)]],
+    device const uint* activeTileIndices [[buffer(7)]],
     device ChemistryAuditState* chemistryAudit [[buffer(8)]],
     texture2d_array<float, access::read_write> basisAField [[texture(0)]],
     texture2d_array<float, access::read_write> basisBField [[texture(1)]],
     constant SimulationUniforms& uniforms [[buffer(9)]],
-    uint tile [[thread_position_in_grid]]
+    device const atomic_uint* activeTileCount [[buffer(10)]],
+    uint compactIndex [[thread_position_in_grid]]
 ) {
+    uint activeCount = atomic_load_explicit(activeTileCount, memory_order_relaxed);
+    if (compactIndex >= activeCount) { return; }
+    uint tile = activeTileIndices[compactIndex];
     uint tileCount = uniforms.width * uniforms.height * uniforms.worldCount;
     if (tile >= tileCount) { return; }
     uint count = min(

@@ -38,6 +38,10 @@ struct PostProcessUniforms {
 constant uint metricCount = 46;
 constant float metricScale = 4096.0;
 constant uint quantumGridSize = 1024u;
+constant uint ecologyGridSize = 193u;
+constant uint ecologyWorldCount = 1u;
+constant uint ecologyTileCapacity =
+    ecologyGridSize * ecologyGridSize * ecologyWorldCount;
 constant uint maxCellCount = 9216u;
 constant uint maxAgentCount = maxCellCount;
 constant uint maxGenomeHeaderCount = 4096u;
@@ -496,6 +500,14 @@ inline float2 normalizedOr(float2 value, float2 fallback) {
         : fallback;
 }
 
+inline uint moleculeIndex(uint tileIndex, uint slot) {
+    // Species-major storage lets adjacent Apple GPU SIMD lanes read the same
+    // sparse slot from adjacent world tiles in one contiguous transaction.
+    // Tile-major storage imposed a 128-byte stride per lane in the dominant
+    // diffusion kernel and discarded most fetched cache-line data.
+    return slot * ecologyTileCapacity + tileIndex;
+}
+
 /// Map a destination texel in the central half of an expanded world to the
 /// lower-left texel of its exact 2 x 2 source block. Deriving this from texel
 /// centres shifts every block by one source texel, drops the old zero edge,
@@ -524,6 +536,26 @@ inline void atomicAddSaturatingUInt(
         )) { return; }
         observed = expected;
     }
+}
+
+/// Consume a value after its producing pass has completed. Metal command order
+/// makes these consumers exclusive, so a load and conditional clear preserve
+/// the producer/consumer contract without an unnecessary read-modify-write on
+/// every empty world tile.
+inline uint consumePublishedUInt(device atomic_uint* source) {
+    uint value = atomic_load_explicit(source, memory_order_relaxed);
+    if (value != 0u) {
+        atomic_store_explicit(source, 0u, memory_order_relaxed);
+    }
+    return value;
+}
+
+inline int consumePublishedInt(device atomic_int* source) {
+    int value = atomic_load_explicit(source, memory_order_relaxed);
+    if (value != 0) {
+        atomic_store_explicit(source, 0, memory_order_relaxed);
+    }
+    return value;
 }
 
 inline bool atomicAddSaturatingInt(
@@ -569,6 +601,16 @@ inline void auditChemistry(
         scaled, -2147480000.0, 2147480000.0
     ));
     if (inputClamped || atomicAddSaturatingInt(destination, fixed)) {
+        atomicAddSaturatingUInt(&audit->auditSaturationCount, 1u);
+    }
+}
+
+inline void auditChemistryFixed(
+    device ChemistryAuditState* audit,
+    device atomic_int* destination,
+    int fixed
+) {
+    if (atomicAddSaturatingInt(destination, fixed)) {
         atomicAddSaturatingUInt(&audit->auditSaturationCount, 1u);
     }
 }

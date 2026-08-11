@@ -2183,8 +2183,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let evolveMechanicalPipeline: MTLComputePipelineState
     private let reactionPipeline: MTLComputePipelineState
     private let clearChemistrySettlementPipeline: MTLComputePipelineState
+    private let resetActiveTileChemistryStatePipeline: MTLComputePipelineState
     private let senseAndRegulateCellsPipeline: MTLComputePipelineState
     private let buildTileCellListsPipeline: MTLComputePipelineState
+    private let prepareTileChemistryDispatchPipeline: MTLComputePipelineState
     private let settleTileChemistryPipeline: MTLComputePipelineState
     private let quantumCouplingPipeline: MTLComputePipelineState
     private let quantumPipeline: MTLComputePipelineState
@@ -2278,6 +2280,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let chemistrySettlements: MTLBuffer
     private let tileCellCounts: MTLBuffer
     private let tileCellIndices: MTLBuffer
+    private let activeChemistryTileIndices: MTLBuffer
+    private let activeChemistryTileCount: MTLBuffer
+    private let activeChemistryTileDispatchArguments: MTLBuffer
     private var originExclusion: MTLBuffer
     private var reactionOriginExclusion: MTLBuffer
     private var materialProperties: MTLBuffer
@@ -2474,11 +2479,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         clearChemistrySettlementPipeline = try pipelineFactory.makeComputePipeline(
             named: "clearChemistrySettlementState"
         )
+        resetActiveTileChemistryStatePipeline = try pipelineFactory.makeComputePipeline(
+            named: "resetActiveTileChemistryState"
+        )
         senseAndRegulateCellsPipeline = try pipelineFactory.makeComputePipeline(
             named: "senseAndRegulateCells"
         )
         buildTileCellListsPipeline = try pipelineFactory.makeComputePipeline(
             named: "buildTileCellLists"
+        )
+        prepareTileChemistryDispatchPipeline = try pipelineFactory.makeComputePipeline(
+            named: "prepareTileChemistryDispatch"
         )
         settleTileChemistryPipeline = try pipelineFactory.makeComputePipeline(
             named: "settleTileChemistry"
@@ -2699,6 +2710,17 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               ), let tileCellIndices = device.makeBuffer(
                 length: tileCount * Self.tileCellCapacity * MemoryLayout<UInt32>.stride,
                 options: .storageModePrivate
+              ), let activeChemistryTileIndices = device.makeBuffer(
+                // One tile is appended only by the first living cell that
+                // publishes into it, so this list can never exceed cell capacity.
+                length: Self.maxCellCount * MemoryLayout<UInt32>.stride,
+                options: .storageModePrivate
+              ), let activeChemistryTileCount = device.makeBuffer(
+                length: MemoryLayout<UInt32>.stride,
+                options: .storageModePrivate
+              ), let activeChemistryTileDispatchArguments = device.makeBuffer(
+                length: 3 * MemoryLayout<UInt32>.stride,
+                options: .storageModePrivate
               ), let originExclusion = device.makeBuffer(
                 length: tileCount * MemoryLayout<UInt32>.stride,
                 options: .storageModePrivate
@@ -2729,6 +2751,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         chemistrySettlements.label = "Deterministic cell chemistry settlements"
         tileCellCounts.label = "Per-tile chemistry participant counts"
         tileCellIndices.label = "Bounded per-tile cell chemistry lists"
+        activeChemistryTileIndices.label = "Active cell-chemistry tiles"
+        activeChemistryTileCount.label = "Active cell-chemistry tile count"
+        activeChemistryTileDispatchArguments.label =
+            "Active cell-chemistry indirect dispatch"
         originExclusion.label = "Local protocell origin exclusion stamps"
         reactionOriginExclusion.label = "Expanded protocell origin exclusion stamps"
         materialProperties.label = "Persistent constructed material properties"
@@ -2744,6 +2770,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.chemistrySettlements = chemistrySettlements
         self.tileCellCounts = tileCellCounts
         self.tileCellIndices = tileCellIndices
+        self.activeChemistryTileIndices = activeChemistryTileIndices
+        self.activeChemistryTileCount = activeChemistryTileCount
+        self.activeChemistryTileDispatchArguments =
+            activeChemistryTileDispatchArguments
         self.originExclusion = originExclusion
         self.reactionOriginExclusion = reactionOriginExclusion
         self.materialProperties = materialProperties
@@ -3716,7 +3746,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             mechanicalForcing, qualificationTargetState, qualificationTargetMeasurement,
             speciesRegistry, moleculeState, genomeHeaders, genomePages,
             genomeArenaState, chemistryIntents, chemistrySettlements,
-            tileCellCounts, tileCellIndices, originExclusion, materialProperties,
+            tileCellCounts, tileCellIndices, activeChemistryTileIndices,
+            activeChemistryTileCount, activeChemistryTileDispatchArguments,
+            originExclusion, materialProperties,
             chemistryAudit
         ]
     }
@@ -3727,8 +3759,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             initializeQuantumPipeline, expandWorldPipeline, expandUnifiedEcologyPipeline,
             expandQuantumPipeline, initializeMechanicalPipeline, expandMechanicalPipeline,
             evolveMechanicalPipeline, reactionPipeline,
-            clearChemistrySettlementPipeline, senseAndRegulateCellsPipeline,
-            buildTileCellListsPipeline, settleTileChemistryPipeline,
+            clearChemistrySettlementPipeline, resetActiveTileChemistryStatePipeline,
+            senseAndRegulateCellsPipeline,
+            buildTileCellListsPipeline, prepareTileChemistryDispatchPipeline,
+            settleTileChemistryPipeline,
             quantumCouplingPipeline,
             quantumPipeline, damagePipeline, damageCellPipeline,
             markDamagedComponentsPipeline,
@@ -4097,6 +4131,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(materialProperties, offset: 0, index: 10)
         encoder.setBuffer(chemistryAudit, offset: 0, index: 11)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 12)
+        encoder.setBuffer(activeChemistryTileCount, offset: 0, index: 13)
+        encoder.setBuffer(activeChemistryTileDispatchArguments, offset: 0, index: 14)
         let unifiedInitializationCount = max(
             Self.speciesRegistryCapacity,
             Self.gridSize * Self.gridSize * Self.worldCount * Self.moleculeSlotsPerTile
@@ -4535,26 +4571,28 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         encoder.setComputePipelineState(clearChemistrySettlementPipeline)
         encoder.setBuffer(tileCellCounts, offset: 0, index: 0)
-        encoder.setBuffer(chemistryIntents, offset: 0, index: 1)
-        encoder.setBuffer(chemistrySettlements, offset: 0, index: 2)
-        encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 3)
+        encoder.setBuffer(activeChemistryTileIndices, offset: 0, index: 1)
+        encoder.setBuffer(activeChemistryTileCount, offset: 0, index: 2)
+        precondition(
+            clearChemistrySettlementPipeline.maxTotalThreadsPerThreadgroup >= 64,
+            "Tile chemistry reset requires a 64-thread group"
+        )
+        encoder.dispatchThreadgroups(
+            indirectBuffer: activeChemistryTileDispatchArguments,
+            indirectBufferOffset: 0,
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+        )
+        encoder.memoryBarrier(resources: [tileCellCounts])
+
+        encoder.setComputePipelineState(resetActiveTileChemistryStatePipeline)
+        encoder.setBuffer(activeChemistryTileCount, offset: 0, index: 0)
+        encoder.setBuffer(activeChemistryTileDispatchArguments, offset: 0, index: 1)
         encoder.dispatchThreads(
-            MTLSize(
-                width: max(
-                    Self.maxCellCount,
-                    Self.gridSize * Self.gridSize * Self.worldCount
-                ),
-                height: 1,
-                depth: 1
-            ),
-            threadsPerThreadgroup: MTLSize(
-                width: min(clearChemistrySettlementPipeline.maxTotalThreadsPerThreadgroup, 256),
-                height: 1,
-                depth: 1
-            )
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
         )
         encoder.memoryBarrier(resources: [
-            tileCellCounts, chemistryIntents, chemistrySettlements
+            activeChemistryTileCount, activeChemistryTileDispatchArguments
         ])
 
         encoder.setComputePipelineState(senseAndRegulateCellsPipeline)
@@ -4570,8 +4608,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 9)
+        encoder.setBuffer(chemistrySettlements, offset: 0, index: 10)
         dispatchCells(encoder, pipeline: senseAndRegulateCellsPipeline)
-        encoder.memoryBarrier(resources: [chemistryIntents])
+        encoder.memoryBarrier(resources: [chemistryIntents, chemistrySettlements])
 
         encoder.setComputePipelineState(buildTileCellListsPipeline)
         encoder.setBuffer(chemistryIntents, offset: 0, index: 0)
@@ -4580,8 +4619,22 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(chemistryAudit, offset: 0, index: 3)
         encoder.setBuffer(activeCellCount, offset: 0, index: 4)
         encoder.setBuffer(activeCellIndices, offset: 0, index: 5)
+        encoder.setBuffer(activeChemistryTileIndices, offset: 0, index: 6)
+        encoder.setBuffer(activeChemistryTileCount, offset: 0, index: 7)
         dispatchCells(encoder, pipeline: buildTileCellListsPipeline)
-        encoder.memoryBarrier(resources: [tileCellCounts, tileCellIndices, chemistryAudit])
+        encoder.memoryBarrier(resources: [
+            tileCellCounts, tileCellIndices, activeChemistryTileIndices,
+            activeChemistryTileCount, chemistryAudit
+        ])
+
+        encoder.setComputePipelineState(prepareTileChemistryDispatchPipeline)
+        encoder.setBuffer(activeChemistryTileCount, offset: 0, index: 0)
+        encoder.setBuffer(activeChemistryTileDispatchArguments, offset: 0, index: 1)
+        encoder.dispatchThreads(
+            MTLSize(width: 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
+        encoder.memoryBarrier(resources: [activeChemistryTileDispatchArguments])
 
         encoder.setComputePipelineState(settleTileChemistryPipeline)
         encoder.setBuffer(chemistryIntents, offset: 0, index: 0)
@@ -4591,21 +4644,20 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellIdentities, offset: 0, index: 4)
         encoder.setBuffer(moleculeState, offset: 0, index: 5)
         encoder.setBuffer(speciesRegistry, offset: 0, index: 6)
+        encoder.setBuffer(activeChemistryTileIndices, offset: 0, index: 7)
         encoder.setBuffer(chemistryAudit, offset: 0, index: 8)
         encoder.setTexture(state, index: 0)
         encoder.setTexture(ecology, index: 1)
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 9)
-        encoder.dispatchThreads(
-            MTLSize(
-                width: Self.gridSize * Self.gridSize * Self.worldCount,
-                height: 1,
-                depth: 1
-            ),
-            threadsPerThreadgroup: MTLSize(
-                width: min(settleTileChemistryPipeline.maxTotalThreadsPerThreadgroup, 128),
-                height: 1,
-                depth: 1
-            )
+        encoder.setBuffer(activeChemistryTileCount, offset: 0, index: 10)
+        precondition(
+            settleTileChemistryPipeline.maxTotalThreadsPerThreadgroup >= 64,
+            "Tile chemistry settlement requires a 64-thread group"
+        )
+        encoder.dispatchThreadgroups(
+            indirectBuffer: activeChemistryTileDispatchArguments,
+            indirectBufferOffset: 0,
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
         )
         encoder.memoryBarrier(resources: [
             chemistrySettlements, moleculeState, chemistryAudit, state, ecology

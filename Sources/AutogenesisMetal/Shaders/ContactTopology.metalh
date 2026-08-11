@@ -20,7 +20,9 @@ kernel void clearActiveCellContactEffects(
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) { return; }
     uint cellIndex = activeCellIndices[compactIndex];
     if (cellIndex >= maxCellCount) { return; }
-    for (uint channel = 0u; channel < cellContactEffectChannelCount; ++channel) {
+    // Budget channels are initialized immediately below; clearing them first
+    // would add four redundant atomic stores for every living cell.
+    for (uint channel = 0u; channel < trophicSourceBudgetChannel; ++channel) {
         atomic_store_explicit(
             &contactEffects[cellIndex * cellContactEffectChannelCount + channel],
             0, memory_order_relaxed
@@ -1504,28 +1506,25 @@ kernel void applyCellContactEffects(
     uint gid = activeCellIndices[compactIndex];
     if (gid >= maxCellCount) { return; }
     uint contactBase = gid * cellContactEffectChannelCount;
-    int rawX = atomic_exchange_explicit(&contactEffects[contactBase], 0, memory_order_relaxed);
-    int rawY = atomic_exchange_explicit(&contactEffects[contactBase + 1u], 0, memory_order_relaxed);
-    int rawDamage = atomic_exchange_explicit(&contactEffects[contactBase + 2u], 0, memory_order_relaxed);
-    int rawTrophic = atomic_exchange_explicit(&contactEffects[contactBase + 3u], 0, memory_order_relaxed);
-    int rawReproductiveContribution = atomic_exchange_explicit(
-        &contactEffects[contactBase + 4u], 0, memory_order_relaxed
+    // Contact resolution is complete before this exclusive per-cell consumer
+    // runs. A load plus conditional clear avoids an atomic read-modify-write
+    // for the overwhelmingly common zero channels on Apple GPUs.
+    int rawX = consumePublishedInt(&contactEffects[contactBase]);
+    int rawY = consumePublishedInt(&contactEffects[contactBase + 1u]);
+    int rawDamage = consumePublishedInt(&contactEffects[contactBase + 2u]);
+    int rawTrophic = consumePublishedInt(&contactEffects[contactBase + 3u]);
+    int rawReproductiveContribution = consumePublishedInt(
+        &contactEffects[contactBase + 4u]
     );
-    int rawReproductivePleasure = atomic_exchange_explicit(
-        &contactEffects[contactBase + 5u], 0, memory_order_relaxed
+    int rawReproductivePleasure = consumePublishedInt(
+        &contactEffects[contactBase + 5u]
     );
-    int rawMemoryCue = atomic_exchange_explicit(
-        &contactEffects[contactBase + 6u], 0, memory_order_relaxed
+    int rawMemoryCue = consumePublishedInt(&contactEffects[contactBase + 6u]);
+    int rawMemoryAction = consumePublishedInt(&contactEffects[contactBase + 7u]);
+    int rawMemoryConsequence = consumePublishedInt(
+        &contactEffects[contactBase + 8u]
     );
-    int rawMemoryAction = atomic_exchange_explicit(
-        &contactEffects[contactBase + 7u], 0, memory_order_relaxed
-    );
-    int rawMemoryConsequence = atomic_exchange_explicit(
-        &contactEffects[contactBase + 8u], 0, memory_order_relaxed
-    );
-    int rawMemoryWeight = atomic_exchange_explicit(
-        &contactEffects[contactBase + 9u], 0, memory_order_relaxed
-    );
+    int rawMemoryWeight = consumePublishedInt(&contactEffects[contactBase + 9u]);
     if (atomic_load_explicit(&cellOccupancy[gid], memory_order_relaxed) !=
         cellOccupancyAlive) { return; }
 
@@ -1603,14 +1602,14 @@ kernel void applyCellContactEffects(
     uint membraneBase = gid * membraneVertexCount;
     for (uint vertexIndex = 0u; vertexIndex < membraneVertexCount; ++vertexIndex) {
         uint effectBase = (gid * membraneVertexCount + vertexIndex) * 3u;
-        int vertexRawX = atomic_exchange_explicit(
-            &membraneContactEffects[effectBase], 0, memory_order_relaxed
+        int vertexRawX = consumePublishedInt(
+            &membraneContactEffects[effectBase]
         );
-        int vertexRawY = atomic_exchange_explicit(
-            &membraneContactEffects[effectBase + 1u], 0, memory_order_relaxed
+        int vertexRawY = consumePublishedInt(
+            &membraneContactEffects[effectBase + 1u]
         );
-        int vertexRawPressure = atomic_exchange_explicit(
-            &membraneContactEffects[effectBase + 2u], 0, memory_order_relaxed
+        int vertexRawPressure = consumePublishedInt(
+            &membraneContactEffects[effectBase + 2u]
         );
         MembraneVertex membranePoint = membraneVertices[membraneBase + vertexIndex];
         float2 vertexWorldForce = float2(vertexRawX, vertexRawY) /

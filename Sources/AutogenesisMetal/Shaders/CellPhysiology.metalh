@@ -377,7 +377,7 @@ kernel void evolveOrganismCells(
     float counterReactiveCapacity = 0.0;
     for (uint moleculeSlot = 0u; moleculeSlot < moleculeSlotsPerTile; ++moleculeSlot) {
         MoleculePacket packet = molecules[
-            chemistryTile * moleculeSlotsPerTile + moleculeSlot
+            moleculeIndex(chemistryTile, moleculeSlot)
         ];
         if (packet.speciesID == 0u || packet.speciesID >= speciesRegistryCapacity) {
             continue;
