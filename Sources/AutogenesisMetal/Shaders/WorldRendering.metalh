@@ -835,14 +835,24 @@ inline CellRasterData makeCellRasterData(
     output.environment = cell.environment;
     output.development = cell.development;
     output.boundaryDynamics = cell.boundaryDynamics;
-    output.programEcology = programInteractions[cellIndex];
+    float molecularRasterBlend = smoothstep(36.0, 54.0, observationZoom);
+    output.programEcology = mix(
+        programInteractions[cellIndex], cell.molecularEnergy,
+        molecularRasterBlend
+    );
     uint programIndex = cellIdentities[cellIndex].programIndex;
     output.construction = saturate(cell.tissueGeometry.z) *
         saturate(cell.membraneProperties);
     output.lifeHistory = cell.lifeHistory;
-    output.functionalActivity = cell.functionalActivity;
-    output.learning = cell.learning;
-    output.constructionFlux = cell.constructionFlux;
+    output.functionalActivity = mix(
+        cell.functionalActivity, cell.compartments, molecularRasterBlend
+    );
+    output.learning = mix(
+        cell.learning, cell.proteostasis, molecularRasterBlend
+    );
+    output.constructionFlux = mix(
+        cell.constructionFlux, cell.molecularExpression, molecularRasterBlend
+    );
     output.lineageHue = programSlotMatches(
         programSlots, programIndex, cellIdentities[cellIndex].programGeneration
     ) &&

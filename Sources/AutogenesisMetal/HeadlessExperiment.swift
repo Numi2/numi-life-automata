@@ -465,6 +465,13 @@ struct ExperimentSample: Codable {
     let meanStorageDeposition: Double
     let meanCatalyticDeposition: Double
     let meanReactiveBindingDeposition: Double
+    let meanFoldedCatalysis: Double
+    let meanMolecularTransport: Double
+    let meanMolecularRegulation: Double
+    let meanStructuralAssembly: Double
+    let meanProtonGradient: Double
+    let meanFoldedProteinFraction: Double
+    let meanCompartmentalization: Double
     let meanEnergeticIndependence: Double
     let meanBoundaryMaintenance: Double
     let meanMechanochemicalClosure: Double

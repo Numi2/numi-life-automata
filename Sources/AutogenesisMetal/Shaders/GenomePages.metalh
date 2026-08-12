@@ -8,15 +8,28 @@ inline float4 expressedGenomePagePayload(
 ) {
     uint page = firstPage;
     uint traversed = 0u;
+    float4 expression = float4(0.0);
+    float totalDosage = 0.0;
     while (page < genomePageCapacity && traversed < 512u) {
         GenomePage candidate = pages[page];
         if (candidate.header.x == pageType) {
-            return candidate.payload[min(payloadIndex, 14u)];
+            // Every matching copy contributes. Duplications therefore alter
+            // dosage, split copies can diverge, and no page is silently hidden
+            // behind the first match in the immutable overlay chain.
+            float dosage = clamp(
+                0.35 + abs(candidate.payload[14].w), 0.35, 2.0
+            );
+            expression += candidate.payload[min(payloadIndex, 14u)] * dosage;
+            totalDosage += dosage;
         }
         page = candidate.header.y;
         ++traversed;
     }
-    return float4(0.0);
+    // Copy number changes amplitude sublinearly, while divergence between
+    // duplicates still changes the vector itself. This preserves dosage effects
+    // without allowing unbounded page multiplication to explode a phenotype.
+    return totalDosage > 0.0
+        ? expression / sqrt(max(totalDosage, 1.0)) : float4(0.0);
 }
 
 inline AgentState decodeAgentExpressionFromGenomePages(
@@ -212,7 +225,10 @@ inline bool publishGenomeOverlay(
         return false;
     }
     GenomeHeader parent = headers[parentProgram];
-    uint operation = hash32(seed + 31u) & 3u;
+    // Point change, deletion, duplication, pseudogenization, and local
+    // inversion are equally addressable structural outcomes. Noncoding pages
+    // can therefore drift silently and later be recruited back into expression.
+    uint operation = hash32(seed + 31u) % 5u;
     if (!recombined && operation == 1u && parent.pageCount > 1u) {
         GenomeHeader child = parent;
         child.firstPage = pages[parent.firstPage].header.y;
@@ -232,6 +248,50 @@ inline bool publishGenomeOverlay(
         child.lastMutationDistance = mutationDistance;
         child.replicationGeneration = parent.replicationGeneration + 1u;
         child.flags = 1u | 4u;
+        headers[childProgram] = child;
+        return true;
+    }
+    bool invertHeadPair = !recombined && operation == 4u &&
+        pages[parent.firstPage].header.y < genomePageCapacity;
+    if (invertHeadPair) {
+        uint secondParentPage = pages[parent.firstPage].header.y;
+        uint remainingChain = pages[secondParentPage].header.y;
+        uint inversionStart = reserveGenomePageRange(&arenaState[0], 2u);
+        if (inversionStart >= genomePageCapacity) {
+            atomicAddSaturatingUInt(&chemistryAudit->skippedGenomeMutationCount, 1u);
+            return false;
+        }
+        GenomePage invertedFirst = pages[secondParentPage];
+        GenomePage invertedSecond = pages[parent.firstPage];
+        invertedFirst.header.y = inversionStart + 1u;
+        invertedFirst.header.z = atomic_fetch_add_explicit(
+            &arenaState[1], 1u, memory_order_relaxed
+        );
+        invertedFirst.header.w = childGeneration;
+        invertedSecond.header.y = remainingChain;
+        invertedSecond.header.z = atomic_fetch_add_explicit(
+            &arenaState[1], 1u, memory_order_relaxed
+        );
+        invertedSecond.header.w = childGeneration;
+        pages[inversionStart] = invertedFirst;
+        pages[inversionStart + 1u] = invertedSecond;
+        GenomeHeader child = parent;
+        child.firstPage = inversionStart;
+        child.generation = childGeneration;
+        child.genomeHash = hash32(
+            childGenomeHash ^ inversionStart ^ 0x7f4a7c15u
+        );
+        child.parentGenomeHash = parent.genomeHash;
+        child.secondParentGenomeHash = 0u;
+        child.originBirthID = childOriginBirthID;
+        child.parentProgramIndex = parentProgram;
+        child.parentProgramGeneration = parent.generation;
+        child.secondParentProgramIndex = maxGenomeHeaderCount;
+        child.secondParentProgramGeneration = 0u;
+        child.mutationDistance = parent.mutationDistance + mutationDistance;
+        child.lastMutationDistance = mutationDistance;
+        child.replicationGeneration = parent.replicationGeneration + 1u;
+        child.flags = 1u | 8u;
         headers[childProgram] = child;
         return true;
     }
@@ -261,8 +321,9 @@ inline bool publishGenomeOverlay(
         }
     }
     GenomePage overlay;
+    bool pseudogenized = !recombined && operation == 3u;
     overlay.header = uint4(
-        pageType,
+        pseudogenized ? genomePageNoncoding : pageType,
         splitPage ? pageIndex + 1u : parent.firstPage,
         atomic_fetch_add_explicit(&arenaState[1], 1u, memory_order_relaxed),
         childGeneration
@@ -279,7 +340,7 @@ inline bool publishGenomeOverlay(
         random01(seed + 23u),
         random01(seed + 29u)
     );
-    if (pageType == genomePageReaction) {
+    if (!pseudogenized && pageType == genomePageReaction) {
         enforceAtomBalancedReactionPage(overlay);
     }
     pages[pageIndex] = overlay;
@@ -330,7 +391,8 @@ inline bool publishGenomeOverlay(
     child.mutationDistance = parent.mutationDistance + mutationDistance;
     child.lastMutationDistance = mutationDistance;
     child.replicationGeneration = parent.replicationGeneration + 1u;
-    child.flags = 1u | (recombined ? 2u : 0u);
+    child.flags = 1u | (recombined ? 2u : 0u) |
+        (pseudogenized ? 16u : 0u);
     headers[childProgram] = child;
     return true;
 }

@@ -19,7 +19,7 @@ Swift owns scheduling, controls, read-only observation, journaling, checkpoint c
 
 The 1024 x 1024 quantum field remains unitary apart from explicitly audited coupling. World chemistry uses two RGBA textures for eight dense basis materials and eight `MoleculePacket` records per tile. `SpeciesDefinition` records are immutable after publication.
 
-Physical organisms occupy a shared pool of 9,216 cells. Every cell has a permanent ID independent of storage slot, a parent-cell ID, a component owner, a union-find root, twelve membrane vertices, physiology, signaling, memory, life-history burdens, and membrane physical and chemical properties.
+Physical organisms occupy a shared pool of 9,216 cells. Every cell has a permanent ID independent of storage slot, a parent-cell ID, a component owner, a union-find root, twelve membrane vertices, physiology, signaling, memory, life-history burdens, and membrane physical and chemical properties. Each cell also owns eight finite transcript slots and sixteen finite protein slots; the pools are checkpointed causal state.
 
 Up to 4,096 `GenomeHeader` records point into a 65,536-page arena. A `GenomePage` is 256 bytes and names its type, next page, innovation/module ID, and generation. Headers and pages are copy-on-write: unchanged ancestry is shared, while mutation publishes immutable overlays. Arena exhaustion increments `skippedGenomeMutationCount` and leaves reproduction viable with the inherited chain.
 
@@ -41,19 +41,22 @@ Each chemistry update:
 
 ## Deterministic metabolism
 
-Metabolism has three phases:
+Metabolism and expression have four phases:
 
 1. `publishCellChemistryIntents` emits four requested uptakes and four outputs per living cell.
 2. `buildTileCellLists` groups cells by tile, and `settleTileChemistry` processes each tile in permanent-ID order against finite molecule packets.
-3. `evolveOrganismCells` consumes `CellChemistrySettlement` and pays ATP, work, repair, growth, signaling, secretion, and heat.
+3. `evolveMolecularExpression` transcribes finite templates, translates and folds proteins, resolves binding competition, turns over damage, and updates paid membrane gradients.
+4. `evolveOrganismCells` consumes only the settled chemistry and folded molecular capabilities, then pays ATP, work, repair, growth, signaling, secretion, and heat.
 
 This removes order-dependent chemical claims. Delayed material and energy ledgers remain explicit so production and recycling can be audited at the next chemistry step.
 
 ## Genome expression
 
-Page types are regulation, reactions, transporters, receptors, material recipes, junctions, electrical dynamics, and plasticity. Expression traverses linked pages with a bounded corruption guard, not a biological graph-size ceiling.
+Page types are regulation, reactions, transporters, receptors, material recipes, junctions, electrical dynamics, plasticity, and noncoding sequence. Expression traverses linked pages with a bounded corruption guard, not a biological graph-size ceiling. Multiple matching pages contribute with bounded copy-number dosage; the first matching page has no privileged causal shortcut.
 
-Mutation can duplicate, delete, split, overlay, and recombine page chains. Reaction overlays are normalized after mutation: product basis composition equals reactant composition, and requested work is capped by the declared source. Lifetime memory and learned weights live in cells, not genome pages.
+Mutation can duplicate, delete, split, pseudogenize, locally invert, overlay, and recombine page chains. Reaction overlays are normalized after mutation: product basis composition equals reactant composition, and requested work is capped by the declared source. Lifetime memory and learned weights live in cells, not genome pages.
+
+Genome pages do not directly actuate physiology. Eight transcript slots and sixteen protein slots impose finite expression competition. Protein concentration, folding, damage, binding competition, localization, chaperoning, and proteolysis gate catalysis, transport, regulation, structure, receptor activity, and pump/channel balance. Expression work is reserved before discretionary ATP use.
 
 ## Cells, bodies, and life histories
 
@@ -103,11 +106,12 @@ One biological step is scheduled on a single ordered Metal command-buffer timeli
 2. basis/molecule/environment evolution;
 3. physical protocell nucleation when chemistry permits;
 4. cell intent publication, tile-list construction, and deterministic settlement;
-5. cell physiology, regulation, learning, membrane chemistry, and death;
-6. membrane vertex dynamics and contact-pair resolution;
-7. junction maintenance, union-find, fission/fusion, and division;
-8. constructed-material and delayed-ledger publication;
-9. active compaction, observer reductions, and rendering.
+5. finite transcription, translation, folding, molecular competition, and electrochemical pumping;
+6. protein-gated cell physiology, learning, membrane chemistry, and death;
+7. membrane vertex dynamics and contact-pair resolution;
+8. junction maintenance, union-find, fission/fusion, and division;
+9. constructed-material and delayed-ledger publication;
+10. active compaction, observer reductions, and rendering.
 
 Checkpoint copies happen at a committed step boundary. Recovery restores causal buffers and deterministic counters; observer history is rolled back to the same committed step.
 

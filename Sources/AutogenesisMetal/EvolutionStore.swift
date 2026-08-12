@@ -84,6 +84,13 @@ struct ChemistryObservation: Sendable, Equatable {
     let membranePrecursorAvailability: Double
     let catalyticReactionFlux: Double
     let matterRecyclingFlux: Double
+    let foldedCatalysis: Double
+    let membraneTransport: Double
+    let molecularRegulation: Double
+    let structuralAssembly: Double
+    let protonGradient: Double
+    let foldedProteinFraction: Double
+    let compartmentalization: Double
 }
 
 struct PopulationObservation: Sendable, Equatable {
@@ -129,6 +136,13 @@ struct WorldObservation: Sendable, Equatable {
     var quantumNorm: Double = 0
     var meanBasisMaterialAvailability: Double = 0
     var meanMolecularActivity: Double = 0
+    var meanFoldedCatalysis: Double = 0
+    var meanMolecularTransport: Double = 0
+    var meanMolecularRegulation: Double = 0
+    var meanStructuralAssembly: Double = 0
+    var meanProtonGradient: Double = 0
+    var meanFoldedProteinFraction: Double = 0
+    var meanCompartmentalization: Double = 0
     var meanReactiveMolecularLoad: Double = 0
     var meanMembranePrecursorAvailability: Double = 0
     var meanQuantumOrder: Double = 0
@@ -513,7 +527,14 @@ extension WorldObservation {
             reactiveMolecularLoad: meanReactiveMolecularLoad,
             membranePrecursorAvailability: meanMembranePrecursorAvailability,
             catalyticReactionFlux: meanCatalyticReactionFlux,
-            matterRecyclingFlux: meanMatterRecyclingFlux
+            matterRecyclingFlux: meanMatterRecyclingFlux,
+            foldedCatalysis: meanFoldedCatalysis,
+            membraneTransport: meanMolecularTransport,
+            molecularRegulation: meanMolecularRegulation,
+            structuralAssembly: meanStructuralAssembly,
+            protonGradient: meanProtonGradient,
+            foldedProteinFraction: meanFoldedProteinFraction,
+            compartmentalization: meanCompartmentalization
         )
     }
 

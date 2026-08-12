@@ -916,7 +916,7 @@ kernel void divideAndReduceOrganismCells(
                         parentIdentity.programIndex, donorIdentity.programIndex,
                         daughterProgram, daughterProgramGeneration,
                         childProgramAgent.genomeHash, childIdentity.persistentID,
-                        1u + hash32(divisionSeed + 1733u) % 8u,
+                        1u + hash32(divisionSeed + 1733u) % 9u,
                         max(childProgramAgent.lastMutationDistance, 0.001),
                         divisionSeed ^ 0x6f137a4du, true
                     );
@@ -982,7 +982,7 @@ kernel void divideAndReduceOrganismCells(
                         parentIdentity.programIndex, maxGenomeHeaderCount,
                         daughterProgram, daughterProgramGeneration,
                         childProgramAgent.genomeHash, childIdentity.persistentID,
-                        1u + hash32(divisionSeed + 1811u) % 8u,
+                        1u + hash32(divisionSeed + 1811u) % 9u,
                         max(childProgramAgent.lastMutationDistance, 0.001),
                         divisionSeed ^ 0x93d765b9u, false
                     );
@@ -1230,6 +1230,10 @@ kernel void divideAndReduceOrganismCells(
     float4 functionalActivityTotal = float4(0.0);
     float4 learningTotal = float4(0.0);
     float4 constructionTotal = float4(0.0);
+    float4 molecularEnergyTotal = float4(0.0);
+    float4 molecularExpressionTotal = float4(0.0);
+    float4 proteostasisTotal = float4(0.0);
+    float4 compartmentTotal = float4(0.0);
     uint programFingerprint = 0u;
     uint maximumProgramReplicationGeneration = 0u;
     index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
@@ -1248,6 +1252,10 @@ kernel void divideAndReduceOrganismCells(
         functionalActivityTotal += cell.functionalActivity;
         learningTotal += cell.learning;
         constructionTotal += cell.constructionFlux;
+        molecularEnergyTotal += cell.molecularEnergy;
+        molecularExpressionTotal += cell.molecularExpression;
+        proteostasisTotal += cell.proteostasis;
+        compartmentTotal += cell.compartments;
         float4 strongestEpisode;
         strongestEmbodiedMemory(cellMemories[index], strongestEpisode);
         float episodeWeight = max(strongestEpisode.w, 0.0001);
@@ -1567,6 +1575,10 @@ kernel void divideAndReduceOrganismCells(
     aggregate.functionalActivity = functionalActivityTotal * inverseCount;
     aggregate.learning = learningTotal * inverseCount;
     aggregate.constructionFlux = constructionTotal * inverseCount;
+    aggregate.molecularEnergy = molecularEnergyTotal * inverseCount;
+    aggregate.molecularExpression = molecularExpressionTotal * inverseCount;
+    aggregate.proteostasis = proteostasisTotal * inverseCount;
+    aggregate.compartments = compartmentTotal * inverseCount;
     aggregates[owner] = aggregate;
     agent.programReplicationGeneration = maximumProgramReplicationGeneration;
     agents[owner] = agent;

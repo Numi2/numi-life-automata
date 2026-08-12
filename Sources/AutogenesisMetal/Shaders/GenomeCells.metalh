@@ -530,6 +530,12 @@ inline CellState emptyCell() {
     cell.functionalActivity = float4(0.0);
     cell.learning = float4(0.0);
     cell.constructionFlux = float4(0.0);
+    cell.molecularEnergy = float4(0.0);
+    cell.molecularExpression = float4(0.0);
+    cell.proteostasis = float4(1.0, 0.0, 0.0, 0.0);
+    cell.compartments = float4(0.0);
+    cell.molecularUptakeSpecies = uint4(0u, 3u, 2u, 6u);
+    cell.molecularOutputSpecies = uint4(4u, 5u, 2u, 7u);
     return cell;
 }
 
@@ -593,6 +599,12 @@ inline CellState founderCell(AgentState agent, ResonanceExpressionCache resonanc
     cell.functionalActivity = float4(0.72, 0.28, 0.0, 0.0);
     cell.learning = float4(0.0);
     cell.constructionFlux = float4(0.0);
+    cell.molecularEnergy = float4(0.08, 0.06, 0.12, 0.0);
+    cell.molecularExpression = float4(0.0);
+    cell.proteostasis = float4(1.0, 0.0, 0.0, 0.0);
+    cell.compartments = float4(0.0);
+    cell.molecularUptakeSpecies = uint4(0u, 3u, 2u, 6u);
+    cell.molecularOutputSpecies = uint4(4u, 5u, 2u, 7u);
     return cell;
 }
 
@@ -1225,6 +1237,10 @@ inline uint seedOrganismCells(
     aggregate.functionalActivity = founder.functionalActivity;
     aggregate.learning = founder.learning;
     aggregate.constructionFlux = founder.constructionFlux;
+    aggregate.molecularEnergy = founder.molecularEnergy;
+    aggregate.molecularExpression = founder.molecularExpression;
+    aggregate.proteostasis = founder.proteostasis;
+    aggregate.compartments = founder.compartments;
     aggregates[owner] = aggregate;
     return cellIndex;
 }

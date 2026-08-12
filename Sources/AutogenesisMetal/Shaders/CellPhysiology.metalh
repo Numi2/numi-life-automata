@@ -120,6 +120,10 @@ kernel void evolveOrganismCells(
         agents[owner], programIndex, programLineageRecords
     );
     CellState cell = cellsIn[gid];
+    float catalyticProtein = saturate(cell.molecularExpression.x);
+    float transportProtein = saturate(cell.molecularExpression.y);
+    float regulatoryProtein = saturate(cell.molecularExpression.z);
+    float structuralProtein = saturate(cell.molecularExpression.w);
     float4 existingMembraneProperties = saturate(cell.membraneProperties);
     float4 existingMembraneChemistry = saturate(cell.membraneChemistry);
     float membraneThickness = existingMembraneProperties.x;
@@ -276,20 +280,14 @@ kernel void evolveOrganismCells(
                         other.boundaryDynamics.y
                     ) * conductance;
                     integumentTransmission += conductance;
-                    uint transportProgramIndex = cellIdentities[otherIndex].programIndex;
-                    AgentState transportProgram = agent;
-                    float transportCompatibility = 1.0;
-                    if (transportProgramIndex < maxGenomeHeaderCount &&
-                        transportProgramIndex != programIndex) {
-                        transportProgram = agentWithCellProgram(
-                            agents[owner], transportProgramIndex, programLineageRecords
-                        );
-                        transportCompatibility = receptorChemistryCompatibility(
-                            agent, transportProgram
-                        );
-                    }
-                    float sharingGain = min(agent.junctionChemistry.y, transportProgram.junctionChemistry.y) *
-                        transportCompatibility;
+                    float transportCompatibility = saturate(
+                        1.0 - abs(cell.compartments.y - other.compartments.y) * 0.58 -
+                            abs(regulatoryProtein - other.molecularExpression.z) * 0.32
+                    );
+                    float sharingGain = min(
+                        transportProtein, saturate(other.molecularExpression.y)
+                    ) * transportCompatibility *
+                        (0.22 + min(cell.compartments.y, other.compartments.y) * 0.78);
                     float otherRepairUrgency = cellularRepairUrgency(
                         other.physiology.w,
                         other.signals.z,
@@ -326,8 +324,8 @@ kernel void evolveOrganismCells(
                 );
                 float compatibility = receptorChemistryCompatibility(agent, otherProgram);
                 float incompatibility = 1.0 - compatibility;
-                incomingRejectionTotal += otherProgram.junctionChemistry.z * incompatibility * weight;
-                outgoingRejectionTotal += agent.junctionChemistry.z * incompatibility * weight;
+                incomingRejectionTotal += other.proteostasis.y * incompatibility * weight;
+                outgoingRejectionTotal += cell.proteostasis.y * incompatibility * weight;
                 receptorChemistryCompatibilityTotal += compatibility * weight;
                 mixedContactWeight += weight;
             }
@@ -459,9 +457,10 @@ kernel void evolveOrganismCells(
     );
     float environmentalDrive = environmentalMechanicalAmplitude(localEnvironment);
     float2 ecologicalGradientLocal = rotateWorldToTissue(
-        nutrientGradientWorld * agent.transportExpression.x + mineralGradientWorld * agent.transportExpression.y +
-            secondaryFeedstockGradientWorld * agent.transportExpression.z -
-            dangerGradientWorld * (0.72 + agent.metabolicExpression.w * 1.18),
+        nutrientGradientWorld * transportProtein +
+            mineralGradientWorld * saturate(cell.molecularEnergy.y) +
+            secondaryFeedstockGradientWorld * saturate(cell.proteostasis.w) -
+            dangerGradientWorld * (0.72 + catalyticProtein * 1.18),
         agent
     );
     float2 displacementX = mechanicalField.read(coordinateRight, 0).xy -
@@ -610,7 +609,7 @@ kernel void evolveOrganismCells(
         0.0, 1.0
     );
     float neighborSignalInput = saturate(max(meanNeighborCalcium, meanNeighborERK));
-    float mechanosensoryDrive = resonantResponse * (0.10 + agent.metabolicExpression.z * 0.26) *
+    float mechanosensoryDrive = resonantResponse * (0.10 + regulatoryProtein * 0.26) *
         saturate(uniforms.intervention.x);
     float metabolicDrive = (cell.physiology.x - 0.46) * 0.22;
     float calciumCurrent = max(calcium - 0.08, 0.0) * 0.065;
@@ -644,7 +643,7 @@ kernel void evolveOrganismCells(
     float previousGaitPhase = fract(cell.boundaryDynamics.w + 1.0);
     float uptakePotential = 0.00125 * (
         localState.x * cell.phenotype.z + localEcology.x * cell.phenotype.w +
-        localEcology.y * agent.transportExpression.z * 0.34
+        localEcology.y * cell.proteostasis.w * 0.34
     );
     float extracellularAccess = pow(membraneExposure, 0.70);
     uptakePotential *= extracellularAccess * (0.35 + membranePermeability * 0.65);
@@ -739,7 +738,10 @@ kernel void evolveOrganismCells(
     float repairClearance = saturate(cell.regulation.w) *
         physiologicalSupport * development.allocationControl.z * 0.00072;
     float proteostasisBurden = clamp(
-        previousProteostasis + damageProduction - repairClearance,
+        previousProteostasis + damageProduction +
+            cell.proteostasis.y * 0.00012 -
+            repairClearance * (0.78 + cell.proteostasis.z * 0.52) -
+            cell.proteostasis.w * 0.00040,
         0.0, 1.0
     );
     float physicalReproductiveReadiness =
@@ -756,80 +758,22 @@ kernel void evolveOrganismCells(
             regulatoryTransition) * development.morphogenesisB.x -
         stableClosure * development.morphogenesisB.y
     );
-    float regulatorySensors[24] = {
-        clamp(cell.physiology.x * 2.0 - 1.0, -1.0, 1.0),
-        clamp(voltage / 1.8, -1.0, 1.0),
-        fieldStrain,
-        saturate(contactCount / 4.2),
-        clamp(
-            cell.signals.x * development.morphogenTransport.x -
-                cell.signals.y * development.morphogenTransport.y +
-                extracellularReceptorBalance * 0.46 +
-                (cell.development.z - 0.5) * 0.35,
-            -1.0, 1.0
-        ),
-        clamp(uptakePotential * 1350.0 - externalStress -
-            cell.signals.z * 0.35, -1.0, 1.0),
-        clamp(resonantResponse *
-            (1.0 + existingMembraneChemistry.z * 0.55), -1.0, 1.0),
-        saturate(cell.membrane.w * 8.0 + abs(cell.membrane.z - 1.0)),
-        clamp((cell.membrane.z - 1.0) * 1.8, -1.0, 1.0),
-        saturate(cell.membrane.w * 6.0 +
-            junctionStrainMemory * 2.0 + woundCue * 0.65),
-        saturate(localEnvironment.w * 0.22 +
-            reactiveMolecularLoad * 0.85 + localEcology.y * 0.12 +
-            woundCue * 0.72),
-        clamp((localState.x - localEcology.x) / feedstockTotal, -1.0, 1.0),
-        saturate(incomingRejection + mixedContactWeight * 0.16),
-        saturate(junctionConductance * 0.55 +
-            junctionStrainMemory * 2.4),
-        membraneExposure,
-        clamp((cell.development.z - 0.5) * 1.4 +
-            junctionPolarityAlignment / max(contactCount, 0.001),
-            -1.0, 1.0),
-        axialPosition,
-        lateralPosition,
-        segmentationWave,
-        developmentalPlasticity * 2.0 - 1.0,
-        physicalReproductiveReadiness * 2.0 - 1.0,
-        proteostasisBurden,
-        predictionError,
-        clamp(
-            localDevelopmentalField.z * 1.2 + localEcology.y * 0.35 -
-                reactiveMolecularLoad * 0.72 - 0.35,
-            -1.0, 1.0
-        )
-    };
-    bool regulatoryHot =
-        injuryPlasticity > 0.035 ||
-        junctionStrainMemory > 0.085 ||
-        incomingRejection > 0.025 ||
-        mixedContactWeight > 0.18 ||
-        abs(cell.tissueForce.w) > 0.000002 ||
-        cell.physiology.z > 0.82 ||
-        externalStress > 0.66 ||
-        max(abs(cell.signalCausality.x),
-            abs(cell.signalCausality.y)) > 0.012;
-    uint regulatoryCadence = regulatoryHot
-        ? 1u : (membraneExposure > 0.34 ? 2u : 4u);
-    bool regulatoryUpdateDue = regulatoryCadence == 1u ||
-        (uniforms.step + cellIdentity.persistentID) %
-            regulatoryCadence == 0u;
-    RegulatoryOutputs regulatoryOutput;
-    if (regulatoryUpdateDue) {
-        regulatoryOutput = evolveDevelopmentalProgram(
-            genomeHeaders, genomePages,
-            regulatoryStates, programIndex, gid, regulatorySensors,
-            regulatoryCadence
-        );
-    } else {
-        regulatoryOutput.a = cell.regulation;
-        regulatoryOutput.b = cell.regulationB;
-        regulatoryOutput.c = float4(0.0);
-    }
-    float4 regulation = regulatoryOutput.a;
-    float4 regulationB = regulatoryOutput.b;
-    float4 constructionProgram = regulatoryOutput.c;
+    // Genome pages are transcribed and translated in evolveMolecularExpression.
+    // Physiology consumes only the resulting protein-gated state; it cannot
+    // read a template and turn it directly into an action.
+    float4 regulation = cell.regulation;
+    float4 regulationB = cell.regulationB;
+    uint molecularRegulationBase = gid * regulatoryStateChannelCount;
+    float4 constructionProgram = float4(
+        regulatoryStates[molecularRegulationBase + 8u],
+        regulatoryStates[molecularRegulationBase + 9u],
+        regulatoryStates[molecularRegulationBase + 10u],
+        regulatoryStates[molecularRegulationBase + 11u]
+    ) * saturate(0.08 + cell.molecularExpression.z * 1.28);
+    // Molecular expression is already cadence-controlled by finite transcript
+    // and protein turnover, so material targets consume its current result.
+    bool regulatoryUpdateDue = true;
+    uint regulatoryCadence = 1u;
     float proliferationProgram = regulation.x;
     float adhesiveProgram = regulation.y;
     float contractileProgram = regulation.z;
@@ -999,8 +943,8 @@ kernel void evolveOrganismCells(
     );
     float4 constructionCompetence = float4(
         secretionProgram * motilityProgram *
-            saturate((agent.transportExpression.w - 0.025) * 2.2),
-        adhesiveProgram * repairProgram * agent.metabolicExpression.w,
+            saturate((transportProtein - 0.025) * 2.2),
+        adhesiveProgram * repairProgram * structuralProtein,
         permeabilityProgram * secretionProgram *
             (0.35 + saturate(resonantAmplitude * 5.0) * 0.65),
         motilityProgram * (0.24 + erk * 0.76)
@@ -1044,7 +988,7 @@ kernel void evolveOrganismCells(
         permeabilityProgram,
         junctionConductance,
         abs(extracellularReceptorBalance) + development.morphogenTransport.z * 0.35,
-        secretionProgram * agent.metabolicExpression.y
+        secretionProgram * catalyticProtein
     ));
     float4 requestedChemistryBuild = max(
         chemistryTarget - existingMembraneChemistry, float4(0.0)
@@ -1124,10 +1068,14 @@ kernel void evolveOrganismCells(
     float consumedRecycledMatter = settledAmounts.z;
     float substrateEnergy = settlementIsCurrent
         ? max(chemistrySettlement.capturedFreeEnergy, 0.0) : 0.0;
+    float chemiosmoticSupport = saturate(
+        cell.molecularEnergy.x * 0.44 + cell.molecularEnergy.y * 0.24 +
+            cell.molecularEnergy.z * 0.32
+    );
     float conversionEfficiency = clamp(
-        0.52 + agent.metabolicExpression.w * 0.28 - max(agent.transportExpression.x + agent.transportExpression.y +
-            agent.transportExpression.z - 1.30, 0.0) * 0.08,
-        0.34, 0.88
+        0.12 + catalyticProtein * 0.54 + chemiosmoticSupport * 0.22 -
+            max(transportProtein - 0.82, 0.0) * 0.06,
+        0.08, 0.88
     );
     float uptake = substrateEnergy * conversionEfficiency;
     float conversionHeat = max(substrateEnergy - uptake, 0.0);
@@ -1163,8 +1111,8 @@ kernel void evolveOrganismCells(
         boundaryMaintenance * 0.000018;
     float junctionMaterialWork = junctionMaterialDemand * 0.0000045 +
         junctionStrainMemory * 0.000016;
-    float cellularCatalyticMoleculeSecretion = secretionProgram * agent.metabolicExpression.y *
-        agent.metabolicExpression.w * membraneExposure * metabolicReadiness *
+    float cellularCatalyticMoleculeSecretion = secretionProgram * catalyticProtein *
+        cell.proteostasis.x * membraneExposure * metabolicReadiness *
         (0.000002 + localEcology.y * 0.000014) * (0.55 + catalyticCoating * 0.90) +
         catalyticDeposition * 0.000020;
     float cellularReactiveMoleculeNeutralization = molecularCountermeasure * molecularDamageLoad *
@@ -1184,7 +1132,7 @@ kernel void evolveOrganismCells(
         discretionaryActivityScale;
     float crossbreedingPreparation = mixedProgramTissue &&
         meanReceptorChemistryCompatibility >= 0.0
-        ? saturate(meanReceptorChemistryCompatibility) * agent.junctionChemistry.w *
+        ? saturate(meanReceptorChemistryCompatibility) * regulatoryProtein *
             saturate(junctionConductance) * metabolicReadiness *
             physicalReproductiveReadiness * (0.24 + replicationActivity * 0.76) *
             discretionaryActivityScale
@@ -1199,6 +1147,7 @@ kernel void evolveOrganismCells(
         crossbreedingPreparation * 0.000075 + junctionTransportWork +
         junctionMaterialWork + chemicalCountermeasureWork) *
         mix(0.16, 1.0, metabolicReadiness) * discretionaryActivityScale;
+    float molecularExpressionWork = max(cell.molecularEnergy.w, 0.0);
     float activeWork = discretionaryActiveWork + requestedRepairWork;
     float dissipation = externalStress * 0.00032 + fieldWaveSpeed * 0.000035 +
         dot(cell.velocity, cell.velocity) * 2.8 + barrierLoad *
@@ -1209,11 +1158,19 @@ kernel void evolveOrganismCells(
         rejectionCost + rejectionDamage;
     float availableATP = max(cell.physiology.x + uptake + atpSharingFlux, 0.0);
     committedChemicalWork = min(committedChemicalWork, availableATP);
-    float discretionaryATP = max(availableATP - committedChemicalWork, 0.0);
+    float paidMolecularExpressionWork = min(
+        molecularExpressionWork,
+        max(availableATP - committedChemicalWork, 0.0)
+    );
+    float discretionaryATP = max(
+        availableATP - committedChemicalWork - paidMolecularExpressionWork,
+        0.0
+    );
     float expenseScale = plannedATPExpense > 0.0
         ? min(discretionaryATP / plannedATPExpense, 1.0) : 1.0;
     maintenance *= expenseScale;
     activeWork *= expenseScale;
+    activeWork += paidMolecularExpressionWork;
     frequencyWork *= expenseScale;
     dissipation *= expenseScale;
     rejectionCost *= expenseScale;
@@ -1459,16 +1416,16 @@ kernel void evolveOrganismCells(
     cell.signals.zw = float2(stress, apoptosis);
     float centralProgram = fateMemory;
     cell.phenotype.x = mix(cell.phenotype.x,
-        clamp(0.14 + agent.metabolicExpression.y * 0.30 + centralProgram * 0.16 + adhesiveProgram * 0.42, 0.0, 1.0),
+        clamp(0.14 + cell.molecularExpression.w * 0.30 + centralProgram * 0.16 + adhesiveProgram * 0.42, 0.0, 1.0),
         0.0060);
     cell.phenotype.y = mix(cell.phenotype.y,
-        clamp(0.10 + agent.metabolicExpression.z * 0.26 + (1.0 - centralProgram) * 0.18 + contractileProgram * 0.48,
+        clamp(0.10 + cell.molecularExpression.z * 0.26 + (1.0 - centralProgram) * 0.18 + contractileProgram * 0.48,
             0.0, 1.0), 0.0060);
     cell.phenotype.z = mix(cell.phenotype.z,
-        clamp(0.12 + agent.transportExpression.x * 0.50 + centralProgram * 0.12 + proliferationProgram * 0.16,
+        clamp(0.12 + transportProtein * 0.50 + centralProgram * 0.12 + proliferationProgram * 0.16,
             0.0, 1.0), 0.0040);
     cell.phenotype.w = mix(cell.phenotype.w,
-        clamp(0.12 + agent.transportExpression.y * 0.50 + (1.0 - centralProgram) * 0.12 + repairProgram * 0.16,
+        clamp(0.12 + cell.proteostasis.w * 0.50 + (1.0 - centralProgram) * 0.12 + repairProgram * 0.16,
             0.0, 1.0), 0.0040);
     cell.physiology = float4(atp, biomass, cycle, membraneIntegrity);
     cell.dynamics = float4(voltage, recovery, oscillatorPhase, naturalFrequency);
@@ -1497,6 +1454,13 @@ kernel void evolveOrganismCells(
         cuePrediction, predictionError, habituation, acquiredBehavior
     );
     cell.constructionFlux = materialActivity * expenseScale;
+    float gradientConsumption = substrateEnergy * conversionEfficiency;
+    cell.molecularEnergy = float4(
+        max(cell.molecularEnergy.x - gradientConsumption * 0.014, 0.0),
+        max(cell.molecularEnergy.y - gradientConsumption * 0.008, 0.0),
+        max(cell.molecularEnergy.z - gradientConsumption * 0.011, 0.0),
+        paidMolecularExpressionWork
+    );
 
     float2 boundaryNormal = length(cell.tissueGeometry.xy) > 0.0001
         ? normalize(cell.tissueGeometry.xy)
@@ -1567,7 +1531,7 @@ kernel void evolveOrganismCells(
     mechanicalForce += float2(
         dot(localMechanical.xy, heading),
         dot(localMechanical.xy, lateral)
-    ) * (0.0008 + agent.metabolicExpression.z * 0.0014);
+    ) * (0.0008 + regulatoryProtein * 0.0014);
     cell.velocity = cell.velocity * mix(0.90, 0.62, barrierLoad) + mechanicalForce;
     float cellSpeed = length(cell.velocity);
     if (cellSpeed > 0.0024) { cell.velocity *= 0.0024 / cellSpeed; }
@@ -1737,7 +1701,7 @@ kernel void evolveCellMembranes(
     float2 tractionDirection = length(cell.tissueForce.xy) > 0.000001
         ? normalize(cell.tissueForce.xy) : boundaryNormal;
     float sensorAngle = cell.dynamics.z * 2.0 * M_PI_F +
-        agent.dynamicExpression.w * M_PI_F + cell.resonance.x * 1.8;
+        saturate(cell.molecularExpression.z) * M_PI_F + cell.resonance.x * 1.8;
     float2 sensorDirection = normalizedOr(
         boundaryNormal * 0.52 + float2(cos(sensorAngle), sin(sensorAngle)) * 0.48,
         boundaryNormal

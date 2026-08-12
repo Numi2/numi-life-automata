@@ -202,6 +202,18 @@ struct CellState {
     float4 learning;
     // Paid stiffness, storage, catalysis, and reactive-binding material deposition.
     float4 constructionFlux;
+    // Proton gradient, ion gradient, redox potential, and requested expression work.
+    float4 molecularEnergy;
+    // Folded catalytic, transport, regulatory, and structural protein activity.
+    float4 molecularExpression;
+    // Folded fraction, damaged fraction, chaperone activity, and proteolytic recycling.
+    float4 proteostasis;
+    // Localization diversity, membrane-bound fraction, inherited foreign fraction,
+    // and persistence of internally segregated chemistry.
+    float4 compartments;
+    // Genome-derived molecule routes used by the deterministic chemistry settlement.
+    uint4 molecularUptakeSpecies;
+    uint4 molecularOutputSpecies;
 };
 
 // Four packed half4 episodes. Each episode is
@@ -339,6 +351,12 @@ struct CellAggregate {
     float4 learning;
     // Mean stiffness, storage, catalysis, and reactive-binding deposition.
     float4 constructionFlux;
+    // Mean membrane gradients/redox/work and folded molecular capabilities.
+    float4 molecularEnergy;
+    float4 molecularExpression;
+    // Mean folding quality, damage/turnover machinery, and compartmentalization.
+    float4 proteostasis;
+    float4 compartments;
 };
 
 struct QualificationTargetMeasurement {
@@ -431,6 +449,10 @@ struct AgentObservationRecord {
     float4 functionalActivity;
     float4 learning;
     float4 constructionFlux;
+    float4 molecularEnergy;
+    float4 molecularExpression;
+    float4 proteostasis;
+    float4 compartments;
 };
 
 struct CellObservationRecord {
@@ -457,6 +479,10 @@ struct CellObservationRecord {
     float4 functionalActivity;
     float4 learning;
     float4 constructionFlux;
+    float4 molecularEnergy;
+    float4 molecularExpression;
+    float4 proteostasis;
+    float4 compartments;
 };
 
 struct LineageEventRecord {
@@ -946,8 +972,13 @@ inline float reproductiveEndocrineDrive(
     float refractoryAvailability = mix(
         0.30, 1.0, 1.0 - smoothstep(0.20, 0.72, cell.signaling.z)
     );
+    // The program parameter is retained for ABI stability, but reproductive
+    // permission is produced by folded regulatory/structural molecules rather
+    // than a directly readable inherited coefficient.
+    (void)program;
     float inheritedInvestment = sqrt(max(
-        program.junctionChemistry.w * saturate(development.mechanochemistryB.w / 1.80),
+        cell.molecularExpression.z * cell.molecularExpression.w *
+            saturate(development.mechanochemistryB.w / 1.80),
         0.0
     ));
     float readinessProduct = max(
@@ -1704,6 +1735,7 @@ inline float4 quantumCoinPrepared(float4 spinor, float2 coin) {
 #include "GenomeCells.metalh"
 #include "GenomeObservation.metalh"
 #include "BodyComponents.metalh"
+#include "MolecularExpression.metalh"
 #include "CellPhysiology.metalh"
 #include "ContactTopology.metalh"
 #include "SimulationAudits.metalh"

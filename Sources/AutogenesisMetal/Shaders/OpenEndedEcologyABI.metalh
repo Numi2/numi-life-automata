@@ -10,6 +10,9 @@ constant uint genomePageCapacity = 65536u;
 constant uint genomePageByteCount = 256u;
 constant uint chemistryIntentWidth = 4u;
 constant uint tileCellCapacity = 64u;
+constant uint transcriptSlotsPerCell = 8u;
+constant uint proteinSlotsPerCell = 16u;
+constant uint invalidGenomePage = 0xffffffffu;
 
 constant uint genomePageRegulation = 1u;
 constant uint genomePageReaction = 2u;
@@ -19,6 +22,7 @@ constant uint genomePageMaterial = 5u;
 constant uint genomePageJunction = 6u;
 constant uint genomePageElectrical = 7u;
 constant uint genomePagePlasticity = 8u;
+constant uint genomePageNoncoding = 9u;
 
 constant uint moleculeFlagCatalytic = 1u << 0u;
 constant uint moleculeFlagMembraneForming = 1u << 1u;
@@ -97,6 +101,30 @@ struct MaterialTileProperties {
     float4 mechanics;
     // Conductivity, storage, erosion resistance, and retained mass.
     float4 transport;
+};
+
+// A transcript is a finite-lived, cell-local copy of one immutable template.
+// identity is template page, module ID, source genome hash, and persistent cell ID.
+// kinetics is concentration, synthesis drive, age, and decay rate.
+struct TranscriptRecord {
+    uint4 identity;
+    float4 kinetics;
+};
+
+// Proteins are coarse physical molecules rather than direct genome outputs.
+// Their folded concentration gates every downstream capability. The activity
+// vectors describe continuous physical effects; they are not named cell roles.
+struct ProteinRecord {
+    // Template page, module ID, source genome hash, and localization compartment.
+    uint4 identity;
+    // Concentration, folded fraction, molecular damage, and age.
+    float4 abundance;
+    // Stability, charge, polarity, and membrane affinity.
+    float4 physical;
+    // Catalysis, transport, regulation, and structural assembly.
+    float4 activity;
+    // Receptor binding, chaperoning, proteolysis, and pump/channel balance.
+    float4 coupling;
 };
 
 struct ChemistryAuditState {

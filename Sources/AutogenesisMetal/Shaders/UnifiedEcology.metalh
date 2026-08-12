@@ -1,6 +1,5 @@
 #pragma once
 
-constant uint invalidGenomePage = 0xffffffffu;
 constant uint componentInterventionFlag = 1u << 6u;
 constant uint protocellOriginExclusionSteps = 4096u;
 constant float protocellAmphiphileCost = 0.010;
@@ -902,6 +901,17 @@ kernel void resetActiveTileChemistryState(
     }
 }
 
+inline float availableMoleculeAmount(
+    device const MoleculePacket* molecules,
+    uint tile,
+    uint speciesID
+) {
+    if (speciesID == 0u || speciesID >= speciesRegistryCapacity) { return 0.0; }
+    uint slot = (speciesID - 1u) % moleculeSlotsPerTile;
+    MoleculePacket packet = molecules[moleculeIndex(tile, slot)];
+    return packet.speciesID == speciesID ? max(packet.amount, 0.0) : 0.0;
+}
+
 kernel void senseAndRegulateCells(
     device const AgentState* agents [[buffer(0)]],
     device const atomic_uint* agentOccupancy [[buffer(1)]],
@@ -939,27 +949,39 @@ kernel void senseAndRegulateCells(
     uint tile = ecologyTileIndex(coordinate, uniforms);
     float4 localA = basisA.read(coordinate, 0);
     float exposure = pow(saturate(cell.tissueGeometry.z), 0.70);
-    float permeability = saturate(cell.regulationB.x);
+    float permeability = saturate(
+        cell.regulationB.x * (0.18 + cell.molecularExpression.y * 0.82) +
+        cell.molecularEnergy.y * 0.08
+    );
     float readiness = smoothstep(0.06, 0.44, cell.physiology.x) *
         smoothstep(0.22, 0.72, cell.physiology.w);
     CellChemistryIntent intent = emptyChemistryIntent();
     intent.tileIndex = tile;
     intent.persistentCellID = identity.persistentID;
     intent.flags = 1u;
-    intent.uptakeSpecies = uint4(0u, 3u, 2u, 6u);
-    intent.uptakeAmount = max(float4(
-        localA.x * (0.00018 + cell.phenotype.z * 0.00054),
-        molecules[moleculeIndex(tile, 2u)].amount * (0.010 + permeability * 0.026),
-        molecules[moleculeIndex(tile, 1u)].amount * (0.003 + cell.phenotype.w * 0.008),
-        molecules[moleculeIndex(tile, 5u)].amount * cell.regulation.w * 0.004
-    ) * exposure, float4(0.0));
-    intent.outputSpecies = uint4(4u, 5u, 2u, 7u);
+    intent.uptakeSpecies = cell.molecularUptakeSpecies;
+    float4 available = float4(0.0);
+    for (uint route = 0u; route < chemistryIntentWidth; ++route) {
+        uint speciesID = intent.uptakeSpecies[route];
+        available[route] = speciesID == 0u ? localA.x :
+            availableMoleculeAmount(molecules, tile, speciesID);
+    }
+    float transportCapacity = 0.04 + cell.molecularExpression.y * 0.96;
+    intent.uptakeAmount = max(available * float4(
+        0.00018 + cell.phenotype.z * 0.00054,
+        0.003 + permeability * 0.026,
+        0.002 + cell.phenotype.w * 0.008,
+        0.001 + cell.regulation.w * 0.006
+    ) * exposure * transportCapacity, float4(0.0));
+    intent.outputSpecies = cell.molecularOutputSpecies;
     float4 requestedOutput = max(float4(
         cell.regulationB.y * cell.signaling.y * 0.0000024,
         cell.regulation.y * cell.regulation.w * 0.0000018,
         cell.regulationB.y * cell.regulationB.x * 0.0000012,
         cell.regulation.w * max(cell.signals.z - 0.25, 0.0) * 0.0000010
     ) * readiness * exposure, float4(0.0));
+    requestedOutput *= 0.05 + cell.molecularExpression.w * 0.58 +
+        cell.molecularExpression.z * 0.37;
     float requestedMass = dot(requestedOutput, float4(1.0));
     float matterBudget = max(cell.physiology.y - 0.16, 0.0) * 0.00008;
     float matterScale = requestedMass > 0.0
@@ -1138,7 +1160,10 @@ inline bool initializeGenomePages(
     ResonanceExpressionCache resonance,
     uint seed
 ) {
-    uint pageCount = 8u;
+    // Founders begin with independently mutable duplicate regulation and
+    // reaction templates plus two neutral pages. The neutral sequence can
+    // accumulate silent variation and later become coding through mutation.
+    uint pageCount = 12u;
     uint firstPage = reserveGenomePageRange(&genomeArenaState[0], pageCount);
     if (firstPage >= genomePageCapacity) {
         atomicAddSaturatingUInt(&chemistryAudit->skippedGenomeMutationCount, 1u);
@@ -1147,28 +1172,35 @@ inline bool initializeGenomePages(
     for (uint pageOffset = 0u; pageOffset < pageCount; ++pageOffset) {
         uint pageIndex = firstPage + pageOffset;
         uint nextPage = pageOffset + 1u < pageCount ? pageIndex + 1u : invalidGenomePage;
+        uint pageType = pageOffset < 8u ? pageOffset + 1u :
+            (pageOffset < 10u ? genomePageNoncoding :
+                (pageOffset == 10u ? genomePageReaction : genomePageRegulation));
         genomePages[pageIndex].header = uint4(
-            pageOffset + 1u, nextPage,
+            pageType, nextPage,
             atomic_fetch_add_explicit(&genomeArenaState[1], 1u, memory_order_relaxed),
             programGeneration
         );
         for (uint payload = 0u; payload < 15u; ++payload) {
             genomePages[pageIndex].payload[payload] = float4(0.0);
         }
-        if (pageOffset == 0u) {
+        if (pageType == genomePageRegulation) {
             for (uint module = 0u; module < 15u; ++module) {
                 genomePages[pageIndex].payload[module] = float4(
-                    fract((float(module) + random01(seed + module)) / 24.0),
-                    signedRandom(seed + module * 11u) * 1.4,
-                    signedRandom(seed + module * 13u) * 0.42,
+                    fract((float(module) + random01(seed + module + pageOffset * 43u)) / 24.0),
+                    signedRandom(seed + module * 11u + pageOffset * 47u) * 1.4,
+                    signedRandom(seed + module * 13u + pageOffset * 53u) * 0.42,
                     fract((float(module % regulatoryStateChannelCount) + 0.5) /
                         float(regulatoryStateChannelCount))
                 );
             }
-        } else if (pageOffset == 1u) {
+        } else if (pageType == genomePageReaction) {
             genomePages[pageIndex].payload[0] = max(founder.transportExpression, float4(0.0));
             genomePages[pageIndex].payload[1] = max(founder.dynamicExpression, float4(0.0));
-            genomePages[pageIndex].payload[5] = max(founder.metabolicExpression, float4(0.0));
+            genomePages[pageIndex].payload[5] = clamp(
+                max(founder.metabolicExpression, float4(0.0)) +
+                    randomSigned4(seed + pageOffset * 59u) * 0.04,
+                0.0, 1.0
+            );
             genomePages[pageIndex].payload[4] = float4(
                 max(founder.energy * 0.2, 0.0),
                 max(founder.energy * 0.12, 0.0), 0.0, 0.0
@@ -1176,33 +1208,44 @@ inline bool initializeGenomePages(
             GenomePage balanced = genomePages[pageIndex];
             enforceAtomBalancedReactionPage(balanced);
             genomePages[pageIndex] = balanced;
-        } else if (pageOffset == 2u) {
+        } else if (pageType == genomePageTransport) {
             genomePages[pageIndex].payload[0] = founder.transportExpression;
             genomePages[pageIndex].payload[1] = founder.metabolicExpression;
-        } else if (pageOffset == 3u) {
+        } else if (pageType == genomePageReceptor) {
             genomePages[pageIndex].payload[0] = founder.receptorChemistry;
             genomePages[pageIndex].payload[1] = expression.morphogenTransport;
             genomePages[pageIndex].payload[2] = expression.chemicalResponse;
-        } else if (pageOffset == 4u) {
+        } else if (pageType == genomePageMaterial) {
             genomePages[pageIndex].payload[0] = expression.materialSynthesis;
             genomePages[pageIndex].payload[1] = expression.morphogenesisB;
             genomePages[pageIndex].payload[2] = expression.morphogenKinetics;
             genomePages[pageIndex].payload[3] = expression.morphogenesisA;
-        } else if (pageOffset == 5u) {
+        } else if (pageType == genomePageJunction) {
             genomePages[pageIndex].payload[0] = founder.junctionChemistry;
             genomePages[pageIndex].payload[1] = expression.junctionMaterial;
-        } else if (pageOffset == 6u) {
+        } else if (pageType == genomePageElectrical) {
             genomePages[pageIndex].payload[0] = founder.dynamicExpression;
             genomePages[pageIndex].payload[1] = expression.mechanochemistryA;
             genomePages[pageIndex].payload[2] = expression.mechanochemistryB;
             genomePages[pageIndex].payload[3] = resonance.mechanics;
             genomePages[pageIndex].payload[4] = resonance.tuning;
-        } else {
+        } else if (pageType == genomePagePlasticity) {
             genomePages[pageIndex].payload[0] = expression.plasticityControl;
             genomePages[pageIndex].payload[1] = expression.turnoverControl;
             genomePages[pageIndex].payload[2] = expression.allocationControl;
             genomePages[pageIndex].payload[3] = expression.morphogenesisB;
+        } else {
+            // Neutral pages retain heritable sequence and dosage without a
+            // direct physiological effect. A later type-changing mutation can
+            // recruit this sequence as a new template.
+            for (uint payload = 0u; payload < 15u; ++payload) {
+                genomePages[pageIndex].payload[payload] = randomSigned4(
+                    seed + pageOffset * 67u + payload * 71u
+                ) * 0.18;
+            }
         }
+        genomePages[pageIndex].payload[14].w = 0.65 +
+            random01(seed + pageOffset * 73u) * 0.35;
     }
     GenomeHeader header;
     header.firstPage = firstPage;

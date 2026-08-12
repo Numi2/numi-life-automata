@@ -477,13 +477,19 @@ fragment float4 molecularCellFragment(
     float footPad = visibleMembrane * footState.x;
     float footSole = footPad * smoothstep(0.88, 0.995, radius);
 
-    // Five simulated intracellular pools drive five stable molecular species.
+    // The glyph field is driven by the actual finite expression system. It is
+    // an observer of ATP plus four folded protein capabilities, not a painted
+    // residue layer or a fixed catalog of terrestrial organelles.
     float atp = saturate(input.physiology.x);
-    float calcium = saturate(input.signaling.x);
-    float erk = saturate(input.signaling.y);
-    float morphogenA = saturate(input.signals.x);
-    float morphogenB = saturate(input.signals.y);
-    float flowPhase = float(uniforms.step) * 0.006 + input.dynamics.z * 7.0;
+    float catalyst = saturate(input.constructionFlux.x);
+    float transporter = saturate(input.constructionFlux.y);
+    float regulator = saturate(input.constructionFlux.z);
+    float structural = saturate(input.constructionFlux.w);
+    float folded = saturate(input.learning.x);
+    float molecularDamage = saturate(input.learning.y);
+    float compartmentalization = saturate(input.functionalActivity.x);
+    float flowPhase = float(uniforms.step) * 0.006 + input.dynamics.z * 7.0 +
+        input.programEcology.x * 2.4 - input.programEcology.y * 1.2;
     float2 molecularFlow = float2(
         sin(p.y * 5.0 + flowPhase),
         cos(p.x * 4.0 - flowPhase * 0.73)
@@ -521,7 +527,7 @@ fragment float4 molecularCellFragment(
             1.0 - smoothstep(0.055, 0.055 + moleculeAA, distance),
             1.0 - smoothstep(moleculeAA, moleculeAA * 2.5, abs(distance - 0.105))
         );
-        abundance = calcium;
+        abundance = catalyst * folded;
         moleculeColor = float3(0.02, 0.88, 1.0);
     } else if (selector < 0.68) {
         float2 axis = float2(0.095, 0.0);
@@ -531,18 +537,18 @@ fragment float4 molecularCellFragment(
             1.0 - smoothstep(0.070, 0.070 + moleculeAA,
                 length(moleculePosition + axis))
         );
-        abundance = erk;
+        abundance = transporter * folded;
         moleculeColor = float3(0.98, 0.08, 0.66);
     } else if (selector < 0.84) {
         glyph = 1.0 - smoothstep(
             moleculeAA, moleculeAA * 2.8, abs(length(moleculePosition) - 0.11)
         );
-        abundance = morphogenA;
+        abundance = regulator * folded;
         moleculeColor = float3(0.04, 0.64, 1.0);
     } else {
         float diamond = abs(moleculePosition.x) + abs(moleculePosition.y);
         glyph = 1.0 - smoothstep(0.095, 0.095 + moleculeAA * 2.0, diamond);
-        abundance = morphogenB;
+        abundance = structural * folded;
         moleculeColor = float3(1.0, 0.10, 0.54);
     }
     float moleculeVisibility = smoothstep(
@@ -554,18 +560,25 @@ fragment float4 molecularCellFragment(
         0.055, 0.16, abs(fract(membraneAngle * 26.0) - 0.5)
     );
     float3 lineage = hsvToRGB(float3(input.lineageHue, 0.72, 0.52));
-    float2 nuclearDirection = normalizedOr(
+    float2 expressionDirection = normalizedOr(
         input.development.xy, float2(1.0, 0.0)
     );
-    float2 nuclearPosition = nuclearDirection * (input.development.z - 0.5) * 0.22;
-    float nuclearDistance = length(p - nuclearPosition);
-    float nucleus = (1.0 - smoothstep(0.20, 0.29, nuclearDistance)) * cytoplasm;
-    float nuclearEnvelope = (1.0 - smoothstep(
-        0.018, 0.050, abs(nuclearDistance - 0.245)
+    float2 expressionPosition = expressionDirection *
+        (input.development.z - 0.5) * 0.22;
+    float expressionDistance = length(p - expressionPosition);
+    float expressionRegion = (1.0 - smoothstep(
+        mix(0.10, 0.20, compartmentalization),
+        mix(0.18, 0.31, compartmentalization), expressionDistance
     )) * cytoplasm;
-    float nucleolus = (1.0 - smoothstep(
-        0.045, 0.085, length(p - nuclearPosition - nuclearDirection * 0.055)
-    )) * nucleus;
+    float compartmentBoundary = (1.0 - smoothstep(
+        0.018, 0.050, abs(expressionDistance -
+            mix(0.16, 0.25, compartmentalization))
+    )) * cytoplasm * compartmentalization;
+    float translationFocus = (1.0 - smoothstep(
+        0.045, 0.085, length(
+            p - expressionPosition - expressionDirection * 0.055
+        )
+    )) * expressionRegion;
     float cytoplasmicFlow = 0.5 + 0.5 * sin(
         p.x * 8.0 - p.y * 5.0 + flowPhase
     );
@@ -574,9 +587,10 @@ fragment float4 molecularCellFragment(
     color += mix(float3(0.025, 0.28, 0.30), lineage, 0.34) *
         cytoplasm * cytoplasmicFlow * 0.16;
     color += mix(float3(0.52, 0.08, 0.46), lineage, 0.28) *
-        nucleus * (0.42 + erk * 0.42);
-    color += float3(0.82, 0.24, 0.72) * nuclearEnvelope * 0.58;
-    color += float3(1.0, 0.54, 0.18) * nucleolus * (0.38 + atp * 0.46);
+        expressionRegion * (0.30 + regulator * folded * 0.54);
+    color += float3(0.82, 0.24, 0.72) * compartmentBoundary * 0.58;
+    color += float3(1.0, 0.54, 0.18) * translationFocus *
+        (0.28 + folded * 0.52);
     color += moleculeColor * glyph * moleculeVisibility * cytoplasm *
         (0.54 + abundance * 0.72);
     color += mix(float3(0.04, 0.74, 1.0), float3(0.04, 1.0, 0.58), integrity) *
@@ -586,6 +600,7 @@ fragment float4 molecularCellFragment(
     color += float3(0.08, 1.0, 0.62) * membrane * paidRepair *
         saturate(1.0 - integrity) * 0.84;
     color += float3(1.0, 0.055, 0.018) * membrane * localFailure * 0.72;
+    color += float3(1.0, 0.16, 0.04) * cytoplasm * molecularDamage * 0.18;
     float molecularSurfaceMaterial =
         functionalSurfaceMagnitude(input.construction);
     color += functionalSurfaceColor(input.construction) *

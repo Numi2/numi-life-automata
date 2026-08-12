@@ -1,0 +1,493 @@
+#pragma once
+
+inline TranscriptRecord emptyTranscriptRecord(uint persistentCellID) {
+    TranscriptRecord record;
+    record.identity = uint4(invalidGenomePage, 0u, 0u, persistentCellID);
+    record.kinetics = float4(0.0);
+    return record;
+}
+
+inline ProteinRecord emptyProteinRecord() {
+    ProteinRecord record;
+    record.identity = uint4(invalidGenomePage, 0u, 0u, 0u);
+    record.abundance = float4(0.0);
+    record.physical = float4(0.0);
+    record.activity = float4(0.0);
+    record.coupling = float4(0.0);
+    return record;
+}
+
+inline uint molecularSequenceHash(GenomePage page) {
+    uint sequence = hash32(page.header.z ^ (page.header.x * 0x9e3779b9u));
+    for (uint index = 0u; index < 6u; ++index) {
+        sequence = hash32(
+            sequence ^ as_type<uint>(page.payload[index].x) ^
+            (as_type<uint>(page.payload[index].y) << 7u) ^
+            (as_type<uint>(page.payload[index].z) << 13u) ^
+            (as_type<uint>(page.payload[index].w) << 19u)
+        );
+    }
+    return sequence;
+}
+
+inline ProteinRecord proteinFromTemplate(
+    GenomePage page,
+    uint templatePage,
+    uint genomeHash,
+    float inheritedConcentration
+) {
+    ProteinRecord protein = emptyProteinRecord();
+    uint sequence = molecularSequenceHash(page);
+    uint pageType = page.header.x;
+    float4 activity = float4(
+        random01(sequence + 3u), random01(sequence + 5u),
+        random01(sequence + 7u), random01(sequence + 11u)
+    ) * 0.24;
+    if (pageType == genomePageReaction) { activity.x += 0.76; }
+    if (pageType == genomePageTransport) { activity.y += 0.76; }
+    if (pageType == genomePageRegulation) { activity.z += 0.76; }
+    if (pageType == genomePageMaterial || pageType == genomePageJunction) {
+        activity.w += 0.64;
+    }
+    if (pageType == genomePageNoncoding) { activity *= 0.015; }
+    float membraneAffinity = saturate(
+        random01(sequence + 17u) * 0.62 +
+        (pageType == genomePageTransport || pageType == genomePageReceptor ||
+            pageType == genomePageElectrical ? 0.34 : 0.0)
+    );
+    protein.identity = uint4(
+        templatePage, page.header.z, genomeHash,
+        min(uint(membraneAffinity * 4.0), 3u)
+    );
+    protein.abundance = float4(max(inheritedConcentration, 0.0), 0.18, 0.0, 0.0);
+    protein.physical = float4(
+        0.24 + random01(sequence + 19u) * 0.74,
+        signedRandom(sequence + 23u),
+        random01(sequence + 29u),
+        membraneAffinity
+    );
+    protein.activity = saturate(activity);
+    protein.coupling = saturate(float4(
+        random01(sequence + 31u) * 0.34 +
+            (pageType == genomePageReceptor ? 0.66 : 0.0),
+        random01(sequence + 37u) * 0.30 +
+            (pageType == genomePagePlasticity ? 0.58 : 0.0),
+        random01(sequence + 41u) * 0.28 +
+            (pageType == genomePagePlasticity ? 0.48 : 0.0),
+        random01(sequence + 43u) * 0.36 +
+            (pageType == genomePageElectrical ? 0.60 : 0.0)
+    ));
+    return protein;
+}
+
+inline uint findMolecularParentIndex(
+    device const CellIdentity* identities,
+    device const atomic_uint* ownerCellHeads,
+    device const uint* ownerCellNext,
+    uint owner,
+    uint parentPersistentID
+) {
+    if (owner >= maxAgentCount || parentPersistentID == 0xffffffffu) {
+        return maxCellCount;
+    }
+    uint candidate = atomic_load_explicit(
+        &ownerCellHeads[owner], memory_order_relaxed
+    );
+    uint traversed = 0u;
+    while (candidate < maxCellCount && traversed < maxCellCount) {
+        if (identities[candidate].persistentID == parentPersistentID) {
+            return candidate;
+        }
+        candidate = ownerCellNext[candidate];
+        ++traversed;
+    }
+    return maxCellCount;
+}
+
+inline float molecularProteinCompetition(
+    device const ProteinRecord* proteins,
+    uint base,
+    uint proteinSlot,
+    ProteinRecord focal
+) {
+    float competition = 0.0;
+    float focalSignature = fract(
+        float(focal.identity.y & 0xffffu) / 65535.0 + focal.physical.z * 0.37
+    );
+    for (uint other = 0u; other < proteinSlotsPerCell; ++other) {
+        if (other == proteinSlot) { continue; }
+        ProteinRecord competitor = proteins[base + other];
+        if (competitor.abundance.x <= 0.000001) { continue; }
+        float signature = fract(
+            float(competitor.identity.y & 0xffffu) / 65535.0 +
+                competitor.physical.z * 0.37
+        );
+        float distance = abs(signature - focalSignature);
+        distance = min(distance, 1.0 - distance);
+        competition += competitor.abundance.x * competitor.abundance.y *
+            smoothstep(0.10, 0.0, distance) *
+            (0.22 + competitor.coupling.x * 0.78);
+    }
+    return competition;
+}
+
+kernel void evolveMolecularExpression(
+    device const CellState* cellsIn [[buffer(0)]],
+    device CellState* cellsOut [[buffer(1)]],
+    device const atomic_uint* cellOccupancy [[buffer(2)]],
+    device const CellIdentity* identities [[buffer(3)]],
+    device const GenomeHeader* genomeHeaders [[buffer(4)]],
+    device const GenomePage* genomePages [[buffer(5)]],
+    device float* regulatoryStates [[buffer(6)]],
+    device const TranscriptRecord* transcriptsIn [[buffer(7)]],
+    device TranscriptRecord* transcriptsOut [[buffer(8)]],
+    device const ProteinRecord* proteinsIn [[buffer(9)]],
+    device ProteinRecord* proteinsOut [[buffer(10)]],
+    device const CellChemistrySettlement* settlements [[buffer(11)]],
+    device const uint* cellParentIDs [[buffer(12)]],
+    device const atomic_uint* ownerCellHeads [[buffer(13)]],
+    device const uint* ownerCellNext [[buffer(14)]],
+    constant SimulationUniforms& uniforms [[buffer(15)]],
+    device const atomic_uint* activeCellCount [[buffer(16)]],
+    device const uint* activeCellIndices [[buffer(17)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) {
+        return;
+    }
+    uint cellIndex = activeCellIndices[compactIndex];
+    if (cellIndex >= maxCellCount || atomic_load_explicit(
+        &cellOccupancy[cellIndex], memory_order_relaxed
+    ) != cellOccupancyAlive) { return; }
+    CellIdentity identity = identities[cellIndex];
+    if (identity.programIndex >= maxGenomeHeaderCount) { return; }
+    CellState cell = cellsIn[cellIndex];
+    cellsOut[cellIndex] = cell;
+    uint transcriptBase = cellIndex * transcriptSlotsPerCell;
+    uint proteinBase = cellIndex * proteinSlotsPerCell;
+    bool poolMatchesCell = transcriptsIn[transcriptBase].identity.w ==
+        identity.persistentID;
+    uint inheritedCell = maxCellCount;
+    if (!poolMatchesCell) {
+        inheritedCell = findMolecularParentIndex(
+            identities, ownerCellHeads, ownerCellNext, identity.owner,
+            cellParentIDs[cellIndex]
+        );
+    }
+    uint inheritedTranscriptBase = inheritedCell < maxCellCount
+        ? inheritedCell * transcriptSlotsPerCell : transcriptBase;
+    uint inheritedProteinBase = inheritedCell < maxCellCount
+        ? inheritedCell * proteinSlotsPerCell : proteinBase;
+
+    float molecularStress = saturate(
+        cell.signals.z * 0.42 + cell.lifeHistory.z * 0.48 +
+        (1.0 - cell.physiology.w) * 0.52
+    );
+    for (uint slot = 0u; slot < transcriptSlotsPerCell; ++slot) {
+        TranscriptRecord transcript = poolMatchesCell
+            ? transcriptsIn[transcriptBase + slot]
+            : (inheritedCell < maxCellCount
+                ? transcriptsIn[inheritedTranscriptBase + slot]
+                : emptyTranscriptRecord(identity.persistentID));
+        transcript.identity.w = identity.persistentID;
+        float decay = clamp(
+            transcript.kinetics.w + 0.0015 + molecularStress * 0.006,
+            0.0015, 0.18
+        );
+        transcript.kinetics.x *= exp(-decay * max(uniforms.dt, 0.25));
+        transcript.kinetics.z += uniforms.dt;
+        transcript.kinetics.y = 0.0;
+        transcriptsOut[transcriptBase + slot] = transcript;
+    }
+    for (uint slot = 0u; slot < proteinSlotsPerCell; ++slot) {
+        ProteinRecord protein = poolMatchesCell
+            ? proteinsIn[proteinBase + slot]
+            : (inheritedCell < maxCellCount
+                ? proteinsIn[inheritedProteinBase + slot]
+                : emptyProteinRecord());
+        float denaturation = molecularStress * (1.08 - protein.physical.x) * 0.008;
+        protein.abundance.z = saturate(
+            protein.abundance.z + denaturation -
+                cell.proteostasis.z * 0.004 - cell.proteostasis.w * 0.003
+        );
+        float turnover = 0.0008 + protein.abundance.z *
+            (0.006 + cell.proteostasis.w * 0.012);
+        protein.abundance.x *= exp(-turnover * max(uniforms.dt, 0.25));
+        protein.abundance.y = saturate(
+            protein.abundance.y +
+            (protein.physical.x * (1.0 - molecularStress) - protein.abundance.y) *
+                (0.010 + cell.proteostasis.z * 0.022) - denaturation
+        );
+        protein.abundance.w += uniforms.dt;
+        proteinsOut[proteinBase + slot] = protein;
+    }
+
+    float priorRegulator = max(cell.molecularExpression.z, 0.0);
+    float sensors[24] = {
+        cell.physiology.x * 2.0 - 1.0,
+        cell.physiology.y * 2.0 - 1.0,
+        cell.physiology.w * 2.0 - 1.0,
+        cell.signals.x * 2.0 - 1.0,
+        cell.signals.y * 2.0 - 1.0,
+        cell.signals.z * 2.0 - 1.0,
+        cell.signaling.x * 2.0 - 1.0,
+        cell.signaling.y * 2.0 - 1.0,
+        clamp(cell.dynamics.x, -1.0, 1.0),
+        clamp(cell.mechanics.y, -1.0, 1.0),
+        cell.tissueGeometry.z * 2.0 - 1.0,
+        clamp(cell.tissueForce.w, -1.0, 1.0),
+        cell.environment.x * 2.0 - 1.0,
+        cell.environment.y * 2.0 - 1.0,
+        cell.environment.z * 2.0 - 1.0,
+        cell.environment.w * 2.0 - 1.0,
+        cell.learning.x * 2.0 - 1.0,
+        cell.learning.y * 2.0 - 1.0,
+        cell.lifeHistory.x * 0.01 - 1.0,
+        cell.lifeHistory.y * 0.02 - 1.0,
+        molecularStress * 2.0 - 1.0,
+        cell.molecularEnergy.x * 2.0 - 1.0,
+        cell.molecularEnergy.y * 2.0 - 1.0,
+        cell.molecularEnergy.z * 2.0 - 1.0
+    };
+    RegulatoryOutputs encodedRegulation = evolveDevelopmentalProgram(
+        genomeHeaders, genomePages, regulatoryStates,
+        identity.programIndex, cellIndex, sensors, 1u
+    );
+    float regulatoryGate = saturate(0.06 + priorRegulator * 1.36);
+    cell.regulation = mix(cell.regulation, encodedRegulation.a, regulatoryGate);
+    cell.regulationB = mix(cell.regulationB, encodedRegulation.b, regulatoryGate);
+
+    GenomeHeader header = genomeHeaders[identity.programIndex];
+    float expressionEnergyAvailability = smoothstep(
+        0.035, 0.24, cell.physiology.x
+    );
+    uint page = header.firstPage;
+    uint traversed = 0u;
+    float transcriptionWork = 0.0;
+    while (page < genomePageCapacity && traversed < 512u) {
+        GenomePage templatePage = genomePages[page];
+        uint pageType = templatePage.header.x;
+        uint regulationChannel = templatePage.header.z % regulatoryStateChannelCount;
+        float activation = regulatoryStates[
+            cellIndex * regulatoryStateChannelCount + regulationChannel
+        ];
+        float promoter = saturate(
+            0.08 + activation * 0.72 +
+            random01(templatePage.header.z ^ header.genomeHash) * 0.20
+        );
+        if (pageType == genomePageNoncoding) {
+            promoter *= 0.06;
+        }
+        uint preferredSlot = hash32(templatePage.header.z ^ page) %
+            transcriptSlotsPerCell;
+        uint slot = preferredSlot;
+        uint weakestSlot = preferredSlot;
+        float weakestConcentration = 1000000.0;
+        bool foundTranscriptSlot = false;
+        for (uint probe = 0u; probe < transcriptSlotsPerCell; ++probe) {
+            uint candidateSlot = (preferredSlot + probe) % transcriptSlotsPerCell;
+            TranscriptRecord candidate = transcriptsOut[
+                transcriptBase + candidateSlot
+            ];
+            if (candidate.identity.x == page &&
+                candidate.identity.z == header.genomeHash) {
+                slot = candidateSlot;
+                foundTranscriptSlot = true;
+                break;
+            }
+            if (candidate.identity.x >= genomePageCapacity ||
+                candidate.kinetics.x <= 0.000001) {
+                slot = candidateSlot;
+                foundTranscriptSlot = true;
+                break;
+            }
+            if (candidate.kinetics.x < weakestConcentration) {
+                weakestConcentration = candidate.kinetics.x;
+                weakestSlot = candidateSlot;
+            }
+        }
+        if (!foundTranscriptSlot) { slot = weakestSlot; }
+        TranscriptRecord transcript = transcriptsOut[transcriptBase + slot];
+        bool sameTemplate = transcript.identity.x == page &&
+            transcript.identity.z == header.genomeHash;
+        if (sameTemplate || transcript.kinetics.x < promoter * 0.004) {
+            if (!sameTemplate) {
+                transcript = emptyTranscriptRecord(identity.persistentID);
+                transcript.identity = uint4(
+                    page, templatePage.header.z, header.genomeHash,
+                    identity.persistentID
+                );
+                transcript.kinetics.w = 0.006 +
+                    random01(templatePage.header.z + 53u) * 0.034;
+            }
+            float synthesis = promoter * (0.0040 + cell.physiology.x * 0.0120) *
+                max(uniforms.dt, 0.25) * expressionEnergyAvailability;
+            transcript.kinetics.x = min(transcript.kinetics.x + synthesis, 1.5);
+            transcript.kinetics.y = synthesis;
+            transcriptionWork += synthesis * 0.0008;
+            transcriptsOut[transcriptBase + slot] = transcript;
+        }
+        page = templatePage.header.y;
+        ++traversed;
+    }
+
+    float translationWork = 0.0;
+    for (uint transcriptSlot = 0u; transcriptSlot < transcriptSlotsPerCell;
+         ++transcriptSlot) {
+        TranscriptRecord transcript = transcriptsOut[transcriptBase + transcriptSlot];
+        uint templatePageIndex = transcript.identity.x;
+        if (templatePageIndex >= genomePageCapacity || transcript.kinetics.x <= 0.000001) {
+            continue;
+        }
+        GenomePage templatePage = genomePages[templatePageIndex];
+        if (templatePage.header.z != transcript.identity.y) { continue; }
+        uint preferredProteinSlot = hash32(
+            templatePage.header.z ^ molecularSequenceHash(templatePage)
+        ) % proteinSlotsPerCell;
+        uint proteinSlot = preferredProteinSlot;
+        uint weakestProteinSlot = preferredProteinSlot;
+        float weakestProteinConcentration = 1000000.0;
+        bool foundProteinSlot = false;
+        for (uint probe = 0u; probe < proteinSlotsPerCell; ++probe) {
+            uint candidateSlot = (preferredProteinSlot + probe) % proteinSlotsPerCell;
+            ProteinRecord candidate = proteinsOut[proteinBase + candidateSlot];
+            if (candidate.identity.x == templatePageIndex &&
+                candidate.identity.y == templatePage.header.z) {
+                proteinSlot = candidateSlot;
+                foundProteinSlot = true;
+                break;
+            }
+            if (candidate.identity.x >= genomePageCapacity ||
+                candidate.abundance.x <= 0.000001) {
+                proteinSlot = candidateSlot;
+                foundProteinSlot = true;
+                break;
+            }
+            if (candidate.abundance.x < weakestProteinConcentration) {
+                weakestProteinConcentration = candidate.abundance.x;
+                weakestProteinSlot = candidateSlot;
+            }
+        }
+        if (!foundProteinSlot) { proteinSlot = weakestProteinSlot; }
+        ProteinRecord protein = proteinsOut[proteinBase + proteinSlot];
+        bool sameProduct = protein.identity.x == templatePageIndex &&
+            protein.identity.y == templatePage.header.z;
+        float translation = transcript.kinetics.x *
+            (0.0060 + cell.physiology.x * 0.0140) * max(uniforms.dt, 0.25) *
+            expressionEnergyAvailability;
+        if (!sameProduct && protein.abundance.x > translation * 8.0) { continue; }
+        if (!sameProduct) {
+            protein = proteinFromTemplate(
+                templatePage, templatePageIndex, transcript.identity.z, 0.0
+            );
+        }
+        protein.abundance.x = min(protein.abundance.x + translation, 2.0);
+        translationWork += translation * (0.0025 + protein.physical.z * 0.0010);
+        proteinsOut[proteinBase + proteinSlot] = protein;
+    }
+
+    float4 molecularExpression = float4(0.0);
+    float4 coupling = float4(0.0);
+    float totalProtein = 0.0;
+    float foldedProtein = 0.0;
+    float damagedProtein = 0.0;
+    float membraneProtein = 0.0;
+    float foreignProtein = 0.0;
+    float4 localization = float4(0.0);
+    uint4 uptakeSpecies = uint4(0u, 3u, 2u, 6u);
+    uint4 outputSpecies = uint4(4u, 5u, 2u, 7u);
+    float4 routeStrength = float4(0.0);
+    for (uint proteinSlot = 0u; proteinSlot < proteinSlotsPerCell; ++proteinSlot) {
+        ProteinRecord protein = proteinsOut[proteinBase + proteinSlot];
+        if (protein.abundance.x <= 0.000001) { continue; }
+        float competition = molecularProteinCompetition(
+            proteinsOut, proteinBase, proteinSlot, protein
+        );
+        float allostericSignal = regulatoryStates[
+            cellIndex * regulatoryStateChannelCount +
+                (protein.identity.y % regulatoryStateChannelCount)
+        ];
+        float effective = protein.abundance.x * protein.abundance.y *
+            (0.42 + allostericSignal * 0.58) /
+            (1.0 + competition + protein.abundance.z * 2.0);
+        molecularExpression += protein.activity * effective;
+        coupling += protein.coupling * effective;
+        totalProtein += protein.abundance.x;
+        foldedProtein += protein.abundance.x * protein.abundance.y;
+        damagedProtein += protein.abundance.x * protein.abundance.z;
+        membraneProtein += protein.abundance.x * protein.physical.w;
+        foreignProtein += protein.abundance.x *
+            (protein.identity.z != header.genomeHash ? 1.0 : 0.0);
+        uint localizationIndex = min(protein.identity.w, 3u);
+        localization[localizationIndex] += effective;
+        float routing = effective * (protein.activity.y + protein.coupling.x);
+        uint route = protein.identity.y & 3u;
+        if (routing > routeStrength[route]) {
+            routeStrength[route] = routing;
+            uptakeSpecies[route] = route == 0u ? 0u :
+                1u + hash32(protein.identity.y ^ 0xa511e9b3u) % 8u;
+            outputSpecies[route] =
+                1u + hash32(protein.identity.y ^ 0x63d83595u) % 8u;
+        }
+    }
+    float inverseProtein = 1.0 / max(totalProtein, 0.000001);
+    float foldedFraction = saturate(foldedProtein * inverseProtein);
+    float damagedFraction = saturate(damagedProtein * inverseProtein);
+    float localizationTotal = dot(localization, float4(1.0));
+    float localizationDiversity = 0.0;
+    if (localizationTotal > 0.000001) {
+        float4 fractions = localization / localizationTotal;
+        localizationDiversity = saturate(
+            1.0 - dot(fractions, fractions)
+        );
+    }
+    CellChemistrySettlement settlement = settlements[cellIndex];
+    float capturedEnergy = settlement.settledStep == uniforms.step
+        ? max(settlement.capturedFreeEnergy, 0.0) : 0.0;
+    float pumpActivity = coupling.w *
+        saturate(molecularExpression.y + cell.physiology.x * 0.35);
+    float channelLeak = molecularExpression.y *
+        (0.00035 + membraneProtein * inverseProtein * 0.00065) *
+        (1.0 - saturate(coupling.w) * 0.48);
+    float protonGradient = clamp(
+        cell.molecularEnergy.x * 0.997 + pumpActivity * 0.0032 +
+        capturedEnergy * molecularExpression.x * 0.014 - channelLeak,
+        0.0, 1.5
+    );
+    float ionGradient = clamp(
+        cell.molecularEnergy.y * 0.998 + pumpActivity * 0.0024 -
+        channelLeak * 0.72,
+        0.0, 1.5
+    );
+    float redox = clamp(
+        cell.molecularEnergy.z * 0.996 + capturedEnergy *
+            molecularExpression.x * 0.018 - pumpActivity * 0.0018,
+        0.0, 1.5
+    );
+    float expressionWork = transcriptionWork + translationWork +
+        pumpActivity * 0.000028 + damagedFraction * coupling.y * 0.000016;
+    cell.molecularEnergy = float4(
+        protonGradient, ionGradient, redox, expressionWork
+    );
+    cell.molecularExpression = saturate(molecularExpression);
+    cell.proteostasis = float4(
+        foldedFraction, damagedFraction,
+        saturate(coupling.y), saturate(coupling.z)
+    );
+    float inheritedForeign = foreignProtein * inverseProtein;
+    cell.compartments = float4(
+        localizationDiversity,
+        saturate(membraneProtein * inverseProtein),
+        saturate(inheritedForeign),
+        clamp(
+            cell.compartments.w * 0.999 +
+                localizationDiversity * foldedFraction * 0.0015 +
+                inheritedForeign * foldedFraction * 0.0025 -
+                damagedFraction * 0.0018,
+            0.0, 1.0
+        )
+    );
+    cell.molecularUptakeSpecies = uptakeSpecies;
+    cell.molecularOutputSpecies = outputSpecies;
+    cellsOut[cellIndex] = cell;
+}

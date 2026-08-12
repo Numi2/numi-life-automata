@@ -139,6 +139,10 @@ kernel void initializeAgents(
     aggregate.functionalActivity = float4(0.0);
     aggregate.learning = float4(0.0);
     aggregate.constructionFlux = float4(0.0);
+    aggregate.molecularEnergy = float4(0.0);
+    aggregate.molecularExpression = float4(0.0);
+    aggregate.proteostasis = float4(0.0);
+    aggregate.compartments = float4(0.0);
     cellAggregates[gid] = aggregate;
     for (uint programIndex = gid; programIndex < maxGenomeHeaderCount;
          programIndex += maxAgentCount) {
@@ -289,6 +293,10 @@ kernel void collectAgentObservations(
     observation.functionalActivity = aggregate.functionalActivity;
     observation.learning = aggregate.learning;
     observation.constructionFlux = aggregate.constructionFlux;
+    observation.molecularEnergy = aggregate.molecularEnergy;
+    observation.molecularExpression = aggregate.molecularExpression;
+    observation.proteostasis = aggregate.proteostasis;
+    observation.compartments = aggregate.compartments;
     observations[gid] = observation;
 }
 
@@ -389,6 +397,10 @@ kernel void collectCellObservations(
     observation.functionalActivity = cell.functionalActivity;
     observation.learning = cell.learning;
     observation.constructionFlux = cell.constructionFlux;
+    observation.molecularEnergy = cell.molecularEnergy;
+    observation.molecularExpression = cell.molecularExpression;
+    observation.proteostasis = cell.proteostasis;
+    observation.compartments = cell.compartments;
     observations[gid] = observation;
 }
 

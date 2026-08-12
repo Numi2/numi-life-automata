@@ -38,6 +38,34 @@ Reaction pages use a basis-balanced grammar. Mutation may change kinetics, contr
 
 The older fixed gene vectors and 16-node/48-edge graph are not part of the causal runtime.
 
+## Templates must become molecules
+
+Genome pages do not directly command physiology. Every living cell has eight
+finite transcript slots and sixteen finite protein slots. Templates compete for
+those pools; transcription, translation, membrane pumping, folding assistance,
+and damaged-protein removal request ATP work that is reserved before optional
+cell activity. Products decay and are rebuilt, so inherited sequence alone is
+not an active capability.
+
+Folded proteins contribute continuous physical effects: catalysis, transport,
+regulation, structural assembly, receptor binding, chaperoning, proteolysis,
+and pump/channel balance. Binding competition and local regulatory chemistry
+change their effective activity. Membrane pumps build proton and ion gradients;
+channels dissipate them; captured chemical energy is converted with an
+efficiency set by the currently folded catalysts and electrochemical state.
+
+Protein localization can segregate chemistry into several internal regions
+without a named organelle catalogue. Dividing cells inherit concentrations from
+their physical parent, while newly expressed products reflect the offspring's
+own genome. Foreign inherited products are observable but are not automatically
+treated as symbiosis; persistence and organization must be demonstrated.
+
+Founders carry duplicate reaction and regulation templates plus neutral pages.
+Copy number affects expression, duplicate copies can diverge, and mutation can
+delete, split, pseudogenize, locally invert, recombine, or recruit neutral
+sequence. Multiple pages of the same kind contribute; there is no first-page
+shortcut.
+
 ## Bodies and complete lives
 
 The runtime has no juvenile, adult, reproductive-maturity, or senescence switch. Each cell carries only causal state:
@@ -86,7 +114,11 @@ Journal schema 18 keeps observer events such as species birth, cross-feeding can
 
 Metal owns quantum evolution, chemistry, cells, contact, topology, observation reduction, and rendering. Swift schedules command buffers, owns presentation, reads bounded observation rings, and manages checkpoint recovery.
 
-The shader source is divided into shared modules for the open-ecology ABI, genome pages, and unified ecology, then compiled into one Metal library. Causal state is private GPU memory. Permanent cell IDs make chemistry settlement and ancestry stable across allocation order. Active-cell and active-component lists avoid whole-pool work where possible.
+The shader source is divided into shared modules for the open-ecology ABI,
+genome pages, molecular expression, and unified ecology, then compiled into one
+Metal library. Causal state is private GPU memory. Permanent cell IDs make
+chemistry settlement and ancestry stable across allocation order. Active-cell
+and active-component lists avoid whole-pool work where possible.
 
 Audits cover quantum norm, eight basis materials, external matter and energy, chemical free energy, ATP work, heat, momentum, sparse overflow, tile overflow, skipped genome mutation, and protocell origins. Recovery checkpoints preserve causal buffers and observer history separately.
 
