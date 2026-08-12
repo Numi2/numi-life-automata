@@ -135,8 +135,12 @@ kernel void evolveOrganismCells(
     float receptorDensity = existingMembraneChemistry.z;
     float catalyticCoating = existingMembraneChemistry.w;
     CellMemoryState embodiedMemory = cellMemories[gid];
-    ProgramExpressionCache development = programExpressionCaches[programIndex];
-    ResonanceExpressionCache resonanceExpression = resonanceExpressionCaches[programIndex];
+    ProgramExpressionCache development = molecularlyAvailableProgram(
+        programExpressionCaches[programIndex], cell
+    );
+    ResonanceExpressionCache resonanceExpression = molecularlyAvailableResonance(
+        resonanceExpressionCaches[programIndex], cell
+    );
     float reproductiveDrive = reproductiveEndocrineDrive(
         cell, development, agent
     );
@@ -319,10 +323,7 @@ kernel void evolveOrganismCells(
             uint otherProgramIndex = mixedProgramTissue
                 ? cellIdentities[otherIndex].programIndex : programIndex;
             if (otherProgramIndex < maxGenomeHeaderCount && otherProgramIndex != programIndex) {
-                AgentState otherProgram = agentWithCellProgram(
-                    agents[owner], otherProgramIndex, programLineageRecords
-                );
-                float compatibility = receptorChemistryCompatibility(agent, otherProgram);
+                float compatibility = molecularContactCompatibility(cell, other);
                 float incompatibility = 1.0 - compatibility;
                 incomingRejectionTotal += other.proteostasis.y * incompatibility * weight;
                 outgoingRejectionTotal += cell.proteostasis.y * incompatibility * weight;
@@ -612,10 +613,16 @@ kernel void evolveOrganismCells(
     float mechanosensoryDrive = resonantResponse * (0.10 + regulatoryProtein * 0.26) *
         saturate(uniforms.intervention.x);
     float metabolicDrive = (cell.physiology.x - 0.46) * 0.22;
+    float electrochemicalCurrent = clamp(
+        cell.molecularEnergy.x * 0.055 + cell.molecularEnergy.y * 0.032 +
+            cell.molecularEnergy.z * 0.018,
+        0.0, 0.16
+    ) * (0.18 + membraneConductivity * 0.82) * transportProtein;
     float calciumCurrent = max(calcium - 0.08, 0.0) * 0.065;
     float voltageDerivative = (
         oldVoltage - oldVoltage * oldVoltage * oldVoltage / 3.0 - recovery +
-        0.19 + metabolicDrive + gapCoupling + mechanosensoryDrive + calciumCurrent +
+        0.19 + metabolicDrive + electrochemicalCurrent + gapCoupling +
+        mechanosensoryDrive + calciumCurrent +
         phaseDrive * 0.10 + endogenousReproductivePleasure * 0.040 +
         embodiedReplay * 0.030 + acquiredBehavior * inheritedNeuralCompetence * 0.026
     ) * 0.020;
@@ -763,13 +770,15 @@ kernel void evolveOrganismCells(
     // read a template and turn it directly into an action.
     float4 regulation = cell.regulation;
     float4 regulationB = cell.regulationB;
-    uint molecularRegulationBase = gid * regulatoryStateChannelCount;
+    // The promoter-binding state is consumed by transcription in the molecular
+    // pass. Construction capability here comes from the resulting folded
+    // products, never directly from a genome graph output.
     float4 constructionProgram = float4(
-        regulatoryStates[molecularRegulationBase + 8u],
-        regulatoryStates[molecularRegulationBase + 9u],
-        regulatoryStates[molecularRegulationBase + 10u],
-        regulatoryStates[molecularRegulationBase + 11u]
-    ) * saturate(0.08 + cell.molecularExpression.z * 1.28);
+        catalyticProtein * regulatoryProtein,
+        structuralProtein * regulatoryProtein,
+        transportProtein * regulatoryProtein,
+        structuralProtein * catalyticProtein
+    ) * saturate(cell.proteostasis.x);
     // Molecular expression is already cadence-controlled by finite transcript
     // and protein turnover, so material targets consume its current result.
     bool regulatoryUpdateDue = true;
@@ -1063,11 +1072,16 @@ kernel void evolveOrganismCells(
     float settledSecretedMass = settlementIsCurrent
         ? dot(max(chemistrySettlement.secretedAmount, float4(0.0)), float4(1.0))
         : 0.0;
-    float committedChemicalWork = settlementIsCurrent
-        ? max(chemistrySettlement.committedFreeEnergy, 0.0) : 0.0;
+    // Secreted free energy now leaves the finite intracellular pool; it is not
+    // charged to ATP a second time after deterministic settlement.
+    float committedChemicalWork = 0.0;
     float consumedRecycledMatter = settledAmounts.z;
-    float substrateEnergy = settlementIsCurrent
-        ? max(chemistrySettlement.capturedFreeEnergy, 0.0) : 0.0;
+    // Environmental packets first enter the intracellular pool. Only inherited,
+    // folded catalysts or a retained symbiont can convert their free energy into
+    // physiological work.
+    float substrateEnergy = max(
+        cell.reactionFlux.z + cell.symbiontExchange.x, 0.0
+    );
     float chemiosmoticSupport = saturate(
         cell.molecularEnergy.x * 0.44 + cell.molecularEnergy.y * 0.24 +
             cell.molecularEnergy.z * 0.32
@@ -1955,10 +1969,7 @@ kernel void evolveCellMembranes(
         cell.physiology.x,
         cell.physiology.w,
         cell.phenotype.x,
-        clamp(
-            programExpressionCaches[identity.programIndex].mechanochemistryB.w,
-            0.0, 1.80
-        )
+        molecularPropaguleInvestment(cell)
     );
     cell.tissueGeometry = float4(
         previousBoundaryNormal, previousExposure, saturate(detachmentScore)

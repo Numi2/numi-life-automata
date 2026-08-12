@@ -132,16 +132,14 @@ kernel void unionCellComponents(
                         if (programA < maxGenomeHeaderCount &&
                             programB < maxGenomeHeaderCount) {
                             distinctProgramPair = programA != programB;
-                            AgentState inheritedA = agentWithCellProgram(
-                                agent, programA, programLineageRecords
+                            float predation = max(
+                                cell.membraneProperties.y *
+                                    cell.membraneChemistry.w * cell.proteostasis.x,
+                                other.membraneProperties.y *
+                                    other.membraneChemistry.w * other.proteostasis.x
                             );
-                            AgentState inheritedB = agentWithCellProgram(
-                                otherAgent, programB, programLineageRecords
-                            );
-                            float predation = max(inheritedA.transportExpression.w, inheritedB.transportExpression.w);
-                            float pairDifference = saturate(
-                                length(inheritedA.transportExpression - inheritedB.transportExpression) * 0.42 +
-                                length(inheritedA.metabolicExpression - inheritedB.metabolicExpression) * 0.12
+                            float pairDifference = molecularProgramDifference(
+                                cell, other
                             );
                             float adhesiveCommitment =
                                 adhesion * 0.56 + min(cell.regulation.y, other.regulation.y) * 0.44;
@@ -151,12 +149,16 @@ kernel void unionCellComponents(
                             float nonAggression = 1.0 - saturate(predation * 1.8);
                             float stressTolerance = 1.0 -
                                 saturate(max(cell.signals.z, other.signals.z));
-                            float compatibility = receptorChemistryCompatibility(inheritedA, inheritedB);
+                            float compatibility = molecularContactCompatibility(
+                                cell, other
+                            );
                             float bilateralFusionInvestment = min(
-                                inheritedA.junctionChemistry.x, inheritedB.junctionChemistry.x
+                                cell.molecularExpression.w * cell.regulation.y,
+                                other.molecularExpression.w * other.regulation.y
                             );
                             float bilateralReproductiveInvestment = min(
-                                inheritedA.junctionChemistry.w, inheritedB.junctionChemistry.w
+                                molecularPropaguleInvestment(cell),
+                                molecularPropaguleInvestment(other)
                             );
                             float reproductiveRefractory = max(
                                 cell.signaling.z, other.signaling.z
@@ -230,22 +232,22 @@ kernel void unionCellComponents(
                             sameOwnerNurture = max(
                                 sexualBudNurture(
                                     cellIdentities[gid], uniforms.step,
-                                    programExpressionCaches[programA].mechanochemistryB.w
+                                    molecularPropaguleInvestment(cell)
                                 ),
                                 sexualBudNurture(
                                     cellIdentities[otherIndex], uniforms.step,
-                                    programExpressionCaches[programB].mechanochemistryB.w
+                                    molecularPropaguleInvestment(other)
                                 )
                             );
                             sameOwnerRelease = max(
                                 sexualBudRelease(
                                     cellIdentities[gid], uniforms.step,
-                                    programExpressionCaches[programA].mechanochemistryB.w,
+                                    molecularPropaguleInvestment(cell),
                                     cell.physiology.x, cell.physiology.w
                                 ),
                                 sexualBudRelease(
                                     cellIdentities[otherIndex], uniforms.step,
-                                    programExpressionCaches[programB].mechanochemistryB.w,
+                                    molecularPropaguleInvestment(other),
                                     other.physiology.x, other.physiology.w
                                 )
                             );

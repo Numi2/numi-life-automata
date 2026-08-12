@@ -534,8 +534,16 @@ inline CellState emptyCell() {
     cell.molecularExpression = float4(0.0);
     cell.proteostasis = float4(1.0, 0.0, 0.0, 0.0);
     cell.compartments = float4(0.0);
-    cell.molecularUptakeSpecies = uint4(0u, 3u, 2u, 6u);
-    cell.molecularOutputSpecies = uint4(4u, 5u, 2u, 7u);
+    cell.molecularUptakeSpecies = uint4(0u);
+    cell.molecularOutputSpecies = uint4(0u);
+    cell.intracellularSpecies = uint4(0u);
+    cell.intracellularAmount = float4(0.0);
+    cell.intracellularFreeEnergy = float4(0.0);
+    cell.reactionFlux = float4(0.0);
+    cell.internalMembrane = float4(0.0);
+    cell.symbiontIdentity = uint4(0xffffffffu, 0xffffffffu, 0u, 0u);
+    cell.symbiontState = float4(0.0);
+    cell.symbiontExchange = float4(0.0);
     return cell;
 }
 
@@ -547,7 +555,7 @@ inline MembraneVertex emptyMembraneVertex() {
     return state;
 }
 
-inline CellState founderCell(AgentState agent, ResonanceExpressionCache resonanceExpression, uint seed) {
+inline CellState founderCell(AgentState agent, uint seed) {
     CellState cell;
     cell.position = float2(0.0);
     cell.velocity = float2(0.0);
@@ -555,21 +563,21 @@ inline CellState founderCell(AgentState agent, ResonanceExpressionCache resonanc
         clamp(0.70 + agent.energy * 0.16 + signedRandom(seed + 23u) * 0.025, 0.58, 0.94),
         clamp(0.72 + agent.biomass * 0.16, 0.72, 0.90),
         0.18 + random01(seed + 29u) * 0.12,
-        clamp(0.76 + agent.metabolicExpression.w * 0.20, 0.70, 0.98)
+        clamp(0.84 + signedRandom(seed + 31u) * 0.035, 0.76, 0.92)
     );
     cell.phenotype = float4(
-        0.38 + agent.metabolicExpression.y * 0.18,
-        0.20 + agent.metabolicExpression.z * 0.16,
-        0.28 + agent.transportExpression.x * 0.28,
-        0.28 + agent.transportExpression.y * 0.28
+        0.42 + signedRandom(seed + 33u) * 0.025,
+        0.24 + signedRandom(seed + 35u) * 0.020,
+        0.36 + signedRandom(seed + 39u) * 0.025,
+        0.36 + signedRandom(seed + 41u) * 0.025
     );
     cell.signals = float4(0.52, 0.48, 0.02 + random01(seed + 31u) * 0.025, 0.0);
     cell.interaction = float4(0.0);
-    float naturalFrequency = resonanceExpression.mechanics.x;
+    float naturalFrequency = 0.0014 + random01(seed + 43u) * 0.0010;
     cell.dynamics = float4(
         -0.28 + signedRandom(seed + 37u) * 0.04,
         0.12 + random01(seed + 41u) * 0.03,
-        fract(agent.dynamicExpression.w + signedRandom(seed + 43u) * 0.045),
+        random01(seed + 47u),
         naturalFrequency * (0.80 + random01(seed + 47u) * 0.40)
     );
     cell.mechanics = float4(0.0, 0.0, 0.0, 0.92);
@@ -603,8 +611,16 @@ inline CellState founderCell(AgentState agent, ResonanceExpressionCache resonanc
     cell.molecularExpression = float4(0.0);
     cell.proteostasis = float4(1.0, 0.0, 0.0, 0.0);
     cell.compartments = float4(0.0);
-    cell.molecularUptakeSpecies = uint4(0u, 3u, 2u, 6u);
-    cell.molecularOutputSpecies = uint4(4u, 5u, 2u, 7u);
+    cell.molecularUptakeSpecies = uint4(0u);
+    cell.molecularOutputSpecies = uint4(0u);
+    cell.intracellularSpecies = uint4(0u);
+    cell.intracellularAmount = float4(0.0);
+    cell.intracellularFreeEnergy = float4(0.0);
+    cell.reactionFlux = float4(0.0);
+    cell.internalMembrane = float4(0.0);
+    cell.symbiontIdentity = uint4(0xffffffffu, 0xffffffffu, 0u, 0u);
+    cell.symbiontState = float4(0.0);
+    cell.symbiontExchange = float4(0.0);
     return cell;
 }
 
@@ -1153,12 +1169,11 @@ inline uint seedOrganismCells(
     uint programIndex,
     uint programGeneration,
     AgentState agent,
-    uint seed,
-    ResonanceExpressionCache resonanceExpression
+    uint seed
 ) {
     uint cellIndex = claimFreeCell(cellOccupancy, seed ^ owner * 2246822519u);
     if (cellIndex == maxCellCount) { return maxCellCount; }
-    cells[cellIndex] = founderCell(agent, resonanceExpression, seed);
+    cells[cellIndex] = founderCell(agent, seed);
     cellMemories[cellIndex] = emptyCellMemory();
     CellIdentity identity;
     identity.owner = owner;
@@ -1213,7 +1228,10 @@ inline uint seedOrganismCells(
     aggregate.regulation = founder.regulation;
     aggregate.regulationB = founder.regulationB;
     aggregate.causality = float4(0.0);
-    aggregate.resonance = float4(0.0, 0.0, resonanceExpression.mechanics.x, resonanceExpression.mechanics.y);
+    aggregate.resonance = float4(
+        0.0, 0.0, founder.dynamics.w,
+        0.12 + random01(seed + 149u) * 0.08
+    );
     aggregate.shape = founder.membrane;
     aggregate.signaling = founder.signaling;
     aggregate.signalCausality = float4(0.0);
@@ -1241,6 +1259,10 @@ inline uint seedOrganismCells(
     aggregate.molecularExpression = founder.molecularExpression;
     aggregate.proteostasis = founder.proteostasis;
     aggregate.compartments = founder.compartments;
+    aggregate.reactionFlux = founder.reactionFlux;
+    aggregate.internalMembrane = founder.internalMembrane;
+    aggregate.symbiontState = founder.symbiontState;
+    aggregate.symbiontExchange = founder.symbiontExchange;
     aggregates[owner] = aggregate;
     return cellIndex;
 }

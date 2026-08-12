@@ -45,7 +45,7 @@ Metabolism and expression have four phases:
 
 1. `publishCellChemistryIntents` emits four requested uptakes and four outputs per living cell.
 2. `buildTileCellLists` groups cells by tile, and `settleTileChemistry` processes each tile in permanent-ID order against finite molecule packets.
-3. `evolveMolecularExpression` transcribes finite templates, translates and folds proteins, resolves binding competition, turns over damage, and updates paid membrane gradients.
+3. `evolveMolecularExpression` transcribes finite templates, translates and folds proteins, resolves binding competition, turns over damage, executes expressed reversible reactions, and updates paid membrane gradients and internal membranes.
 4. `evolveOrganismCells` consumes only the settled chemistry and folded molecular capabilities, then pays ATP, work, repair, growth, signaling, secretion, and heat.
 
 This removes order-dependent chemical claims. Delayed material and energy ledgers remain explicit so production and recycling can be audited at the next chemistry step.
@@ -56,7 +56,11 @@ Page types are regulation, reactions, transporters, receptors, material recipes,
 
 Mutation can duplicate, delete, split, pseudogenize, locally invert, overlay, and recombine page chains. Reaction overlays are normalized after mutation: product basis composition equals reactant composition, and requested work is capped by the declared source. Lifetime memory and learned weights live in cells, not genome pages.
 
-Genome pages do not directly actuate physiology. Eight transcript slots and sixteen protein slots impose finite expression competition. Protein concentration, folding, damage, binding competition, localization, chaperoning, and proteolysis gate catalysis, transport, regulation, structure, receptor activity, and pump/channel balance. Expression work is reserved before discretionary ATP use.
+Genome pages do not directly actuate physiology. Eight transcript slots and sixteen protein slots impose finite expression competition. Promoter binding changes transcript production; regulatory products affect physiology only after translation and folding. Protein concentration, damage, binding competition, chaperoning, and proteolysis gate catalysis, transport, regulation, structure, receptor activity, and pump/channel balance. Expression work is reserved before discretionary ATP use.
+
+Intracellular reactions use species IDs and kinetic parameters from expressed reaction pages. Forward and reverse flux compete against finite molecular amounts. Species pairs share a conserved basis composition but can differ in free energy; downhill work is bounded by that difference and conversion efficiency, while uphill flux reserves ATP. The older genome-expression caches remain compact template provenance for mutation and lineage rendering, but every live actuator is masked by folded molecular products.
+
+Internal organization is material rather than categorical. Expressed structural and transporter products can consume intracellular basis stock to grow an internal membrane with evolving mass, permeability, selectivity, and integrity. The membrane changes retention and electrochemical coupling; it is not a named organelle or a cost-free compartment score.
 
 ## Cells, bodies, and life histories
 
@@ -76,6 +80,8 @@ Directional expression of those values can deform membranes or change contact, u
 ## Contact, topology, and ecology
 
 A spatial grid identifies membrane support pairs. Canonical pair processing applies equal-and-opposite impulses, vertex damage, breach, finite matter transfer, junction renewal, ligand-receptor binding, and connectivity candidates. Union-find rebuilds membrane-connected components and assigns owners deterministically from permanent IDs.
+
+Enclosure after a breach can retain material from another cell. Capture stores the donor's immutable first-page identity and genome hash, not a host-side role coefficient. A retained lineage can export energy only when its own reaction pages transform finite host-pool molecules through basis-balanced reactions. Abundance, replication, integration, dependence, conflict, exchange, and vertical transmissions are causal state; "endosymbiosis" is an observer interpretation of persistent inherited organization.
 
 Material packets alter tile mechanics and transport and remain after builders die. Molecules bind and react without toxin labels. Trophic relationships are measured from breach and matter/energy flow. Cross-lineage graphs are assembled from adhesion, enclosures, junctions, and reciprocal exchange.
 
@@ -106,10 +112,10 @@ One biological step is scheduled on a single ordered Metal command-buffer timeli
 2. basis/molecule/environment evolution;
 3. physical protocell nucleation when chemistry permits;
 4. cell intent publication, tile-list construction, and deterministic settlement;
-5. finite transcription, translation, folding, molecular competition, and electrochemical pumping;
+5. finite transcription, translation, folding, reversible enzyme reactions, molecular competition, and paid electrochemical/internal-membrane organization;
 6. protein-gated cell physiology, learning, membrane chemistry, and death;
 7. membrane vertex dynamics and contact-pair resolution;
-8. junction maintenance, union-find, fission/fusion, and division;
+8. foreign-lineage enclosure capture, junction maintenance, union-find, fission/fusion, and division;
 9. constructed-material and delayed-ledger publication;
 10. active compaction, observer reductions, and rendering.
 

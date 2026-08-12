@@ -69,6 +69,16 @@ kernel void clearActiveCellContactEffects(
         int(floor(reproductiveReceiverCapacity * float(cellContactScalarScale))),
         memory_order_relaxed
     );
+    atomic_store_explicit(
+        &contactEffects[cellIndex * cellContactEffectChannelCount +
+            endosymbiontCandidateChannel],
+        2147483647, memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &contactEffects[cellIndex * cellContactEffectChannelCount +
+            endosymbiontCaptureChannel],
+        0, memory_order_relaxed
+    );
     // The selected mate is a contact-local fact and is rebuilt every step.
     // The second-parent body ID and conception step in padding 1/2 persist.
     cellIdentities[cellIndex].identityPadding0 = 0u;
@@ -693,7 +703,8 @@ kernel void resolveMembraneContacts(
         if (separation > 0.72) { return; }
         CellState scavenger = cells[gid];
         float scavenging = saturate(
-            agents[owner].transportExpression.z * 0.52 + scavenger.regulationB.x * 0.20 +
+            scavenger.molecularExpression.y * scavenger.proteostasis.x * 0.52 +
+                scavenger.regulationB.x * 0.20 +
             scavenger.regulationB.w * 0.14 + scavenger.tissueGeometry.z * 0.08 +
             scavenger.constructionFlux.z * 0.18 + scavenger.functionalActivity.z * 0.10
         );
@@ -752,10 +763,26 @@ kernel void resolveMembraneContacts(
     );
     CellState cell = cells[gid];
     CellState other = cells[otherIndex];
-    ProgramExpressionCache cellDevelopment = programExpressionCaches[programIndex];
-    ProgramExpressionCache otherDevelopment = programExpressionCaches[otherProgramIndex];
+    ProgramExpressionCache cellDevelopment = molecularlyAvailableProgram(
+        programExpressionCaches[programIndex], cell
+    );
+    ProgramExpressionCache otherDevelopment = molecularlyAvailableProgram(
+        programExpressionCaches[otherProgramIndex], other
+    );
+    float4 cellJunctionMaterial = float4(
+        cell.membraneProperties.w * cell.molecularExpression.w,
+        cell.membraneProperties.y * cell.regulation.z,
+        cell.membraneProperties.z * cell.proteostasis.x,
+        cell.membraneChemistry.y * cell.molecularExpression.y
+    );
+    float4 otherJunctionMaterial = float4(
+        other.membraneProperties.w * other.molecularExpression.w,
+        other.membraneProperties.y * other.regulation.z,
+        other.membraneProperties.z * other.proteostasis.x,
+        other.membraneChemistry.y * other.molecularExpression.y
+    );
     float4 inheritedJunctionMaterial = sqrt(max(
-        cellDevelopment.junctionMaterial * otherDevelopment.junctionMaterial,
+        cellJunctionMaterial * otherJunctionMaterial,
         float4(0.0001)
     ));
     float scale = cellWorldScale(uniforms);
@@ -842,9 +869,15 @@ kernel void resolveMembraneContacts(
                             cellIdentities[gid].componentRoot !=
                                 cellIdentities[otherIndex].componentRoot;
                         bool fusionCandidate = !sameOwner && localGap < 0.008 &&
-                            min(agent.junctionChemistry.x, otherAgent.junctionChemistry.x) > 0.20 &&
-                            receptorChemistryCompatibility(agent, otherAgent) > 0.35 &&
-                            max(agent.transportExpression.w, otherAgent.transportExpression.w) < 0.40;
+                            min(
+                                cell.molecularExpression.w * cell.regulation.y,
+                                other.molecularExpression.w * other.regulation.y
+                            ) > 0.20 &&
+                            molecularContactCompatibility(cell, other) > 0.35 &&
+                            max(
+                                cell.membraneProperties.y * cell.membraneChemistry.w,
+                                other.membraneProperties.y * other.membraneChemistry.w
+                            ) < 0.40;
                         if (newSameOwnerConnection || fusionCandidate) {
                             atomic_store_explicit(
                                 &contactWorkState[2], 1u, memory_order_relaxed
@@ -852,7 +885,7 @@ kernel void resolveMembraneContacts(
                         }
                         if (localGap < interactionRange) {
                             float transmissionCompatibility = sameOwner ? 1.0 :
-                                receptorChemistryCompatibility(agent, otherAgent);
+                                molecularContactCompatibility(cell, other);
                             float4 episodeA;
                             float4 episodeB;
                             strongestEmbodiedMemory(cellMemories[gid], episodeA);
@@ -861,12 +894,11 @@ kernel void resolveMembraneContacts(
                                 (0.30 + transmissionCompatibility * 0.70) *
                                 saturate(1.0 - localGap / max(interactionRange, 0.0001));
                             float culturalExpression = sqrt(max(
-                                programExpressionCaches[programIndex].plasticityControl.w *
-                                programExpressionCaches[otherProgramIndex].plasticityControl.w,
-                                0.0
-                            ));
-                            culturalExpression *= sqrt(max(
                                 cells[gid].functionalActivity.z * cells[otherIndex].functionalActivity.z,
+                                0.0
+                            )) * sqrt(max(
+                                cells[gid].molecularExpression.z *
+                                    cells[otherIndex].molecularExpression.z,
                                 0.0
                             ));
                             transmission *= 0.18 + saturate(culturalExpression) * 0.82;
@@ -887,9 +919,8 @@ kernel void resolveMembraneContacts(
                             );
                             float overlapFraction = saturate(localOverlap / supportSpan);
                             float contactStrength = smoothstep(0.0, 0.20, overlapFraction);
-                            float pairDifference = saturate(
-                                length(agent.transportExpression - otherAgent.transportExpression) * 0.66 +
-                                length(agent.metabolicExpression - otherAgent.metabolicExpression) * 0.18
+                            float pairDifference = molecularProgramDifference(
+                                cell, other
                             );
                             float reproductiveContributionA = 0.0;
                             float reproductiveContributionB = 0.0;
@@ -898,17 +929,23 @@ kernel void resolveMembraneContacts(
                             if (!sameOwner && programIndex != otherProgramIndex &&
                                 cellIdentities[gid].identityPadding2 == 0u &&
                                 cellIdentities[otherIndex].identityPadding2 == 0u) {
-                                float compatibility = receptorChemistryCompatibility(
-                                    agent, otherAgent
+                                float compatibility = molecularContactCompatibility(
+                                    cell, other
                                 );
                                 float reproductiveInvestment = min(
-                                    agent.junctionChemistry.w, otherAgent.junctionChemistry.w
+                                    molecularPropaguleInvestment(cell),
+                                    molecularPropaguleInvestment(other)
                                 );
                                 float fusionInvestment = min(
-                                    agent.junctionChemistry.x, otherAgent.junctionChemistry.x
+                                    cell.molecularExpression.w * cell.regulation.y,
+                                    other.molecularExpression.w * other.regulation.y
                                 );
                                 float nonAggression = 1.0 - saturate(
-                                    max(agent.transportExpression.w, otherAgent.transportExpression.w) * 1.8
+                                    max(
+                                        cell.membraneProperties.y * cell.membraneChemistry.w,
+                                        other.membraneProperties.y *
+                                            other.membraneChemistry.w
+                                    ) * 1.8
                                 );
                                 float boundaryAccess = sqrt(max(
                                     cell.tissueGeometry.z * other.tissueGeometry.z,
@@ -1174,6 +1211,36 @@ kernel void resolveMembraneContacts(
                             float transferFromB = cellContactAmountFromFixed(
                                 transferFromBFixed
                             );
+                            if (!sameOwner && transferFromA > 0.0000001 &&
+                                other.internalMembrane.x * other.internalMembrane.w >
+                                    0.000001) {
+                                uint hostBase = otherIndex * cellContactEffectChannelCount;
+                                uint packedCapture =
+                                    (gid << endosymbiontPackedAmountBits) |
+                                    min(
+                                        uint(cellContactAmountToFixed(transferFromA)),
+                                        endosymbiontPackedAmountMask
+                                    );
+                                atomic_fetch_min_explicit(
+                                    &contactEffects[hostBase + endosymbiontCandidateChannel],
+                                    int(packedCapture), memory_order_relaxed
+                                );
+                            }
+                            if (!sameOwner && transferFromB > 0.0000001 &&
+                                cell.internalMembrane.x * cell.internalMembrane.w >
+                                    0.000001) {
+                                uint hostBase = gid * cellContactEffectChannelCount;
+                                uint packedCapture =
+                                    (otherIndex << endosymbiontPackedAmountBits) |
+                                    min(
+                                        uint(cellContactAmountToFixed(transferFromB)),
+                                        endosymbiontPackedAmountMask
+                                    );
+                                atomic_fetch_min_explicit(
+                                    &contactEffects[hostBase + endosymbiontCandidateChannel],
+                                    int(packedCapture), memory_order_relaxed
+                                );
+                            }
                             if (!sameOwner && attackA + attackB > 0.000001) {
                                 bool breached = (attackB > 0.0 && breachA > 0.05) ||
                                     (attackA > 0.0 && breachB > 0.05);
@@ -1234,20 +1301,20 @@ kernel void resolveMembraneContacts(
                                 );
                                 float sexualNurtureA = sexualBudNurture(
                                     cellIdentities[gid], uniforms.step,
-                                    cellDevelopment.mechanochemistryB.w
+                                    molecularPropaguleInvestment(cell)
                                 );
                                 float sexualNurtureB = sexualBudNurture(
                                     cellIdentities[otherIndex], uniforms.step,
-                                    otherDevelopment.mechanochemistryB.w
+                                    molecularPropaguleInvestment(other)
                                 );
                                 float sexualReleaseA = sexualBudRelease(
                                     cellIdentities[gid], uniforms.step,
-                                    cellDevelopment.mechanochemistryB.w,
+                                    molecularPropaguleInvestment(cell),
                                     cell.physiology.x, cell.physiology.w
                                 );
                                 float sexualReleaseB = sexualBudRelease(
                                     cellIdentities[otherIndex], uniforms.step,
-                                    otherDevelopment.mechanochemistryB.w,
+                                    molecularPropaguleInvestment(other),
                                     other.physiology.x, other.physiology.w
                                 );
                                 float localNurture = max(
@@ -1643,6 +1710,88 @@ kernel void applyCellContactEffects(
         }
     }
     cells[gid] = cell;
+}
+
+kernel void evolveEndosymbioticCapture(
+    device CellState* cells [[buffer(0)]],
+    device const atomic_uint* cellOccupancy [[buffer(1)]],
+    device const CellIdentity* cellIdentities [[buffer(2)]],
+    device const GenomeHeader* genomeHeaders [[buffer(3)]],
+    device atomic_int* contactEffects [[buffer(4)]],
+    constant SimulationUniforms& uniforms [[buffer(5)]],
+    device const atomic_uint* activeCellCount [[buffer(29)]],
+    device const uint* activeCellIndices [[buffer(30)]],
+    uint compactIndex [[thread_position_in_grid]]
+) {
+    if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) {
+        return;
+    }
+    uint hostIndex = activeCellIndices[compactIndex];
+    if (hostIndex >= maxCellCount || atomic_load_explicit(
+        &cellOccupancy[hostIndex], memory_order_relaxed
+    ) != cellOccupancyAlive) { return; }
+    uint base = hostIndex * cellContactEffectChannelCount;
+    int packedCandidate = atomic_load_explicit(
+        &contactEffects[base + endosymbiontCandidateChannel], memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &contactEffects[base + endosymbiontCandidateChannel],
+        2147483647, memory_order_relaxed
+    );
+    atomic_store_explicit(
+        &contactEffects[base + endosymbiontCaptureChannel], 0, memory_order_relaxed
+    );
+    if (packedCandidate < 0 || packedCandidate == 2147483647) { return; }
+    uint packedCapture = uint(packedCandidate);
+    uint donorIndex = packedCapture >> endosymbiontPackedAmountBits;
+    int captureFixed = int(packedCapture & endosymbiontPackedAmountMask);
+    if (donorIndex >= maxCellCount || captureFixed <= 0) { return; }
+    if (donorIndex == hostIndex || atomic_load_explicit(
+        &cellOccupancy[donorIndex], memory_order_relaxed
+    ) != cellOccupancyAlive) { return; }
+    CellIdentity hostIdentity = cellIdentities[hostIndex];
+    CellIdentity donorIdentity = cellIdentities[donorIndex];
+    if (hostIdentity.owner == donorIdentity.owner ||
+        donorIdentity.programIndex >= maxGenomeHeaderCount) { return; }
+    GenomeHeader donorGenome = genomeHeaders[donorIdentity.programIndex];
+    if (donorGenome.firstPage >= genomePageCapacity ||
+        donorGenome.genomeHash == 0u) { return; }
+    CellState host = cells[hostIndex];
+    CellState donor = cells[donorIndex];
+    float capturedMaterial = cellContactAmountFromFixed(captureFixed);
+    float enclosure = saturate(
+        host.internalMembrane.x * 10.0 * host.internalMembrane.w *
+            (0.25 + host.internalMembrane.z * 0.75)
+    );
+    float retention = capturedMaterial * enclosure *
+        (0.18 + host.molecularExpression.w * 0.42 +
+            host.molecularExpression.y * 0.24);
+    if (retention <= 0.0000001) { return; }
+    bool empty = host.symbiontIdentity.x == 0xffffffffu ||
+        host.symbiontState.x <= 0.000001;
+    bool sameSymbiont =
+        host.symbiontIdentity.x == donorGenome.firstPage &&
+        host.symbiontIdentity.y == donorGenome.genomeHash;
+    if (!empty && !sameSymbiont && retention <= host.symbiontState.x * 0.12) {
+        return;
+    }
+    if (empty || !sameSymbiont) {
+        host.symbiontIdentity = uint4(
+            donorGenome.firstPage, donorGenome.genomeHash, uniforms.step, 0u
+        );
+        host.symbiontState = float4(0.0);
+    }
+    host.symbiontState.x = min(
+        host.symbiontState.x + retention, 0.42
+    );
+    host.symbiontState.y = saturate(
+        mix(host.symbiontState.y, donor.molecularExpression.x, 0.18 + enclosure * 0.22)
+    );
+    host.symbiontState.z = saturate(
+        host.symbiontState.z + enclosure * retention * 0.28
+    );
+    host.compartments.z = max(host.compartments.z, saturate(retention * 24.0));
+    cells[hostIndex] = host;
 }
 
 inline void recordInvariantFailure(

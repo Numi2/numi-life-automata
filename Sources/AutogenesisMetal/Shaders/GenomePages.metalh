@@ -341,6 +341,38 @@ inline bool publishGenomeOverlay(
         random01(seed + 29u)
     );
     if (!pseudogenized && pageType == genomePageReaction) {
+        uint pair = hash32(seed ^ overlay.header.z) %
+            ((speciesRegistryCapacity - 1u) / 2u);
+        uint lowerConformer = 1u + pair * 2u;
+        bool reverseDirection = (hash32(seed + 37u) & 1u) != 0u;
+        overlay.payload[12] = as_type<float4>(uint4(
+            reverseDirection ? lowerConformer : lowerConformer + 1u,
+            reverseDirection ? lowerConformer + 1u : lowerConformer,
+            lowerConformer, lowerConformer + 1u
+        ));
+        overlay.payload[4].z = clamp(
+            abs(inheritedPayload[4].z + signedRandom(seed + 41u) * amplitude),
+            0.04, 1.4
+        );
+        overlay.payload[4].w = clamp(
+            abs(inheritedPayload[4].w + signedRandom(seed + 43u) * amplitude),
+            0.04, 1.4
+        );
+    } else if (!pseudogenized && pageType == genomePageTransport) {
+        overlay.payload[12] = as_type<float4>(uint4(
+            1u + hash32(seed + 47u) % (speciesRegistryCapacity - 1u),
+            1u + hash32(seed + 53u) % (speciesRegistryCapacity - 1u),
+            1u + hash32(seed + 59u) % (speciesRegistryCapacity - 1u),
+            1u + hash32(seed + 61u) % (speciesRegistryCapacity - 1u)
+        ));
+    } else if (!pseudogenized && pageType == genomePageRegulation) {
+        // Promoter/repressor mutation changes binding and transcription without
+        // silently changing the encoded protein's physical sequence.
+        overlay.payload[14].xy += float2(
+            signedRandom(seed + 67u), signedRandom(seed + 71u)
+        ) * amplitude;
+    }
+    if (!pseudogenized && pageType == genomePageReaction) {
         enforceAtomBalancedReactionPage(overlay);
     }
     pages[pageIndex] = overlay;
@@ -359,7 +391,10 @@ inline bool publishGenomeOverlay(
             ) * amplitude * 0.35;
         }
         if (pageType == genomePageReaction) {
+            split.payload[12] = overlay.payload[12];
             enforceAtomBalancedReactionPage(split);
+        } else if (pageType == genomePageTransport) {
+            split.payload[12] = overlay.payload[12];
         }
         pages[pageIndex + 1u] = split;
     }

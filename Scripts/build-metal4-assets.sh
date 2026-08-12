@@ -11,11 +11,14 @@ air="$temporary_root/Replicator.air"
 compiled="$temporary_root/Replicator.metallib"
 translated_script="$temporary_root/Replicator.mtl4-json"
 compiled_archive="$temporary_root/Replicator.mtl4archive"
+module_cache="$temporary_root/ModuleCache"
 runtime_only="${NUMI_RUNTIME_ONLY_BUILD:-0}"
 
 trap 'rm -rf "$temporary_root"' EXIT
 
-xcrun -sdk macosx metal -std=metal4.0 -c "$shader" -o "$air"
+mkdir -p "$module_cache"
+xcrun -sdk macosx metal -std=metal4.0 \
+    -fmodules-cache-path="$module_cache" -c "$shader" -o "$air"
 xcrun -sdk macosx metallib "$air" -o "$compiled"
 if [[ "$runtime_only" == "1" ]]; then
     mv "$compiled" "$metallib"

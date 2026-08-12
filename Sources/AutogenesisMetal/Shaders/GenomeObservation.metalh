@@ -143,6 +143,10 @@ kernel void initializeAgents(
     aggregate.molecularExpression = float4(0.0);
     aggregate.proteostasis = float4(0.0);
     aggregate.compartments = float4(0.0);
+    aggregate.reactionFlux = float4(0.0);
+    aggregate.internalMembrane = float4(0.0);
+    aggregate.symbiontState = float4(0.0);
+    aggregate.symbiontExchange = float4(0.0);
     cellAggregates[gid] = aggregate;
     for (uint programIndex = gid; programIndex < maxGenomeHeaderCount;
          programIndex += maxAgentCount) {
@@ -210,11 +214,12 @@ kernel void collectAgentObservations(
     if (gid >= maxAgentCount) { return; }
     uint occupied = atomic_load_explicit(&occupancy[gid], memory_order_relaxed);
     AgentState agent = agents[gid];
+    CellAggregate aggregate = cellAggregates[gid];
     AgentObservationRecord observation;
     observation.position = agent.position;
     observation.generation = agent.generation;
     observation.flags = occupied != 0u
-        ? (1u | (agent.transportExpression.w >= 0.08 ? 2u : 0u) |
+        ? (1u | (aggregate.trophic.y > 0.000001 ? 2u : 0u) |
             ((agent.componentFlags & componentRegeneratedFlag) != 0u ? 4u : 0u) |
             ((agent.componentFlags & componentHomeostaticFlag) != 0u ? 8u : 0u) |
             ((agent.componentFlags & componentChallengedFlag) != 0u ? 16u : 0u) |
@@ -232,7 +237,6 @@ kernel void collectAgentObservations(
     ResonanceExpressionCache resonance = validProgram
         ? resonanceExpressionCaches[programIndex] : emptyResonanceExpressionCache();
     observation.topologyHash = development.pageSummary.z;
-    CellAggregate aggregate = cellAggregates[gid];
     observation.morphology = float4(
         aggregate.physiology.x / referenceTissueCellCount,
         aggregate.morphology.z,
@@ -297,6 +301,10 @@ kernel void collectAgentObservations(
     observation.molecularExpression = aggregate.molecularExpression;
     observation.proteostasis = aggregate.proteostasis;
     observation.compartments = aggregate.compartments;
+    observation.reactionFlux = aggregate.reactionFlux;
+    observation.internalMembrane = aggregate.internalMembrane;
+    observation.symbiontState = aggregate.symbiontState;
+    observation.symbiontExchange = aggregate.symbiontExchange;
     observations[gid] = observation;
 }
 
@@ -401,6 +409,10 @@ kernel void collectCellObservations(
     observation.molecularExpression = cell.molecularExpression;
     observation.proteostasis = cell.proteostasis;
     observation.compartments = cell.compartments;
+    observation.reactionFlux = cell.reactionFlux;
+    observation.internalMembrane = cell.internalMembrane;
+    observation.symbiontState = cell.symbiontState;
+    observation.symbiontExchange = cell.symbiontExchange;
     observations[gid] = observation;
 }
 
@@ -501,12 +513,12 @@ kernel void evolveAgents(
     float cellCount = max(cellAggregate.physiology.x, 1.0);
     float tissueMass = max(cellCount * (0.58 + agent.biomass * 0.42), 1.0);
     float meanMembraneStiffness = saturate(
-        cellAggregate.regulation.y * cellAggregate.regulation.w * agent.metabolicExpression.w *
-            cellAggregate.physiology.y
+        cellAggregate.membraneProperties.y *
+            cellAggregate.molecularExpression.w * cellAggregate.physiology.y
     );
     float meanMembraneThickness = saturate(
-        cellAggregate.regulationB.y * cellAggregate.regulationB.w *
-            saturate((agent.transportExpression.w - 0.025) * 2.2) * cellAggregate.physiology.y
+        cellAggregate.membraneProperties.x *
+            cellAggregate.molecularExpression.w * cellAggregate.physiology.y
     );
     tissueMass *= 1.0 + meanMembraneStiffness * 0.85 +
         meanMembraneThickness * 0.28;

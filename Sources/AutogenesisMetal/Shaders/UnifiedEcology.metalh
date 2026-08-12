@@ -2,9 +2,9 @@
 
 constant uint componentInterventionFlag = 1u << 6u;
 constant uint protocellOriginExclusionSteps = 4096u;
-constant float protocellAmphiphileCost = 0.010;
-constant float protocellCatalystCost = 0.004;
-constant float protocellRedoxCost = 0.007;
+constant float protocellMembraneMoleculeCost = 0.010;
+constant float protocellCatalystMoleculeCost = 0.004;
+constant float protocellEnergeticMoleculeCost = 0.007;
 constant float protocellBasisAXCost = 0.006;
 constant float protocellBasisAYCost = 0.004;
 constant float protocellFreeEnergyCost = 0.012;
@@ -26,70 +26,88 @@ inline SpeciesDefinition emptySpeciesDefinition() {
     return species;
 }
 
-inline SpeciesDefinition primordialSpecies(uint speciesID) {
+// Every nonzero registry entry is a sequence-derived molecular species. Adjacent
+// odd/even IDs are conformers with exactly the same basis composition but
+// different free energy and physical behavior, providing atom-balanced
+// reversible reaction pairs without importing a terrestrial chemical alphabet.
+inline SpeciesDefinition sequenceDerivedSpecies(uint speciesID) {
     SpeciesDefinition species = emptySpeciesDefinition();
+    if (speciesID == 0u || speciesID >= speciesRegistryCapacity) { return species; }
+    uint pair = (speciesID - 1u) >> 1u;
+    uint conformer = (speciesID - 1u) & 1u;
+    uint sequence = hash32(pair ^ 0x9e3779b9u);
     species.generation = 1u;
-    switch (speciesID) {
-        case 1u: // amphiphile
-            species.basisA = uint4(4u, 8u, 2u, 0u);
-            species.basisB = uint4(1u, 0u, 0u, 0u);
-            species.physical = float4(0.14, 0.026, -0.10, 0.82);
-            species.behavior = float4(0.994, 0.38, 0.04, 0.96);
-            species.flags = moleculeFlagMembraneForming;
-            break;
-        case 2u: // folded autocatalytic peptide
-            species.basisA = uint4(3u, 5u, 2u, 2u);
-            species.basisB = uint4(0u, 1u, 0u, 0u);
-            species.physical = float4(0.18, 0.018, 0.16, 0.62);
-            species.behavior = float4(0.997, 0.44, 0.92, 0.34);
-            species.flags = moleculeFlagCatalytic;
-            break;
-        case 3u: // redox carrier
-            species.basisA = uint4(2u, 4u, 2u, 1u);
-            species.basisB = uint4(0u, 0u, 0u, 0u);
-            species.physical = float4(0.28, 0.052, -0.22, 0.74);
-            species.behavior = float4(0.989, 0.56, 0.28, 0.18);
-            break;
-        case 4u: // mobile signal
-            species.basisA = uint4(1u, 2u, 0u, 1u);
-            species.physical = float4(0.08, 0.090, 0.36, 0.68);
-            species.behavior = float4(0.982, 0.88, 0.08, 0.14);
-            species.flags = moleculeFlagSignalCarrier;
-            break;
-        case 5u: // adhesive polymer
-            species.basisA = uint4(4u, 6u, 2u, 2u);
-            species.basisB = uint4(1u, 0u, 1u, 0u);
-            species.physical = float4(0.12, 0.004, 0.04, 0.48);
-            species.behavior = float4(0.9994, 0.62, 0.12, 0.72);
-            species.flags = moleculeFlagPersistentMaterial | moleculeFlagMembraneForming;
-            break;
-        case 6u: // reactive disruptor; harm depends on receptor chemistry
-            species.basisA = uint4(2u, 2u, 3u, 0u);
-            species.basisB = uint4(0u, 1u, 0u, 0u);
-            species.physical = float4(0.22, 0.066, -0.48, 0.86);
-            species.behavior = float4(0.976, 0.94, 0.22, 0.06);
-            break;
-        case 7u: // counter-reactant
-            species.basisA = uint4(3u, 6u, 2u, 1u);
-            species.physical = float4(0.16, 0.045, 0.42, 0.58);
-            species.behavior = float4(0.991, 0.72, 0.64, 0.12);
-            species.flags = moleculeFlagCatalytic;
-            break;
-        case 8u: // persistent memory carrier
-            species.basisA = uint4(4u, 8u, 0u, 2u);
-            species.basisB = uint4(1u, 0u, 0u, 0u);
-            species.physical = float4(0.10, 0.010, 0.18, 0.52);
-            species.behavior = float4(0.999, 0.84, 0.18, 0.24);
-            species.flags = moleculeFlagSignalCarrier | moleculeFlagPersistentMaterial;
-            break;
-        default:
-            return species;
+    species.basisA = uint4(
+        1u + hash32(sequence + 3u) % 5u,
+        1u + hash32(sequence + 5u) % 9u,
+        hash32(sequence + 7u) % 4u,
+        hash32(sequence + 11u) % 3u
+    );
+    species.basisB = uint4(
+        hash32(sequence + 13u) % 3u,
+        hash32(sequence + 17u) % 2u,
+        hash32(sequence + 19u) % 2u,
+        0u
+    );
+    float hydrophobicity = random01(sequence + 23u);
+    float catalyticReach = random01(sequence + 29u);
+    float stability = 0.965 + random01(sequence + 31u) * 0.0345;
+    float conformationalEnergy = (conformer == 0u ? 0.0 : 1.0) *
+        (0.018 + random01(sequence + 37u) * 0.16);
+    species.physical = float4(
+        0.045 + random01(sequence + 41u) * 0.20 + conformationalEnergy,
+        0.006 + (1.0 - hydrophobicity) * 0.084,
+        signedRandom(sequence + 43u) * 0.72,
+        0.18 + random01(sequence + 47u) * 0.78
+    );
+    species.behavior = float4(
+        stability,
+        random01(sequence + 53u),
+        catalyticReach,
+        hydrophobicity
+    );
+    if (hydrophobicity > 0.68) { species.flags |= moleculeFlagMembraneForming; }
+    if (catalyticReach > 0.70) { species.flags |= moleculeFlagCatalytic; }
+    if (species.physical.y > 0.064 && abs(species.physical.z) > 0.18) {
+        species.flags |= moleculeFlagSignalCarrier;
+    }
+    if (stability > 0.993 && species.physical.y < 0.038) {
+        species.flags |= moleculeFlagPersistentMaterial;
     }
     species.contentHash = hash32(
-        speciesID * 0x9e3779b9u ^ species.basisA.x * 0x85ebca6bu ^
-        species.basisA.w * 0xc2b2ae35u ^ species.basisB.x * 0x27d4eb2fu
+        sequence ^ speciesID * 0x85ebca6bu ^ conformer * 0xc2b2ae35u
     );
+    species.reserved = pair;
     return species;
+}
+
+inline uint derivedSpeciesForSparseSlot(
+    uint seed,
+    uint slot,
+    uint requiredFlags,
+    float minimumFreeEnergy
+) {
+    uint pairCapacity = (speciesRegistryCapacity - 1u) / moleculeSlotsPerTile;
+    uint candidate = slot + 1u +
+        (hash32(seed ^ slot * 0x9e3779b9u) % pairCapacity) * moleculeSlotsPerTile;
+    for (uint attempt = 0u; attempt < 96u; ++attempt) {
+        if (candidate >= speciesRegistryCapacity) { candidate = slot + 1u; }
+        // Energy-bearing seed packets use the excited member of a conformer
+        // pair, so an inherited reversible pathway has a physically available
+        // downhill direction instead of every founder receiving only the
+        // ground-state molecule and an ATP-consuming reaction.
+        if (minimumFreeEnergy > 0.0 && ((candidate - 1u) & 1u) == 0u &&
+            candidate + 1u < speciesRegistryCapacity) {
+            candidate += 1u;
+        }
+        SpeciesDefinition definition = sequenceDerivedSpecies(candidate);
+        if ((definition.flags & requiredFlags) == requiredFlags &&
+            definition.physical.x >= minimumFreeEnergy) {
+            return candidate;
+        }
+        candidate += moleculeSlotsPerTile;
+    }
+    return slot + 1u;
 }
 
 inline MoleculePacket emptyMoleculePacket() {
@@ -146,16 +164,20 @@ kernel void initializeUnifiedEcology(
 ) {
     uint tileCount = uniforms.width * uniforms.height * uniforms.worldCount;
     if (gid < speciesRegistryCapacity) {
-        speciesRegistry[gid] = gid <= 8u
-            ? primordialSpecies(gid) : emptySpeciesDefinition();
+        speciesRegistry[gid] = sequenceDerivedSpecies(gid);
     }
     if (gid < tileCount * moleculeSlotsPerTile) {
         uint tile = gid / moleculeSlotsPerTile;
         uint slot = gid % moleculeSlotsPerTile;
         uint seed = hash32(tile * 0x85ebca6bu ^ slot * 0xc2b2ae35u ^ uniforms.seed);
         MoleculePacket packet = emptyMoleculePacket();
-        packet.speciesID = slot + 1u;
-        SpeciesDefinition initialSpecies = primordialSpecies(packet.speciesID);
+        uint requiredFlags = slot == 0u ? moleculeFlagMembraneForming :
+            (slot == 1u ? moleculeFlagCatalytic : 0u);
+        float minimumEnergy = slot == 2u ? 0.16 : 0.0;
+        packet.speciesID = derivedSpeciesForSparseSlot(
+            seed ^ uniforms.seed, slot, requiredFlags, minimumEnergy
+        );
+        SpeciesDefinition initialSpecies = sequenceDerivedSpecies(packet.speciesID);
         packet.flags = initialSpecies.flags;
         packet.amount = slot < 3u
             ? 0.00018 + random01(seed) * 0.00034
@@ -261,8 +283,13 @@ kernel void expandUnifiedEcology(
                 gid * 0x85ebca6bu ^ slot * 0xc2b2ae35u ^
                 expansionLevel * 0x27d4eb2fu ^ uniforms.seed
             );
-            uint speciesID = slot + 1u;
-            SpeciesDefinition species = primordialSpecies(speciesID);
+            uint requiredFlags = slot == 0u ? moleculeFlagMembraneForming :
+                (slot == 1u ? moleculeFlagCatalytic : 0u);
+            float minimumEnergy = slot == 2u ? 0.16 : 0.0;
+            uint speciesID = derivedSpeciesForSparseSlot(
+                seed, slot, requiredFlags, minimumEnergy
+            );
+            SpeciesDefinition species = sequenceDerivedSpecies(speciesID);
             MoleculePacket packet = emptyMoleculePacket();
             packet.speciesID = speciesID;
             packet.flags = species.flags;
@@ -695,15 +722,26 @@ kernel void evolveWorldChemistry(
     float activation = (0.08 + quantumOrder * 0.74 + mechanicalActivation * 0.18) *
         (0.18 + moisture * 0.82) * (1.0 + catalyticAmount * 7.0);
     if (eventKind == 4u) { activation *= 1.0 + eventInfluence * 0.65; }
-    for (uint speciesID = 1u; speciesID <= 4u; ++speciesID) {
-        SpeciesDefinition species = speciesRegistry[speciesID];
-        float requested = uniforms.dt * activation *
-            (0.0000012 + catalyticAmount * 0.000018) *
-            (speciesID == 1u ? 1.0 : (speciesID == 2u ? 0.62 : 0.46));
-        float produced = synthesizeMolecule(basisA, basisB, species, requested);
-        uint slot = speciesID - 1u;
+    // Environmental synthesis follows the molecules already present in each
+    // sparse slot. There is no globally privileged nutrient, signal, catalyst,
+    // or structural species; the local molecular lineage determines what can
+    // be amplified from conserved basis material.
+    for (uint slot = 0u; slot < 4u; ++slot) {
         uint index = moleculeIndex(tile, slot);
         MoleculePacket packet = moleculesOut[index];
+        uint speciesID = packet.speciesID;
+        if (speciesID == 0u || speciesID >= speciesRegistryCapacity) {
+            speciesID = derivedSpeciesForSparseSlot(
+                hash32(tile ^ uniforms.seed), slot, 0u, 0.0
+            );
+        }
+        SpeciesDefinition species = speciesRegistry[speciesID];
+        float autocatalysis = (species.flags & moleculeFlagCatalytic) != 0u
+            ? 1.0 : 0.32 + species.behavior.z * 0.48;
+        float requested = uniforms.dt * activation *
+            (0.0000012 + catalyticAmount * 0.000018) *
+            autocatalysis;
+        float produced = synthesizeMolecule(basisA, basisB, species, requested);
         if (packet.speciesID != 0u && packet.speciesID != speciesID) {
             decomposeDisplacedPacket(
                 basisA, basisB, packet, speciesRegistry, chemistryAudit
@@ -745,27 +783,15 @@ kernel void evolveWorldChemistry(
     float counterOutput = substrateFromFixed(consumePublishedUInt(
         &deferredCellExchange[exchangeBase + 7u]
     ));
-    float deferredOutputs[4] = { signalA + signalB, catalyticMoleculeOutput, depositedMaterial, counterOutput };
-    uint outputSpecies[4] = { 4u, 2u, 5u, 7u };
-    for (uint output = 0u; output < 4u; ++output) {
-        uint speciesID = outputSpecies[output];
-        uint slot = speciesID - 1u;
-        uint index = moleculeIndex(tile, slot);
-        MoleculePacket packet = moleculesOut[index];
-        if (packet.speciesID != 0u && packet.speciesID != speciesID) {
-            decomposeDisplacedPacket(
-                basisA, basisB, packet, speciesRegistry, chemistryAudit
-            );
-        }
-        packet.speciesID = speciesID;
-        packet.flags = speciesRegistry[speciesID].flags;
-        packet.amount += deferredOutputs[output];
-        // Deferred developmental outputs are paid material signals, matrix,
-        // catalysts, and counteragents—not a second fuel pathway. Their ATP
-        // cost was already consumed as cellular work, so assigning maximum
-        // species free energy here minted usable energy a second time.
-        moleculesOut[index] = packet;
-    }
+    // Legacy field-exchange channels no longer name global molecule roles.
+    // Their already-paid matter returns to conserved basis pools; persistent
+    // construction enters the material ledger. Sequence-derived secretion is
+    // handled by deterministic CellChemistryIntent packets above.
+    float solubleReturned = signalA + signalB + catalyticMoleculeOutput + counterOutput;
+    basisA.x += solubleReturned * 0.42;
+    basisA.y += solubleReturned * 0.36;
+    basisA.z += solubleReturned * 0.22;
+    structuralDeposit += depositedMaterial;
 
     MaterialTileProperties material = materialProperties[tile];
     float previousRetainedMass = max(material.transport.w, 0.0);
@@ -775,11 +801,12 @@ kernel void evolveWorldChemistry(
     float erodedStructure = min(retainedBeforeErosion, max(erosionRequest, 0.0));
     float retainedMass = retainedBeforeErosion - erodedStructure;
     if (erodedStructure > 0.0) {
-        // Structural packets currently arise from the membrane-forming polymer
-        // species, so erosion can return its exact normalized composition.
-        returnMoleculeToBasis(
-            basisA, basisB, speciesRegistry[5u], erodedStructure
-        );
+        // Tile structures retain mass but not a privileged species identity.
+        // Erosion therefore returns their measured basis mixture rather than a
+        // hard-coded polymer.
+        basisA.x += erodedStructure * 0.42;
+        basisA.y += erodedStructure * 0.36;
+        basisA.z += erodedStructure * 0.22;
     }
     material.mechanics.x = clamp(0.04 + retainedMass * 1.8 + solid * 0.12, 0.02, 1.0);
     material.mechanics.y = clamp(0.96 - retainedMass * 0.72 - solid * 0.48, 0.02, 0.98);
@@ -974,26 +1001,33 @@ kernel void senseAndRegulateCells(
         0.001 + cell.regulation.w * 0.006
     ) * exposure * transportCapacity, float4(0.0));
     intent.outputSpecies = cell.molecularOutputSpecies;
-    float4 requestedOutput = max(float4(
-        cell.regulationB.y * cell.signaling.y * 0.0000024,
-        cell.regulation.y * cell.regulation.w * 0.0000018,
-        cell.regulationB.y * cell.regulationB.x * 0.0000012,
-        cell.regulation.w * max(cell.signals.z - 0.25, 0.0) * 0.0000010
-    ) * readiness * exposure, float4(0.0));
-    requestedOutput *= 0.05 + cell.molecularExpression.w * 0.58 +
-        cell.molecularExpression.z * 0.37;
-    float requestedMass = dot(requestedOutput, float4(1.0));
-    float matterBudget = max(cell.physiology.y - 0.16, 0.0) * 0.00008;
-    float matterScale = requestedMass > 0.0
-        ? min(matterBudget / requestedMass, 1.0) : 1.0;
-    requestedOutput *= matterScale;
-    float4 requestedFreeEnergy = requestedOutput * float4(0.08, 0.12, 0.18, 0.16);
-    float requestedEnergy = dot(requestedFreeEnergy, float4(1.0));
-    float energyBudget = max(cell.physiology.x, 0.0) * 0.00008;
-    float energyScale = requestedEnergy > 0.0
-        ? min(energyBudget / requestedEnergy, 1.0) : 1.0;
-    intent.outputAmount = requestedOutput * energyScale;
-    intent.outputFreeEnergy = requestedFreeEnergy * energyScale;
+    float internalBarrier = saturate(cell.internalMembrane.x * 12.0) *
+        saturate(cell.internalMembrane.w);
+    float selectiveRetention = internalBarrier *
+        saturate(cell.internalMembrane.z) *
+        (1.0 - saturate(cell.internalMembrane.y));
+    float secretionGate = readiness * exposure *
+        (0.05 + cell.molecularExpression.w * 0.58 +
+            cell.molecularExpression.z * 0.37) *
+        (1.0 - selectiveRetention * 0.84);
+    for (uint route = 0u; route < chemistryIntentWidth; ++route) {
+        uint speciesID = intent.outputSpecies[route];
+        if (speciesID == 0u || speciesID >= speciesRegistryCapacity) { continue; }
+        for (uint internalSlot = 1u; internalSlot < chemistryIntentWidth;
+             ++internalSlot) {
+            if (cell.intracellularSpecies[internalSlot] != speciesID) { continue; }
+            float stock = max(cell.intracellularAmount[internalSlot], 0.0);
+            float amount = min(
+                stock * 0.08,
+                secretionGate * (0.000001 + cell.regulationB.y * 0.000008)
+            );
+            float energyFraction = amount / max(stock, 0.0000001);
+            intent.outputAmount[route] = amount;
+            intent.outputFreeEnergy[route] =
+                max(cell.intracellularFreeEnergy[internalSlot], 0.0) * energyFraction;
+            break;
+        }
+    }
     intents[cellIndex] = intent;
 }
 
@@ -1158,6 +1192,7 @@ inline bool initializeGenomePages(
     AgentState founder,
     ProgramExpressionCache expression,
     ResonanceExpressionCache resonance,
+    uint4 originMoleculeSpecies,
     uint seed
 ) {
     // Founders begin with independently mutable duplicate regulation and
@@ -1207,10 +1242,23 @@ inline bool initializeGenomePages(
             );
             GenomePage balanced = genomePages[pageIndex];
             enforceAtomBalancedReactionPage(balanced);
+            uint sourceSpecies = pageOffset == 10u
+                ? originMoleculeSpecies.w : originMoleculeSpecies.z;
+            sourceSpecies = clamp(sourceSpecies, 1u, speciesRegistryCapacity - 2u);
+            uint pairedSpecies = (sourceSpecies & 1u) == 1u
+                ? sourceSpecies + 1u : sourceSpecies - 1u;
+            balanced.payload[12] = as_type<float4>(uint4(
+                sourceSpecies, pairedSpecies, sourceSpecies, pairedSpecies
+            ));
+            balanced.payload[4].z = 0.18 + random01(seed + pageOffset * 79u) * 0.34;
+            balanced.payload[4].w = 0.18 + random01(seed + pageOffset * 83u) * 0.34;
             genomePages[pageIndex] = balanced;
         } else if (pageType == genomePageTransport) {
             genomePages[pageIndex].payload[0] = founder.transportExpression;
             genomePages[pageIndex].payload[1] = founder.metabolicExpression;
+            genomePages[pageIndex].payload[12] = as_type<float4>(
+                max(originMoleculeSpecies, uint4(1u))
+            );
         } else if (pageType == genomePageReceptor) {
             genomePages[pageIndex].payload[0] = founder.receptorChemistry;
             genomePages[pageIndex].payload[1] = expression.morphogenTransport;
@@ -1284,6 +1332,54 @@ inline uint claimFreeAgent(
     return maxAgentCount;
 }
 
+inline bool selectClosureMolecules(
+    thread const MoleculePacket* packets,
+    device const SpeciesDefinition* speciesRegistry,
+    thread uint3& selected
+) {
+    selected = uint3(moleculeSlotsPerTile);
+    float membraneScore = -1.0;
+    float catalystScore = -1.0;
+    float energeticScore = -1.0;
+    for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
+        MoleculePacket packet = packets[slot];
+        if (packet.speciesID == 0u || packet.speciesID >= speciesRegistryCapacity ||
+            packet.amount <= 0.0) { continue; }
+        SpeciesDefinition species = speciesRegistry[packet.speciesID];
+        float membrane = (species.flags & moleculeFlagMembraneForming) != 0u
+            ? packet.amount * (0.25 + species.behavior.w * 0.75) : -1.0;
+        if (membrane > membraneScore) {
+            membraneScore = membrane;
+            selected.x = slot;
+        }
+    }
+    for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
+        if (slot == selected.x) { continue; }
+        MoleculePacket packet = packets[slot];
+        if (packet.speciesID == 0u || packet.speciesID >= speciesRegistryCapacity ||
+            packet.amount <= 0.0) { continue; }
+        SpeciesDefinition species = speciesRegistry[packet.speciesID];
+        float catalyst = (species.flags & moleculeFlagCatalytic) != 0u
+            ? packet.amount * species.behavior.z : -1.0;
+        if (catalyst > catalystScore) {
+            catalystScore = catalyst;
+            selected.y = slot;
+        }
+    }
+    for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
+        if (slot == selected.x || slot == selected.y) { continue; }
+        MoleculePacket packet = packets[slot];
+        if (packet.speciesID == 0u || packet.speciesID >= speciesRegistryCapacity ||
+            packet.amount <= 0.0) { continue; }
+        float energetic = packet.freeEnergy;
+        if (energetic > energeticScore) {
+            energeticScore = energetic;
+            selected.z = slot;
+        }
+    }
+    return all(selected < uint3(moleculeSlotsPerTile));
+}
+
 inline bool createPhysicalProtocell(
     device AgentState* agents,
     device atomic_uint* occupancy,
@@ -1305,6 +1401,7 @@ inline bool createPhysicalProtocell(
     device GenomeHeader* genomeHeaders,
     device GenomePage* genomePages,
     device atomic_uint* genomeArenaState,
+    device const SpeciesDefinition* speciesRegistry,
     device ChemistryAuditState* chemistryAudit,
     thread MoleculePacket* localPackets,
     thread float4& localBasisA,
@@ -1316,12 +1413,11 @@ inline bool createPhysicalProtocell(
     uint step,
     bool intervention
 ) {
-    if (localPackets[0].speciesID != 1u ||
-        localPackets[1].speciesID != 2u ||
-        localPackets[2].speciesID != 3u ||
-        localPackets[0].amount < protocellAmphiphileCost ||
-        localPackets[1].amount < protocellCatalystCost ||
-        localPackets[2].amount < protocellRedoxCost ||
+    uint3 closureSlots;
+    if (!selectClosureMolecules(localPackets, speciesRegistry, closureSlots) ||
+        localPackets[closureSlots.x].amount < protocellMembraneMoleculeCost ||
+        localPackets[closureSlots.y].amount < protocellCatalystMoleculeCost ||
+        localPackets[closureSlots.z].amount < protocellEnergeticMoleculeCost ||
         localBasisA.x < protocellBasisAXCost ||
         localBasisA.y < protocellBasisAYCost ||
         localBasisB.w < protocellFreeEnergyCost) {
@@ -1344,12 +1440,12 @@ inline bool createPhysicalProtocell(
     founder.behavior = float4(0.0);
     founder.metabolicExpression = clamp(float4(
         0.42 + quantumOrder * 0.30,
-        0.40 + localPackets[0].amount * 14.0,
+        0.40 + localPackets[closureSlots.x].amount * 14.0,
         0.36 + random01(seed + 2u) * 0.30,
-        0.42 + localPackets[1].amount * 12.0
+        0.42 + localPackets[closureSlots.y].amount * 12.0
     ), 0.0, 1.0);
     founder.dynamicExpression = clamp(float4(
-        0.42 + localPackets[2].freeEnergy * 8.0,
+        0.42 + localPackets[closureSlots.z].freeEnergy * 8.0,
         0.010 + random01(seed + 3u) * 0.025,
         0.38 + random01(seed + 4u) * 0.34,
         quantumPhase
@@ -1363,8 +1459,12 @@ inline bool createPhysicalProtocell(
     ), 0.0, 1.0);
     founder.receptorChemistry = founderReceptorChemistry(founder, seed);
     founder.junctionChemistry = founderJunctionChemistry(founder, seed);
-    founder.energy = clamp(0.42 + localPackets[2].freeEnergy * 18.0, 0.42, 1.02);
-    founder.biomass = clamp(0.34 + localPackets[0].amount * 9.0, 0.34, 0.68);
+    founder.energy = clamp(
+        0.42 + localPackets[closureSlots.z].freeEnergy * 18.0, 0.42, 1.02
+    );
+    founder.biomass = clamp(
+        0.34 + localPackets[closureSlots.x].amount * 9.0, 0.34, 0.68
+    );
     founder.age = 0.0;
     founder.generation = 0u;
     founder.birthID = atomic_fetch_add_explicit(&identityCounters[0], 1u, memory_order_relaxed);
@@ -1392,7 +1492,14 @@ inline bool createPhysicalProtocell(
     if (!initializeGenomePages(
         genomeHeaders, genomePages, genomeArenaState, chemistryAudit,
         programIndex, programGeneration, founder,
-        programExpressionCaches[programIndex], resonance, seed
+        programExpressionCaches[programIndex], resonance,
+        uint4(
+            0u,
+            localPackets[closureSlots.x].speciesID,
+            localPackets[closureSlots.y].speciesID,
+            localPackets[closureSlots.z].speciesID
+        ),
+        seed
     )) {
         abandonGenomeHeaderSlot(programSlots, identityCounters, programIndex);
         atomic_store_explicit(&occupancy[owner], 0u, memory_order_relaxed);
@@ -1407,22 +1514,45 @@ inline bool createPhysicalProtocell(
         cells, cellOccupancy, cellIdentities, cellMemories, cellParentIDs,
         cellAggregates, regulatoryStates, membraneVertices, programInteractions,
         identityCounters, owner, programIndex, programGeneration,
-        founder, seed ^ 0x63d83595u, resonance
+        founder, seed ^ 0x63d83595u
     );
     if (founderCellIndex == maxCellCount) {
         abandonGenomeHeaderSlot(programSlots, identityCounters, programIndex);
         atomic_store_explicit(&occupancy[owner], 0u, memory_order_relaxed);
         return false;
     }
-    float packet0Fraction = protocellAmphiphileCost / localPackets[0].amount;
-    float packet1Fraction = protocellCatalystCost / localPackets[1].amount;
-    float packet2Fraction = protocellRedoxCost / localPackets[2].amount;
-    localPackets[0].amount -= protocellAmphiphileCost;
-    localPackets[1].amount -= protocellCatalystCost;
-    localPackets[2].amount -= protocellRedoxCost;
-    localPackets[0].freeEnergy *= max(1.0 - packet0Fraction, 0.0);
-    localPackets[1].freeEnergy *= max(1.0 - packet1Fraction, 0.0);
-    localPackets[2].freeEnergy *= max(1.0 - packet2Fraction, 0.0);
+    CellState seededCell = cells[founderCellIndex];
+    seededCell.intracellularSpecies = uint4(
+        0u,
+        localPackets[closureSlots.x].speciesID,
+        localPackets[closureSlots.y].speciesID,
+        localPackets[closureSlots.z].speciesID
+    );
+    seededCell.intracellularAmount = float4(
+        protocellBasisAXCost * 0.35,
+        protocellMembraneMoleculeCost * 0.18,
+        protocellCatalystMoleculeCost * 0.24,
+        protocellEnergeticMoleculeCost * 0.34
+    );
+    seededCell.intracellularFreeEnergy = float4(
+        0.0,
+        localPackets[closureSlots.x].freeEnergy * 0.02,
+        localPackets[closureSlots.y].freeEnergy * 0.03,
+        localPackets[closureSlots.z].freeEnergy * 0.08
+    );
+    cells[founderCellIndex] = seededCell;
+    float membraneFraction = protocellMembraneMoleculeCost /
+        localPackets[closureSlots.x].amount;
+    float catalystFraction = protocellCatalystMoleculeCost /
+        localPackets[closureSlots.y].amount;
+    float energeticFraction = protocellEnergeticMoleculeCost /
+        localPackets[closureSlots.z].amount;
+    localPackets[closureSlots.x].amount -= protocellMembraneMoleculeCost;
+    localPackets[closureSlots.y].amount -= protocellCatalystMoleculeCost;
+    localPackets[closureSlots.z].amount -= protocellEnergeticMoleculeCost;
+    localPackets[closureSlots.x].freeEnergy *= max(1.0 - membraneFraction, 0.0);
+    localPackets[closureSlots.y].freeEnergy *= max(1.0 - catalystFraction, 0.0);
+    localPackets[closureSlots.z].freeEnergy *= max(1.0 - energeticFraction, 0.0);
     localBasisA.x -= protocellBasisAXCost;
     localBasisA.y -= protocellBasisAYCost;
     localBasisB.w -= protocellFreeEnergyCost;
@@ -1459,6 +1589,7 @@ kernel void nucleateProtocells(
     device MoleculePacket* molecules [[buffer(23)]],
     device atomic_uint* originExclusion [[buffer(24)]],
     device ChemistryAuditState* chemistryAudit [[buffer(25)]],
+    device const SpeciesDefinition* speciesRegistry [[buffer(26)]],
     texture2d_array<float, access::read_write> basisAField [[texture(0)]],
     texture2d_array<float, access::read_write> basisBField [[texture(1)]],
     texture2d<float, access::read> quantum [[texture(2)]],
@@ -1476,19 +1607,19 @@ kernel void nucleateProtocells(
     }
     float4 basisA = basisAField.read(gid, 0);
     float4 basisB = basisBField.read(gid, 0);
-    if (localPackets[0].speciesID != 1u ||
-        localPackets[1].speciesID != 2u ||
-        localPackets[2].speciesID != 3u ||
-        localPackets[0].amount < protocellAmphiphileCost ||
-        localPackets[1].amount < protocellCatalystCost ||
-        localPackets[2].amount < protocellRedoxCost ||
+    uint3 closureSlots;
+    if (!selectClosureMolecules(localPackets, speciesRegistry, closureSlots) ||
+        localPackets[closureSlots.x].amount < protocellMembraneMoleculeCost ||
+        localPackets[closureSlots.y].amount < protocellCatalystMoleculeCost ||
+        localPackets[closureSlots.z].amount < protocellEnergeticMoleculeCost ||
         basisA.x < max(0.012, protocellBasisAXCost) ||
         basisA.y < protocellBasisAYCost ||
         basisB.w < max(0.016, protocellFreeEnergyCost)) {
         return;
     }
-    float localClosure = localPackets[0].amount + localPackets[1].amount * 1.6 +
-        localPackets[2].freeEnergy * 2.0;
+    float localClosure = localPackets[closureSlots.x].amount +
+        localPackets[closureSlots.y].amount * 1.6 +
+        localPackets[closureSlots.z].freeEnergy * 2.0;
     uint2 neighbors[4] = {
         uint2(gid.x > 0u ? gid.x - 1u : uniforms.width - 1u, gid.y),
         uint2(gid.x + 1u < uniforms.width ? gid.x + 1u : 0u, gid.y),
@@ -1502,11 +1633,19 @@ kernel void nucleateProtocells(
         );
         if (exclusion != 0u &&
             uniforms.step + 1u - exclusion < protocellOriginExclusionSteps) { return; }
-        MoleculePacket neighborA = molecules[moleculeIndex(neighborTile, 0u)];
-        MoleculePacket neighborB = molecules[moleculeIndex(neighborTile, 1u)];
-        MoleculePacket neighborC = molecules[moleculeIndex(neighborTile, 2u)];
-        float neighborClosure = neighborA.amount + neighborB.amount * 1.6 +
-            neighborC.freeEnergy * 2.0;
+        MoleculePacket neighborPackets[moleculeSlotsPerTile];
+        for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
+            neighborPackets[slot] = molecules[moleculeIndex(neighborTile, slot)];
+        }
+        uint3 neighborSlots;
+        float neighborClosure = 0.0;
+        if (selectClosureMolecules(
+            neighborPackets, speciesRegistry, neighborSlots
+        )) {
+            neighborClosure = neighborPackets[neighborSlots.x].amount +
+                neighborPackets[neighborSlots.y].amount * 1.6 +
+                neighborPackets[neighborSlots.z].freeEnergy * 2.0;
+        }
         if (neighborClosure > localClosure ||
             (abs(neighborClosure - localClosure) <= 0.000000001 &&
                 neighborTile < tile)) { return; }
@@ -1535,7 +1674,7 @@ kernel void nucleateProtocells(
         resonanceExpressionCaches, identityCounters, lineageEvents, membraneVertices,
         cellIdentities, programLineageRecords, cellParentIDs, programInteractions,
         programSlots, cellMemories, genomeHeaders, genomePages, genomeArenaState,
-        chemistryAudit, localPackets, basisA, basisB,
+        speciesRegistry, chemistryAudit, localPackets, basisA, basisB,
         (float2(gid) + 0.5) / float2(uniforms.width, uniforms.height),
         phase, order, hash32(tile ^ uniforms.step ^ uniforms.seed), uniforms.step, false
     );
@@ -1575,6 +1714,7 @@ kernel void injectProtocell(
     device MoleculePacket* molecules [[buffer(23)]],
     device ChemistryAuditState* chemistryAudit [[buffer(24)]],
     device atomic_uint* originExclusion [[buffer(25)]],
+    device const SpeciesDefinition* speciesRegistry [[buffer(26)]],
     texture2d_array<float, access::read_write> basisAField [[texture(0)]],
     texture2d_array<float, access::read_write> basisBField [[texture(1)]],
     uint gid [[thread_position_in_grid]]
@@ -1660,14 +1800,20 @@ kernel void injectProtocell(
         );
     }
     auditChemistry(chemistryAudit, &chemistryAudit->externalEnergy, suppliedB.w);
+    uint seed = hash32(uniforms.step ^ tile * 0x85ebca6bu ^ uniforms.seed);
     MoleculePacket localPackets[moleculeSlotsPerTile];
     for (uint slot = 0u; slot < moleculeSlotsPerTile; ++slot) {
         localPackets[slot] = molecules[moleculeIndex(tile, slot)];
     }
     float suppliedMolecules[3] = { 0.045, 0.020, 0.030 };
     for (uint slot = 0u; slot < 3u; ++slot) {
-        uint speciesID = slot + 1u;
-        SpeciesDefinition suppliedSpecies = primordialSpecies(speciesID);
+        uint requiredFlags = slot == 0u ? moleculeFlagMembraneForming :
+            (slot == 1u ? moleculeFlagCatalytic : 0u);
+        float minimumEnergy = slot == 2u ? 0.16 : 0.0;
+        uint speciesID = derivedSpeciesForSparseSlot(
+            seed ^ 0x63d83595u, slot, requiredFlags, minimumEnergy
+        );
+        SpeciesDefinition suppliedSpecies = speciesRegistry[speciesID];
         float compositionTotal = max(float(
             suppliedSpecies.basisA.x + suppliedSpecies.basisA.y +
             suppliedSpecies.basisA.z + suppliedSpecies.basisA.w +
@@ -1701,14 +1847,13 @@ kernel void injectProtocell(
         localPackets[slot].amount += suppliedMolecules[slot];
         localPackets[slot].freeEnergy += suppliedMoleculeEnergy;
     }
-    uint seed = hash32(uniforms.step ^ tile * 0x85ebca6bu ^ uniforms.seed);
     bool created = createPhysicalProtocell(
         agents, occupancy, cells, cellOccupancy, cellAggregates,
         programExpressionCaches, regulatoryStates,
         resonanceExpressionCaches, identityCounters, lineageEvents, membraneVertices,
         cellIdentities, programLineageRecords, cellParentIDs, programInteractions,
         programSlots, cellMemories, genomeHeaders, genomePages, genomeArenaState,
-        chemistryAudit, localPackets, basisA, basisB, placementPosition,
+        speciesRegistry, chemistryAudit, localPackets, basisA, basisB, placementPosition,
         random01(seed + 1u), 0.62, seed, uniforms.step, true
     );
     if (!created) {

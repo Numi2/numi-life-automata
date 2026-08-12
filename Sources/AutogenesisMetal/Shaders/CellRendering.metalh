@@ -488,6 +488,11 @@ fragment float4 molecularCellFragment(
     float folded = saturate(input.learning.x);
     float molecularDamage = saturate(input.learning.y);
     float compartmentalization = saturate(input.functionalActivity.x);
+    float internalMembraneMass = saturate(input.functionalActivity.y);
+    float internalMembraneIntegrity = saturate(input.functionalActivity.z);
+    float symbiontAbundance = saturate(input.functionalActivity.w);
+    float symbiontIntegration = saturate(input.learning.z);
+    float symbiontEnergyExport = saturate(input.learning.w);
     float flowPhase = float(uniforms.step) * 0.006 + input.dynamics.z * 7.0 +
         input.programEcology.x * 2.4 - input.programEcology.y * 1.2;
     float2 molecularFlow = float2(
@@ -574,6 +579,30 @@ fragment float4 molecularCellFragment(
         0.018, 0.050, abs(expressionDistance -
             mix(0.16, 0.25, compartmentalization))
     )) * cytoplasm * compartmentalization;
+    float internalMembraneRadius = mix(0.28, 0.54, compartmentalization);
+    float internalMembraneAA = max(fwidth(expressionDistance) * 1.35, 0.008);
+    float internalMembraneBoundary = (1.0 - smoothstep(
+        0.018, 0.018 + internalMembraneAA,
+        abs(expressionDistance - internalMembraneRadius)
+    )) * cytoplasm * internalMembraneMass * internalMembraneIntegrity;
+    // A retained molecular propagule is drawn as an inclusion only after real
+    // cross-lineage transfer and enclosure. Its orbit tightens as integration
+    // rises; no named organelle or fixed morphology is supplied by the viewer.
+    float symbiontPhase = flowPhase * (0.42 + symbiontEnergyExport * 0.36) +
+        float(lineageSeed & 255u) * 0.021;
+    float2 symbiontCenter = expressionPosition + float2(
+        cos(symbiontPhase), sin(symbiontPhase * 0.83)
+    ) * mix(0.32, 0.14, symbiontIntegration);
+    float symbiontRadius = mix(0.055, 0.14, sqrt(symbiontAbundance));
+    float symbiontDistance = length(p - symbiontCenter);
+    float symbiontBody = (1.0 - smoothstep(
+        symbiontRadius, symbiontRadius + internalMembraneAA,
+        symbiontDistance
+    )) * cytoplasm * symbiontAbundance;
+    float symbiontBoundary = (1.0 - smoothstep(
+        internalMembraneAA, internalMembraneAA * 2.8,
+        abs(symbiontDistance - symbiontRadius)
+    )) * cytoplasm * symbiontAbundance;
     float translationFocus = (1.0 - smoothstep(
         0.045, 0.085, length(
             p - expressionPosition - expressionDirection * 0.055
@@ -589,10 +618,21 @@ fragment float4 molecularCellFragment(
     color += mix(float3(0.52, 0.08, 0.46), lineage, 0.28) *
         expressionRegion * (0.30 + regulator * folded * 0.54);
     color += float3(0.82, 0.24, 0.72) * compartmentBoundary * 0.58;
+    color += mix(float3(0.06, 0.58, 0.82), lineage, 0.38) *
+        internalMembraneBoundary * (0.42 + internalMembraneIntegrity * 0.58);
     color += float3(1.0, 0.54, 0.18) * translationFocus *
         (0.28 + folded * 0.52);
     color += moleculeColor * glyph * moleculeVisibility * cytoplasm *
         (0.54 + abundance * 0.72);
+    float3 symbiontColor = hsvToRGB(float3(
+        fract(input.lineageHue + 0.37),
+        mix(0.84, 0.42, symbiontIntegration),
+        0.72 + symbiontEnergyExport * 0.24
+    ));
+    color += symbiontColor * symbiontBody *
+        (0.38 + symbiontIntegration * 0.36 + symbiontEnergyExport * 0.42);
+    color += mix(symbiontColor, float3(0.94, 1.0, 0.76), 0.36) *
+        symbiontBoundary * (0.52 + symbiontIntegration * 0.48);
     color += mix(float3(0.04, 0.74, 1.0), float3(0.04, 1.0, 0.58), integrity) *
         visibleMembrane * (0.62 + lipidHead * 0.22);
     color += mix(lineage, float3(0.88, 1.0, 0.96), 0.42) * integumentBand *

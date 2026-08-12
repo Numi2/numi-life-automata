@@ -364,6 +364,11 @@
         "library": "2A34CD2FE0D7F07FCB96D520F607E0BA63AE74021A260239D6C1176E1EB2ECF0"
       },
       {
+        "label": "C0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00D",
+        "name": "evolveEndosymbioticCapture",
+        "library": "2A34CD2FE0D7F07FCB96D520F607E0BA63AE74021A260239D6C1176E1EB2ECF0"
+      },
+      {
         "label": "D8D105743C9C161E68014D1187B763910ECB873DEC17F624B4E624837ED60DC7",
         "name": "resetActiveTileChemistryState",
         "library": "2A34CD2FE0D7F07FCB96D520F607E0BA63AE74021A260239D6C1176E1EB2ECF0"
@@ -563,6 +568,14 @@
       },
       {
         "compute_function_descriptor": "fnd:A3C408394ED5F0D6EC2BB2B5911560AB4520A16414B7EA86EC37237E850650D1",
+        "required_threads_per_threadgroup": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "compute_function_descriptor": "fnd:C0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00DC0DEF00D",
         "required_threads_per_threadgroup": [
           0,
           0,

@@ -67,11 +67,16 @@ constant uint cellJunctionCapacity = 32768u;
 constant uint cellJunctionMask = cellJunctionCapacity - 1u;
 constant uint registeredJunctionCountIndex = 4u;
 constant uint registeredJunctionFlag = 0x80000000u;
-constant uint cellContactEffectChannelCount = 14u;
+constant uint cellContactEffectChannelCount = 16u;
 constant uint trophicSourceBudgetChannel = 10u;
 constant uint trophicReceiverBudgetChannel = 11u;
 constant uint reproductiveSourceBudgetChannel = 12u;
 constant uint reproductiveReceiverBudgetChannel = 13u;
+constant uint endosymbiontCandidateChannel = 14u;
+constant uint endosymbiontCaptureChannel = 15u;
+constant uint endosymbiontPackedAmountBits = 17u;
+constant uint endosymbiontPackedAmountMask =
+    (1u << endosymbiontPackedAmountBits) - 1u;
 constant uint cellOccupancyFree = 0u;
 constant uint cellOccupancyAlive = 1u;
 constant uint cellOccupancyCorpse = 2u;
@@ -214,6 +219,23 @@ struct CellState {
     // Genome-derived molecule routes used by the deterministic chemistry settlement.
     uint4 molecularUptakeSpecies;
     uint4 molecularOutputSpecies;
+    // Finite intracellular chemistry. Species zero is reduced basis material;
+    // zero abundance marks every other slot as empty.
+    uint4 intracellularSpecies;
+    float4 intracellularAmount;
+    float4 intracellularFreeEnergy;
+    // Forward flux, reverse flux, captured work, and thermalized free energy.
+    float4 reactionFlux;
+    // Internal membrane mass, permeability, selectivity, and integrity.
+    float4 internalMembrane;
+    // Retained molecular propagule: immutable foreign first page, genome hash,
+    // acquisition step, and vertical transmission count. No named organelle is
+    // assumed and the page chain remains valid after the donor dies.
+    uint4 symbiontIdentity;
+    // Abundance, replication, host integration, and evolved dependence.
+    float4 symbiontState;
+    // Energy export, redox export, host substrate supplied, and conflict/leak.
+    float4 symbiontExchange;
 };
 
 // Four packed half4 episodes. Each episode is
@@ -357,6 +379,10 @@ struct CellAggregate {
     // Mean folding quality, damage/turnover machinery, and compartmentalization.
     float4 proteostasis;
     float4 compartments;
+    float4 reactionFlux;
+    float4 internalMembrane;
+    float4 symbiontState;
+    float4 symbiontExchange;
 };
 
 struct QualificationTargetMeasurement {
@@ -453,6 +479,10 @@ struct AgentObservationRecord {
     float4 molecularExpression;
     float4 proteostasis;
     float4 compartments;
+    float4 reactionFlux;
+    float4 internalMembrane;
+    float4 symbiontState;
+    float4 symbiontExchange;
 };
 
 struct CellObservationRecord {
@@ -483,6 +513,10 @@ struct CellObservationRecord {
     float4 molecularExpression;
     float4 proteostasis;
     float4 compartments;
+    float4 reactionFlux;
+    float4 internalMembrane;
+    float4 symbiontState;
+    float4 symbiontExchange;
 };
 
 struct LineageEventRecord {
@@ -1070,6 +1104,105 @@ inline ResonanceExpressionCache emptyResonanceExpressionCache() {
     return genome;
 }
 
+inline float molecularPropaguleInvestment(CellState cell) {
+    return saturate(sqrt(max(
+        cell.molecularExpression.z * cell.molecularExpression.w *
+        cell.proteostasis.x * cell.physiology.w,
+        0.0
+    )));
+}
+
+inline float molecularContactCompatibility(CellState a, CellState b) {
+    float reciprocalRoutes = 0.0;
+    float comparedRoutes = 0.0;
+    for (uint route = 1u; route < chemistryIntentWidth; ++route) {
+        uint aOutput = a.molecularOutputSpecies[route];
+        uint bOutput = b.molecularOutputSpecies[route];
+        uint aUptake = a.molecularUptakeSpecies[route];
+        uint bUptake = b.molecularUptakeSpecies[route];
+        if (aOutput != 0u || bUptake != 0u) {
+            reciprocalRoutes += aOutput != 0u && aOutput == bUptake ? 1.0 : 0.0;
+            comparedRoutes += 1.0;
+        }
+        if (bOutput != 0u || aUptake != 0u) {
+            reciprocalRoutes += bOutput != 0u && bOutput == aUptake ? 1.0 : 0.0;
+            comparedRoutes += 1.0;
+        }
+    }
+    float routeCompatibility = comparedRoutes > 0.0
+        ? reciprocalRoutes / comparedRoutes : 0.5;
+    float receptorMatch = 1.0 - abs(
+        a.membraneChemistry.z - b.membraneChemistry.z
+    );
+    float regulatorMatch = 1.0 - abs(
+        a.molecularExpression.z - b.molecularExpression.z
+    );
+    return saturate(
+        routeCompatibility * 0.42 + receptorMatch * 0.34 +
+        regulatorMatch * 0.24
+    );
+}
+
+inline float molecularProgramDifference(CellState a, CellState b) {
+    float routeDifference = 0.0;
+    for (uint route = 1u; route < chemistryIntentWidth; ++route) {
+        routeDifference += a.molecularUptakeSpecies[route] !=
+            b.molecularUptakeSpecies[route] ? 0.10 : 0.0;
+        routeDifference += a.molecularOutputSpecies[route] !=
+            b.molecularOutputSpecies[route] ? 0.10 : 0.0;
+    }
+    return saturate(
+        routeDifference +
+        length(a.molecularExpression - b.molecularExpression) * 0.22 +
+        length(a.membraneChemistry - b.membraneChemistry) * 0.16
+    );
+}
+
+inline ProgramExpressionCache molecularlyAvailableProgram(
+    ProgramExpressionCache inherited,
+    CellState cell
+) {
+    float folded = saturate(cell.proteostasis.x);
+    float catalytic = saturate(cell.molecularExpression.x) * folded;
+    float transport = saturate(cell.molecularExpression.y) * folded;
+    float regulation = saturate(cell.molecularExpression.z) * folded;
+    float structure = saturate(cell.molecularExpression.w) * folded;
+    float signalGate = saturate(sqrt(max(regulation * transport, 0.0)));
+    float structureGate = saturate(sqrt(max(regulation * structure, 0.0)));
+    float chemistryGate = saturate(sqrt(max(catalytic * transport, 0.0)));
+    float turnoverGate = saturate(
+        folded * (0.25 + cell.proteostasis.z * 0.38 +
+            cell.proteostasis.w * 0.37)
+    );
+    inherited.mechanochemistryA *= signalGate;
+    inherited.mechanochemistryB *= signalGate;
+    inherited.morphogenKinetics *= regulation;
+    inherited.morphogenTransport *= signalGate;
+    inherited.junctionMaterial *= structureGate;
+    inherited.chemicalResponse *= chemistryGate;
+    inherited.morphogenesisA *= structureGate;
+    inherited.morphogenesisB *= structureGate;
+    inherited.turnoverControl *= turnoverGate;
+    inherited.allocationControl *= regulation;
+    inherited.materialSynthesis *= structureGate;
+    inherited.plasticityControl *= signalGate;
+    return inherited;
+}
+
+inline ResonanceExpressionCache molecularlyAvailableResonance(
+    ResonanceExpressionCache inherited,
+    CellState cell
+) {
+    float folded = saturate(cell.proteostasis.x);
+    float electricalGate = saturate(sqrt(max(
+        cell.molecularExpression.y * cell.molecularExpression.z * folded,
+        0.0
+    )));
+    inherited.mechanics *= electricalGate;
+    inherited.tuning *= electricalGate;
+    return inherited;
+}
+
 inline ProgramLineageRecord emptyProgramLineageRecord() {
     ProgramLineageRecord program;
     program.metabolicExpression = float4(0.0);
@@ -1159,14 +1292,6 @@ inline float4 founderJunctionChemistry(AgentState agent, uint seed) {
         0.12 + agent.metabolicExpression.w * 0.62 + signedRandom(seed + 59u) * 0.08,
         0.24 + agent.dynamicExpression.z * 0.58 + signedRandom(seed + 61u) * 0.08
     ), 0.0, 1.0);
-}
-
-inline float receptorChemistryCompatibility(AgentState a, AgentState b) {
-    float reciprocalMismatch = 0.5 * (
-        length(a.receptorChemistry.xy - b.receptorChemistry.zw) +
-        length(b.receptorChemistry.xy - a.receptorChemistry.zw)
-    );
-    return saturate(1.0 - reciprocalMismatch * 0.92);
 }
 
 #include "GenomePages.metalh"

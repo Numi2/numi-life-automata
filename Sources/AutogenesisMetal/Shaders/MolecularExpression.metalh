@@ -131,6 +131,104 @@ inline float molecularProteinCompetition(
     return competition;
 }
 
+inline uint2 reactionSpeciesPair(GenomePage page) {
+    uint encodedReactant = as_type<uint>(page.payload[12].x);
+    uint encodedProduct = as_type<uint>(page.payload[12].y);
+    if (encodedReactant > 0u && encodedProduct > 0u &&
+        encodedReactant < speciesRegistryCapacity &&
+        encodedProduct < speciesRegistryCapacity &&
+        ((encodedReactant - 1u) >> 1u) == ((encodedProduct - 1u) >> 1u)) {
+        return uint2(encodedReactant, encodedProduct);
+    }
+    uint pair = hash32(page.header.z ^ molecularSequenceHash(page)) %
+        ((speciesRegistryCapacity - 1u) / 2u);
+    uint lowerConformer = 1u + pair * 2u;
+    return (page.header.z & 1u) == 0u
+        ? uint2(lowerConformer + 1u, lowerConformer)
+        : uint2(lowerConformer, lowerConformer + 1u);
+}
+
+inline uint transporterSpecies(GenomePage page, uint salt) {
+    uint payloadLane = salt & 3u;
+    uint encoded = as_type<uint>(page.payload[12][payloadLane]);
+    if (encoded > 0u && encoded < speciesRegistryCapacity) { return encoded; }
+    return 1u + hash32(page.header.z ^ molecularSequenceHash(page) ^ salt) %
+        (speciesRegistryCapacity - 1u);
+}
+
+inline uint intracellularSlotForSpecies(
+    thread uint4& species,
+    thread float4& amount,
+    uint speciesID
+) {
+    if (speciesID == 0u) { return 0u; }
+    uint weakest = 1u;
+    for (uint slot = 1u; slot < chemistryIntentWidth; ++slot) {
+        if (amount[slot] > 0.0000001 && species[slot] == speciesID) { return slot; }
+        if (amount[slot] <= 0.0000001) {
+            species[slot] = speciesID;
+            return slot;
+        }
+        if (amount[slot] < amount[weakest]) { weakest = slot; }
+    }
+    return weakest;
+}
+
+inline void addIntracellularMolecule(
+    thread uint4& species,
+    thread float4& amount,
+    thread float4& freeEnergy,
+    uint speciesID,
+    float addedAmount,
+    float addedFreeEnergy,
+    thread float& overflowHeat
+) {
+    if (addedAmount <= 0.0 && addedFreeEnergy <= 0.0) { return; }
+    uint slot = intracellularSlotForSpecies(species, amount, speciesID);
+    if (slot > 0u && amount[slot] > 0.0000001 && species[slot] != speciesID) {
+        amount[0] += amount[slot];
+        overflowHeat += max(freeEnergy[slot], 0.0);
+        amount[slot] = 0.0;
+        freeEnergy[slot] = 0.0;
+        species[slot] = speciesID;
+    }
+    amount[slot] += max(addedAmount, 0.0);
+    freeEnergy[slot] += max(addedFreeEnergy, 0.0);
+}
+
+inline float removeIntracellularMolecule(
+    thread uint4& species,
+    thread float4& amount,
+    thread float4& freeEnergy,
+    uint speciesID,
+    float requested,
+    thread float& removedFreeEnergy
+) {
+    removedFreeEnergy = 0.0;
+    if (requested <= 0.0) { return 0.0; }
+    uint slot = speciesID == 0u ? 0u : chemistryIntentWidth;
+    if (speciesID != 0u) {
+        for (uint candidate = 1u; candidate < chemistryIntentWidth; ++candidate) {
+            if (species[candidate] == speciesID && amount[candidate] > 0.0) {
+                slot = candidate;
+                break;
+            }
+        }
+    }
+    if (slot >= chemistryIntentWidth) { return 0.0; }
+    float removed = min(max(amount[slot], 0.0), requested);
+    float fraction = removed / max(amount[slot], 0.0000001);
+    removedFreeEnergy = max(freeEnergy[slot], 0.0) * fraction;
+    amount[slot] = max(amount[slot] - removed, 0.0);
+    freeEnergy[slot] = max(freeEnergy[slot] - removedFreeEnergy, 0.0);
+    if (slot > 0u && amount[slot] <= 0.0000001) {
+        species[slot] = 0u;
+        amount[slot] = 0.0;
+        freeEnergy[slot] = 0.0;
+    }
+    return removed;
+}
+
 kernel void evolveMolecularExpression(
     device const CellState* cellsIn [[buffer(0)]],
     device CellState* cellsOut [[buffer(1)]],
@@ -150,6 +248,9 @@ kernel void evolveMolecularExpression(
     constant SimulationUniforms& uniforms [[buffer(15)]],
     device const atomic_uint* activeCellCount [[buffer(16)]],
     device const uint* activeCellIndices [[buffer(17)]],
+    device const SpeciesDefinition* speciesRegistry [[buffer(18)]],
+    device const AgentState* agents [[buffer(19)]],
+    texture2d_array<float, access::read> environmentState [[texture(0)]],
     uint compactIndex [[thread_position_in_grid]]
 ) {
     if (compactIndex >= atomic_load_explicit(activeCellCount, memory_order_relaxed)) {
@@ -163,6 +264,27 @@ kernel void evolveMolecularExpression(
     if (identity.programIndex >= maxGenomeHeaderCount) { return; }
     CellState cell = cellsIn[cellIndex];
     cellsOut[cellIndex] = cell;
+    uint4 intracellularSpecies = cell.intracellularSpecies;
+    intracellularSpecies.x = 0u;
+    float4 intracellularAmount = max(cell.intracellularAmount, float4(0.0));
+    float4 intracellularFreeEnergy = max(
+        cell.intracellularFreeEnergy, float4(0.0)
+    );
+    constexpr float transcriptMatterScale = 0.0000020;
+    constexpr float proteinMatterScale = 0.0000080;
+    uint owner = identity.owner;
+    float4 localEnvironment = float4(0.0, 0.0, 0.5, 0.5);
+    if (owner < maxAgentCount) {
+        float2 worldPosition = clamp(
+            cellWorldPosition(agents[owner], cell.position, uniforms),
+            float2(0.0), float2(1.0)
+        );
+        uint2 environmentCoordinate = min(
+            uint2(worldPosition * float2(uniforms.width, uniforms.height)),
+            uint2(uniforms.width - 1u, uniforms.height - 1u)
+        );
+        localEnvironment = environmentState.read(environmentCoordinate, 0);
+    }
     uint transcriptBase = cellIndex * transcriptSlotsPerCell;
     uint proteinBase = cellIndex * proteinSlotsPerCell;
     bool poolMatchesCell = transcriptsIn[transcriptBase].identity.w ==
@@ -179,9 +301,12 @@ kernel void evolveMolecularExpression(
     uint inheritedProteinBase = inheritedCell < maxCellCount
         ? inheritedCell * proteinSlotsPerCell : proteinBase;
 
+    float thermalStress = abs(saturate(localEnvironment.w) - 0.52);
+    float hydrationStress = 1.0 - saturate(localEnvironment.z);
     float molecularStress = saturate(
         cell.signals.z * 0.42 + cell.lifeHistory.z * 0.48 +
-        (1.0 - cell.physiology.w) * 0.52
+        (1.0 - cell.physiology.w) * 0.52 + thermalStress * 0.22 +
+        hydrationStress * 0.12
     );
     for (uint slot = 0u; slot < transcriptSlotsPerCell; ++slot) {
         TranscriptRecord transcript = poolMatchesCell
@@ -194,7 +319,11 @@ kernel void evolveMolecularExpression(
             transcript.kinetics.w + 0.0015 + molecularStress * 0.006,
             0.0015, 0.18
         );
+        float priorTranscript = transcript.kinetics.x;
         transcript.kinetics.x *= exp(-decay * max(uniforms.dt, 0.25));
+        intracellularAmount.x += max(
+            priorTranscript - transcript.kinetics.x, 0.0
+        ) * transcriptMatterScale;
         transcript.kinetics.z += uniforms.dt;
         transcript.kinetics.y = 0.0;
         transcriptsOut[transcriptBase + slot] = transcript;
@@ -205,14 +334,33 @@ kernel void evolveMolecularExpression(
             : (inheritedCell < maxCellCount
                 ? proteinsIn[inheritedProteinBase + slot]
                 : emptyProteinRecord());
-        float denaturation = molecularStress * (1.08 - protein.physical.x) * 0.008;
+        float preferredTemperature = 0.12 +
+            random01(protein.identity.y ^ 0x9e3779b9u) * 0.76;
+        float temperatureMismatch = abs(
+            saturate(localEnvironment.w) - preferredTemperature
+        );
+        float preferredElectrochemistry =
+            signedRandom(protein.identity.y ^ 0x85ebca6bu) * 0.70;
+        float electrochemicalMismatch = abs(
+            clamp(cell.molecularEnergy.x - cell.molecularEnergy.y, -1.0, 1.0) -
+            preferredElectrochemistry
+        );
+        float denaturation = (
+            molecularStress * (1.08 - protein.physical.x) +
+            temperatureMismatch * (0.36 + protein.physical.z * 0.52) +
+            electrochemicalMismatch * abs(protein.physical.y) * 0.18
+        ) * 0.0015;
         protein.abundance.z = saturate(
             protein.abundance.z + denaturation -
                 cell.proteostasis.z * 0.004 - cell.proteostasis.w * 0.003
         );
         float turnover = 0.0008 + protein.abundance.z *
             (0.006 + cell.proteostasis.w * 0.012);
+        float priorProtein = protein.abundance.x;
         protein.abundance.x *= exp(-turnover * max(uniforms.dt, 0.25));
+        intracellularAmount.x += max(
+            priorProtein - protein.abundance.x, 0.0
+        ) * proteinMatterScale;
         protein.abundance.y = saturate(
             protein.abundance.y +
             (protein.physical.x * (1.0 - molecularStress) - protein.abundance.y) *
@@ -249,13 +397,14 @@ kernel void evolveMolecularExpression(
         cell.molecularEnergy.y * 2.0 - 1.0,
         cell.molecularEnergy.z * 2.0 - 1.0
     };
-    RegulatoryOutputs encodedRegulation = evolveDevelopmentalProgram(
+    // Binding state alters promoter occupancy below. It does not become an
+    // actuator: only translated, folded products update cellular capabilities.
+    RegulatoryOutputs promoterBindingState = evolveDevelopmentalProgram(
         genomeHeaders, genomePages, regulatoryStates,
         identity.programIndex, cellIndex, sensors, 1u
     );
-    float regulatoryGate = saturate(0.06 + priorRegulator * 1.36);
-    cell.regulation = mix(cell.regulation, encodedRegulation.a, regulatoryGate);
-    cell.regulationB = mix(cell.regulationB, encodedRegulation.b, regulatoryGate);
+    (void)promoterBindingState;
+    (void)priorRegulator;
 
     GenomeHeader header = genomeHeaders[identity.programIndex];
     float expressionEnergyAvailability = smoothstep(
@@ -312,6 +461,9 @@ kernel void evolveMolecularExpression(
             transcript.identity.z == header.genomeHash;
         if (sameTemplate || transcript.kinetics.x < promoter * 0.004) {
             if (!sameTemplate) {
+                intracellularAmount.x += max(
+                    transcript.kinetics.x, 0.0
+                ) * transcriptMatterScale;
                 transcript = emptyTranscriptRecord(identity.persistentID);
                 transcript.identity = uint4(
                     page, templatePage.header.z, header.genomeHash,
@@ -320,8 +472,16 @@ kernel void evolveMolecularExpression(
                 transcript.kinetics.w = 0.006 +
                     random01(templatePage.header.z + 53u) * 0.034;
             }
-            float synthesis = promoter * (0.0040 + cell.physiology.x * 0.0120) *
+            float requestedSynthesis = promoter *
+                (0.0040 + cell.physiology.x * 0.0120) *
                 max(uniforms.dt, 0.25) * expressionEnergyAvailability;
+            float synthesis = min(
+                requestedSynthesis,
+                intracellularAmount.x / transcriptMatterScale
+            );
+            intracellularAmount.x = max(
+                intracellularAmount.x - synthesis * transcriptMatterScale, 0.0
+            );
             transcript.kinetics.x = min(transcript.kinetics.x + synthesis, 1.5);
             transcript.kinetics.y = synthesis;
             transcriptionWork += synthesis * 0.0008;
@@ -372,15 +532,25 @@ kernel void evolveMolecularExpression(
         ProteinRecord protein = proteinsOut[proteinBase + proteinSlot];
         bool sameProduct = protein.identity.x == templatePageIndex &&
             protein.identity.y == templatePage.header.z;
-        float translation = transcript.kinetics.x *
+        float requestedTranslation = transcript.kinetics.x *
             (0.0060 + cell.physiology.x * 0.0140) * max(uniforms.dt, 0.25) *
             expressionEnergyAvailability;
+        float translation = min(requestedTranslation,
+            intracellularAmount.x / proteinMatterScale);
         if (!sameProduct && protein.abundance.x > translation * 8.0) { continue; }
         if (!sameProduct) {
+            intracellularAmount.x += max(
+                protein.abundance.x, 0.0
+            ) * proteinMatterScale;
+            translation = min(requestedTranslation,
+                intracellularAmount.x / proteinMatterScale);
             protein = proteinFromTemplate(
                 templatePage, templatePageIndex, transcript.identity.z, 0.0
             );
         }
+        intracellularAmount.x = max(
+            intracellularAmount.x - translation * proteinMatterScale, 0.0
+        );
         protein.abundance.x = min(protein.abundance.x + translation, 2.0);
         translationWork += translation * (0.0025 + protein.physical.z * 0.0010);
         proteinsOut[proteinBase + proteinSlot] = protein;
@@ -394,9 +564,10 @@ kernel void evolveMolecularExpression(
     float membraneProtein = 0.0;
     float foreignProtein = 0.0;
     float4 localization = float4(0.0);
-    uint4 uptakeSpecies = uint4(0u, 3u, 2u, 6u);
-    uint4 outputSpecies = uint4(4u, 5u, 2u, 7u);
+    uint4 uptakeSpecies = uint4(0u);
+    uint4 outputSpecies = uint4(0u);
     float4 routeStrength = float4(0.0);
+    routeStrength.x = max(intracellularAmount.x, 0.000001);
     for (uint proteinSlot = 0u; proteinSlot < proteinSlotsPerCell; ++proteinSlot) {
         ProteinRecord protein = proteinsOut[proteinBase + proteinSlot];
         if (protein.abundance.x <= 0.000001) { continue; }
@@ -420,14 +591,25 @@ kernel void evolveMolecularExpression(
             (protein.identity.z != header.genomeHash ? 1.0 : 0.0);
         uint localizationIndex = min(protein.identity.w, 3u);
         localization[localizationIndex] += effective;
+        uint templateIndex = protein.identity.x;
+        if (templateIndex >= genomePageCapacity) { continue; }
+        GenomePage expressedTemplate = genomePages[templateIndex];
         float routing = effective * (protein.activity.y + protein.coupling.x);
-        uint route = protein.identity.y & 3u;
+        uint route = 1u + protein.identity.y % 3u;
         if (routing > routeStrength[route]) {
             routeStrength[route] = routing;
-            uptakeSpecies[route] = route == 0u ? 0u :
-                1u + hash32(protein.identity.y ^ 0xa511e9b3u) % 8u;
-            outputSpecies[route] =
-                1u + hash32(protein.identity.y ^ 0x63d83595u) % 8u;
+            if (expressedTemplate.header.x == genomePageReaction) {
+                uint2 pathway = reactionSpeciesPair(expressedTemplate);
+                uptakeSpecies[route] = pathway.x;
+                outputSpecies[route] = pathway.y;
+            } else {
+                uptakeSpecies[route] = transporterSpecies(
+                    expressedTemplate, 0xa511e9b3u + route
+                );
+                outputSpecies[route] = transporterSpecies(
+                    expressedTemplate, 0x63d83595u + route
+                );
+            }
         }
     }
     float inverseProtein = 1.0 / max(totalProtein, 0.000001);
@@ -442,13 +624,326 @@ kernel void evolveMolecularExpression(
         );
     }
     CellChemistrySettlement settlement = settlements[cellIndex];
-    float capturedEnergy = settlement.settledStep == uniforms.step
-        ? max(settlement.capturedFreeEnergy, 0.0) : 0.0;
+    bool settlementIsCurrent = settlement.settledStep == uniforms.step;
+    float overflowHeat = 0.0;
+    float totalUptake = settlementIsCurrent
+        ? dot(max(settlement.consumedAmount, float4(0.0)), float4(1.0)) : 0.0;
+    for (uint route = 0u; route < chemistryIntentWidth; ++route) {
+        float amount = settlementIsCurrent
+            ? max(settlement.consumedAmount[route], 0.0) : 0.0;
+        float energy = totalUptake > 0.0
+            ? max(settlement.capturedFreeEnergy, 0.0) * amount / totalUptake : 0.0;
+        addIntracellularMolecule(
+            intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
+            cell.molecularUptakeSpecies[route], amount, energy, overflowHeat
+        );
+        float removedEnergy = 0.0;
+        removeIntracellularMolecule(
+            intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
+            cell.molecularOutputSpecies[route],
+            settlementIsCurrent ? max(settlement.secretedAmount[route], 0.0) : 0.0,
+            removedEnergy
+        );
+    }
+
+    float forwardFlux = 0.0;
+    float reverseFlux = 0.0;
+    float capturedReactionWork = 0.0;
+    float reactionHeat = overflowHeat;
+    float uphillReactionWork = 0.0;
+    float priorInternalBarrier = saturate(cell.internalMembrane.x * 12.0) *
+        saturate(cell.internalMembrane.w);
+    page = header.firstPage;
+    traversed = 0u;
+    while (page < genomePageCapacity && traversed < 512u) {
+        GenomePage reactionPage = genomePages[page];
+        if (reactionPage.header.x == genomePageReaction) {
+            float catalyst = 0.0;
+            float localizedCatalyst = 0.0;
+            for (uint proteinSlot = 0u; proteinSlot < proteinSlotsPerCell;
+                 ++proteinSlot) {
+                ProteinRecord protein = proteinsOut[proteinBase + proteinSlot];
+                if (protein.identity.x != page || protein.abundance.x <= 0.0) { continue; }
+                float competition = molecularProteinCompetition(
+                    proteinsOut, proteinBase, proteinSlot, protein
+                );
+                float activator = regulatoryStates[
+                    cellIndex * regulatoryStateChannelCount +
+                        (protein.identity.y % regulatoryStateChannelCount)
+                ];
+                float catalyticContribution =
+                    protein.abundance.x * protein.abundance.y * protein.activity.x *
+                    (0.18 + activator * 0.82) /
+                    (1.0 + competition + protein.abundance.z * 2.0);
+                catalyst += catalyticContribution;
+                localizedCatalyst += catalyticContribution * protein.physical.w;
+            }
+            if (catalyst > 0.0000001) {
+                uint2 pathway = reactionSpeciesPair(reactionPage);
+                uint reactantSlot = chemistryIntentWidth;
+                uint productSlot = chemistryIntentWidth;
+                for (uint slot = 1u; slot < chemistryIntentWidth; ++slot) {
+                    if (intracellularSpecies[slot] == pathway.x) { reactantSlot = slot; }
+                    if (intracellularSpecies[slot] == pathway.y) { productSlot = slot; }
+                }
+                float reactantAmount = reactantSlot < chemistryIntentWidth
+                    ? intracellularAmount[reactantSlot] : 0.0;
+                float productAmount = productSlot < chemistryIntentWidth
+                    ? intracellularAmount[productSlot] : 0.0;
+                float forwardBarrier = 0.14 +
+                    abs(reactionPage.payload[4].z) * 0.72;
+                float reverseBarrier = 0.14 +
+                    abs(reactionPage.payload[4].w) * 0.72;
+                float chemicalDrive = 0.18 + cell.molecularEnergy.z * 0.82;
+                float localizedFraction = saturate(
+                    localizedCatalyst / max(catalyst, 0.0000001)
+                );
+                float compartmentConcentration = 1.0 + priorInternalBarrier *
+                    saturate(cell.internalMembrane.z) * localizedFraction *
+                    (0.18 + (1.0 - saturate(cell.internalMembrane.y)) * 0.42);
+                float forwardRate = reactantAmount * catalyst *
+                    exp(-forwardBarrier / max(chemicalDrive, 0.04)) *
+                    compartmentConcentration;
+                float reverseRate = productAmount * catalyst *
+                    exp(-reverseBarrier / max(chemicalDrive, 0.04)) *
+                    compartmentConcentration;
+                float forward = min(
+                    reactantAmount,
+                    forwardRate * max(uniforms.dt, 0.25) * 0.18
+                );
+                float reverse = min(
+                    productAmount,
+                    reverseRate * max(uniforms.dt, 0.25) * 0.18
+                );
+                float net = forward - reverse;
+                uint sourceSpecies = net >= 0.0 ? pathway.x : pathway.y;
+                uint destinationSpecies = net >= 0.0 ? pathway.y : pathway.x;
+                float requested = abs(net);
+                SpeciesDefinition sourceDefinition = speciesRegistry[sourceSpecies];
+                SpeciesDefinition destinationDefinition = speciesRegistry[destinationSpecies];
+                float uphillPerAmount = max(
+                    destinationDefinition.physical.x - sourceDefinition.physical.x, 0.0
+                );
+                if (uphillPerAmount > 0.0) {
+                    requested = min(
+                        requested,
+                        max(cell.physiology.x, 0.0) * 0.00012 / uphillPerAmount
+                    );
+                }
+                float removedEnergy = 0.0;
+                float reacted = removeIntracellularMolecule(
+                    intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
+                    sourceSpecies, requested, removedEnergy
+                );
+                if (net >= 0.0) {
+                    forwardFlux += reacted;
+                } else {
+                    reverseFlux += reacted;
+                }
+                float productEnergy = reacted * destinationDefinition.physical.x;
+                float energyDifference = removedEnergy - productEnergy;
+                float usableFraction = clamp(
+                    0.18 + abs(reactionPage.payload[4].y) * 0.62,
+                    0.08, 0.88
+                );
+                if (energyDifference >= 0.0) {
+                    capturedReactionWork += energyDifference * usableFraction;
+                    reactionHeat += energyDifference * (1.0 - usableFraction);
+                } else {
+                    uphillReactionWork += -energyDifference;
+                }
+                addIntracellularMolecule(
+                    intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
+                    destinationSpecies, reacted, productEnergy, reactionHeat
+                );
+            }
+        }
+        page = reactionPage.header.y;
+        ++traversed;
+    }
+
+    float membraneLocalization = membraneProtein * inverseProtein;
+    float internalMembraneBuildRequest = molecularExpression.w * foldedFraction *
+        (0.20 + membraneLocalization * 0.80) *
+        (0.15 + localizationDiversity * 0.85) *
+        max(uniforms.dt, 0.25) * 0.00018;
+    internalMembraneBuildRequest = min(
+        internalMembraneBuildRequest,
+        max(intracellularAmount.x - 0.00040, 0.0)
+    );
+    float removedMembraneEnergy = 0.0;
+    float internalMembraneBuild = removeIntracellularMolecule(
+        intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
+        0u, internalMembraneBuildRequest, removedMembraneEnergy
+    );
+    float internalMembraneMass = max(
+        cell.internalMembrane.x * (0.9994 - molecularStress * 0.0008) +
+            internalMembraneBuild,
+        0.0
+    );
+    float internalPermeability = saturate(
+        cell.internalMembrane.y * 0.996 + molecularExpression.y * 0.004
+    );
+    float internalSelectivity = saturate(
+        cell.internalMembrane.z * 0.997 +
+            localizationDiversity * molecularExpression.z * 0.003
+    );
+    float internalIntegrity = saturate(
+        cell.internalMembrane.w * 0.998 + internalMembraneBuild * 60.0 +
+            coupling.y * 0.0012 -
+            damagedFraction * internalMembraneMass * 0.020
+    );
+    cell.internalMembrane = float4(
+        internalMembraneMass, internalPermeability,
+        internalSelectivity, internalIntegrity
+    );
+
+    float symbiontAbundance = max(cell.symbiontState.x, 0.0);
+    float symbiontReplication = saturate(cell.symbiontState.y);
+    float symbiontIntegration = saturate(cell.symbiontState.z);
+    float symbiontDependence = saturate(cell.symbiontState.w);
+    float symbiontEnergyExport = 0.0;
+    float symbiontRedoxExport = 0.0;
+    float symbiontSubstrate = 0.0;
+    float symbiontConflict = 0.0;
+    if (symbiontAbundance > 0.000001 &&
+        cell.symbiontIdentity.x < genomePageCapacity) {
+        // The captured propagule retains an immutable foreign page chain. It
+        // can export energy only by executing one of its own balanced reaction
+        // templates against molecules physically present inside the enclosure.
+        uint symbiontPage = cell.symbiontIdentity.x;
+        uint symbiontPagesTraversed = 0u;
+        while (symbiontPage < genomePageCapacity &&
+               symbiontPagesTraversed < 128u) {
+            GenomePage symbiontTemplate = genomePages[symbiontPage];
+            if (symbiontTemplate.header.x == genomePageReaction) {
+                uint2 pathway = reactionSpeciesPair(symbiontTemplate);
+                uint reactantSlot = chemistryIntentWidth;
+                uint productSlot = chemistryIntentWidth;
+                for (uint slot = 1u; slot < chemistryIntentWidth; ++slot) {
+                    if (intracellularSpecies[slot] == pathway.x) {
+                        reactantSlot = slot;
+                    }
+                    if (intracellularSpecies[slot] == pathway.y) {
+                        productSlot = slot;
+                    }
+                }
+                float reactantAmount = reactantSlot < chemistryIntentWidth
+                    ? intracellularAmount[reactantSlot] : 0.0;
+                float productAmount = productSlot < chemistryIntentWidth
+                    ? intracellularAmount[productSlot] : 0.0;
+                float catalyst = symbiontAbundance *
+                    (0.12 + symbiontReplication * 0.58 +
+                        symbiontIntegration * 0.30);
+                float forwardBarrier = 0.14 +
+                    abs(symbiontTemplate.payload[4].z) * 0.72;
+                float reverseBarrier = 0.14 +
+                    abs(symbiontTemplate.payload[4].w) * 0.72;
+                float forward = reactantAmount * catalyst * exp(-forwardBarrier) *
+                    max(uniforms.dt, 0.25) * 0.12;
+                float reverse = productAmount * catalyst * exp(-reverseBarrier) *
+                    max(uniforms.dt, 0.25) * 0.12;
+                float net = forward - reverse;
+                uint sourceSpecies = net >= 0.0 ? pathway.x : pathway.y;
+                uint destinationSpecies = net >= 0.0 ? pathway.y : pathway.x;
+                SpeciesDefinition sourceDefinition = speciesRegistry[sourceSpecies];
+                SpeciesDefinition destinationDefinition =
+                    speciesRegistry[destinationSpecies];
+                float freeEnergyDrop =
+                    sourceDefinition.physical.x - destinationDefinition.physical.x;
+                if (abs(net) > 0.0000001 && freeEnergyDrop >= 0.0) {
+                    float removedEnergy = 0.0;
+                    float reacted = removeIntracellularMolecule(
+                        intracellularSpecies, intracellularAmount,
+                        intracellularFreeEnergy, sourceSpecies, abs(net),
+                        removedEnergy
+                    );
+                    float productEnergy =
+                        reacted * destinationDefinition.physical.x;
+                    float releasedEnergy = max(
+                        removedEnergy - productEnergy, 0.0
+                    );
+                    float exchangeEfficiency = clamp(
+                        0.12 + symbiontIntegration * 0.58 -
+                            symbiontConflict * 0.18,
+                        0.04, 0.72
+                    );
+                    float redoxFraction = clamp(
+                        0.08 + symbiontIntegration * 0.14, 0.08, 0.22
+                    );
+                    symbiontEnergyExport +=
+                        releasedEnergy * exchangeEfficiency;
+                    symbiontRedoxExport += releasedEnergy * redoxFraction;
+                    reactionHeat += releasedEnergy * max(
+                        1.0 - exchangeEfficiency - redoxFraction, 0.0
+                    );
+                    symbiontSubstrate += reacted;
+                    addIntracellularMolecule(
+                        intracellularSpecies, intracellularAmount,
+                        intracellularFreeEnergy, destinationSpecies, reacted,
+                        productEnergy, reactionHeat
+                    );
+                }
+            }
+            symbiontPage = symbiontTemplate.header.y;
+            ++symbiontPagesTraversed;
+        }
+        symbiontReplication = saturate(
+            symbiontReplication * 0.998 + symbiontSubstrate * 5.0 +
+                symbiontEnergyExport * 1.8
+        );
+        symbiontAbundance = max(
+            symbiontAbundance * (0.9996 - molecularStress * 0.0006) +
+                symbiontSubstrate * symbiontReplication * 0.12,
+            0.0
+        );
+        symbiontIntegration = saturate(
+            symbiontIntegration * 0.999 +
+                internalMembraneMass * internalIntegrity * 0.0012
+        );
+        symbiontDependence = saturate(
+            symbiontDependence * 0.9998 +
+                max(symbiontEnergyExport - capturedReactionWork, 0.0) * 0.18 -
+                max(capturedReactionWork - symbiontEnergyExport, 0.0) * 0.04
+        );
+        symbiontConflict = saturate(
+            (1.0 - symbiontIntegration) * symbiontAbundance * 0.14 +
+                molecularStress * symbiontAbundance * 0.08
+        );
+    } else if (symbiontAbundance > 0.000001) {
+        symbiontAbundance *= 0.998;
+        symbiontReplication *= 0.996;
+    }
+    cell.symbiontState = float4(
+        symbiontAbundance, symbiontReplication,
+        symbiontIntegration, symbiontDependence
+    );
+    cell.symbiontExchange = float4(
+        symbiontEnergyExport, symbiontRedoxExport,
+        symbiontSubstrate, symbiontConflict
+    );
+    cell.intracellularSpecies = intracellularSpecies;
+    cell.intracellularAmount = intracellularAmount;
+    cell.intracellularFreeEnergy = intracellularFreeEnergy;
+    cell.reactionFlux = float4(
+        forwardFlux, reverseFlux, capturedReactionWork,
+        reactionHeat
+    );
+
+    float capturedEnergy = capturedReactionWork + symbiontEnergyExport;
+    float organizedInternalBarrier = saturate(internalMembraneMass * 12.0) *
+        internalIntegrity;
     float pumpActivity = coupling.w *
-        saturate(molecularExpression.y + cell.physiology.x * 0.35);
+        saturate(molecularExpression.y + cell.physiology.x * 0.35) *
+        (1.0 + organizedInternalBarrier * internalSelectivity * 0.32);
+    float compartmentLeak = mix(
+        1.0,
+        clamp(internalPermeability * (1.0 - internalSelectivity * 0.54), 0.08, 1.0),
+        organizedInternalBarrier
+    );
     float channelLeak = molecularExpression.y *
         (0.00035 + membraneProtein * inverseProtein * 0.00065) *
-        (1.0 - saturate(coupling.w) * 0.48);
+        (1.0 - saturate(coupling.w) * 0.48) * compartmentLeak;
     float protonGradient = clamp(
         cell.molecularEnergy.x * 0.997 + pumpActivity * 0.0032 +
         capturedEnergy * molecularExpression.x * 0.014 - channelLeak,
@@ -466,6 +961,7 @@ kernel void evolveMolecularExpression(
     );
     float expressionWork = transcriptionWork + translationWork +
         pumpActivity * 0.000028 + damagedFraction * coupling.y * 0.000016;
+    expressionWork += uphillReactionWork + internalMembraneBuild * 0.012;
     cell.molecularEnergy = float4(
         protonGradient, ionGradient, redox, expressionWork
     );
@@ -474,15 +970,35 @@ kernel void evolveMolecularExpression(
         foldedFraction, damagedFraction,
         saturate(coupling.y), saturate(coupling.z)
     );
+    float chemicalResponseRate = 0.006 +
+        saturate(molecularExpression.z) * foldedFraction * 0.032;
+    float4 chemicallyProducedRegulationA = saturate(float4(
+        molecularExpression.z * molecularExpression.x,
+        molecularExpression.z * molecularExpression.w,
+        molecularExpression.z * coupling.w,
+        molecularExpression.z * (coupling.y + coupling.z) * 0.5
+    ) * foldedFraction);
+    float4 chemicallyProducedRegulationB = saturate(float4(
+        molecularExpression.y * molecularExpression.z,
+        molecularExpression.x * molecularExpression.y,
+        molecularExpression.z * (coupling.y + coupling.z) * 0.5,
+        molecularExpression.y * coupling.w
+    ) * foldedFraction);
+    cell.regulation = mix(
+        cell.regulation, chemicallyProducedRegulationA, chemicalResponseRate
+    );
+    cell.regulationB = mix(
+        cell.regulationB, chemicallyProducedRegulationB, chemicalResponseRate
+    );
     float inheritedForeign = foreignProtein * inverseProtein;
     cell.compartments = float4(
-        localizationDiversity,
-        saturate(membraneProtein * inverseProtein),
-        saturate(inheritedForeign),
+        saturate(localizationDiversity * internalIntegrity),
+        saturate(internalMembraneMass * 12.0 + membraneProtein * inverseProtein * 0.24),
+        saturate(max(inheritedForeign, symbiontAbundance)),
         clamp(
             cell.compartments.w * 0.999 +
-                localizationDiversity * foldedFraction * 0.0015 +
-                inheritedForeign * foldedFraction * 0.0025 -
+                localizationDiversity * foldedFraction * internalIntegrity * 0.0015 +
+                symbiontIntegration * symbiontAbundance * 0.0025 -
                 damagedFraction * 0.0018,
             0.0, 1.0
         )

@@ -472,6 +472,14 @@ struct ExperimentSample: Codable {
     let meanProtonGradient: Double
     let meanFoldedProteinFraction: Double
     let meanCompartmentalization: Double
+    let meanForwardReactionFlux: Double
+    let meanReverseReactionFlux: Double
+    let meanCapturedReactionWork: Double
+    let meanInternalMembraneIntegrity: Double
+    let meanSymbiontAbundance: Double
+    let meanSymbiontIntegration: Double
+    let meanSymbiontDependence: Double
+    let meanSymbiontEnergyExport: Double
     let meanEnergeticIndependence: Double
     let meanBoundaryMaintenance: Double
     let meanMechanochemicalClosure: Double

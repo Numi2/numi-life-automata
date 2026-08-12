@@ -22,11 +22,14 @@ Sparse-molecule overflow is conservative: the least-abundant packet is decompose
 
 Add Life uses the same constructor. The difference is provenance: supplied matter and energy are entered as an external intervention before the protocell is built.
 
-Cell metabolism is deterministic in three GPU phases:
+Cell metabolism is deterministic across an ordered GPU pipeline:
 
 1. Every cell senses its tile and publishes at most four uptake and four output intents.
 2. Each tile settles its finite chemistry in permanent-cell-ID order.
-3. Cells receive settlements and update ATP, biomass, work, heat, damage, memory, membrane growth, and secretion.
+3. Templates compete for finite transcript and protein pools; only folded products become active.
+4. Expressed enzymes run reversible, basis-balanced intracellular reactions against finite molecular stock.
+5. Pumps, channels, and paid internal membranes establish electrochemical organization.
+6. Cells receive the remaining settlement and update ATP, biomass, work, heat, damage, memory, membrane growth, and secretion.
 
 No scalar fitness, ranking, archive, selected world, or observer output participates in settlement, survival, or reproduction.
 
@@ -49,16 +52,25 @@ not an active capability.
 
 Folded proteins contribute continuous physical effects: catalysis, transport,
 regulation, structural assembly, receptor binding, chaperoning, proteolysis,
-and pump/channel balance. Binding competition and local regulatory chemistry
-change their effective activity. Membrane pumps build proton and ion gradients;
-channels dissipate them; captured chemical energy is converted with an
-efficiency set by the currently folded catalysts and electrochemical state.
+and pump/channel balance. Promoter binding changes transcription rather than
+writing directly into physiology. Expressed reaction proteins catalyze forward
+and reverse flux using finite intracellular reactants, products, activation
+barriers, and chemical free-energy differences. Downhill reactions can capture
+bounded work and reject heat; uphill reactions consume ATP.
 
-Protein localization can segregate chemistry into several internal regions
-without a named organelle catalogue. Dividing cells inherit concentrations from
-their physical parent, while newly expressed products reflect the offspring's
-own genome. Foreign inherited products are observable but are not automatically
-treated as symbiosis; persistence and organization must be demonstrated.
+Expressed structural and transport proteins can build an internal membrane only
+by consuming intracellular basis material. Its mass, permeability, selectivity,
+and integrity alter molecular retention and electrochemical coupling without a
+named organelle catalogue. Dividing cells physically partition molecules,
+membrane material, proteins, and transcripts rather than recreating them from
+genome values.
+
+Sustained enclosure after membrane breach can retain a foreign immutable genome
+page chain. The retained lineage receives no role label and no free-energy
+allowance: it can persist, replicate, conflict, or export work only by running
+its own balanced reactions on molecules present inside the host. Division
+partitions the retained population, permitting vertical transmission and later
+observer inference of an endosymbiotic relationship.
 
 Founders carry duplicate reaction and regulation templates plus neutral pages.
 Copy number affects expression, duplicate copies can diverge, and mutation can
@@ -115,10 +127,10 @@ Journal schema 18 keeps observer events such as species birth, cross-feeding can
 Metal owns quantum evolution, chemistry, cells, contact, topology, observation reduction, and rendering. Swift schedules command buffers, owns presentation, reads bounded observation rings, and manages checkpoint recovery.
 
 The shader source is divided into shared modules for the open-ecology ABI,
-genome pages, molecular expression, and unified ecology, then compiled into one
-Metal library. Causal state is private GPU memory. Permanent cell IDs make
-chemistry settlement and ancestry stable across allocation order. Active-cell
-and active-component lists avoid whole-pool work where possible.
+genome pages, molecular expression, contact/topology, and unified ecology, then
+compiled into one Metal library. Causal state is private GPU memory. Permanent
+cell IDs make chemistry settlement and ancestry stable across allocation order.
+Active-cell and active-component lists avoid whole-pool work where possible.
 
 Audits cover quantum norm, eight basis materials, external matter and energy, chemical free energy, ATP work, heat, momentum, sparse overflow, tile overflow, skipped genome mutation, and protocell origins. Recovery checkpoints preserve causal buffers and observer history separately.
 

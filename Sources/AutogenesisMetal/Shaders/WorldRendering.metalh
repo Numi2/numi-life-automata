@@ -844,11 +844,26 @@ inline CellRasterData makeCellRasterData(
     output.construction = saturate(cell.tissueGeometry.z) *
         saturate(cell.membraneProperties);
     output.lifeHistory = cell.lifeHistory;
+    // At molecular zoom these existing raster lanes carry measured molecular
+    // architecture rather than observer-invented organelles. The fragment can
+    // therefore reveal only structures that the live chemistry paid to build.
+    float4 molecularArchitecture = float4(
+        cell.compartments.x,
+        saturate(cell.internalMembrane.x * 12.0),
+        cell.internalMembrane.w,
+        saturate(cell.symbiontState.x * 24.0)
+    );
     output.functionalActivity = mix(
-        cell.functionalActivity, cell.compartments, molecularRasterBlend
+        cell.functionalActivity, molecularArchitecture, molecularRasterBlend
+    );
+    float4 molecularQuality = float4(
+        cell.proteostasis.x,
+        cell.proteostasis.y,
+        cell.symbiontState.z,
+        saturate(cell.symbiontExchange.x * 640.0)
     );
     output.learning = mix(
-        cell.learning, cell.proteostasis, molecularRasterBlend
+        cell.learning, molecularQuality, molecularRasterBlend
     );
     output.constructionFlux = mix(
         cell.constructionFlux, cell.molecularExpression, molecularRasterBlend

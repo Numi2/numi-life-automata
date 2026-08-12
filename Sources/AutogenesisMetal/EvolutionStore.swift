@@ -91,6 +91,14 @@ struct ChemistryObservation: Sendable, Equatable {
     let protonGradient: Double
     let foldedProteinFraction: Double
     let compartmentalization: Double
+    let forwardReactionFlux: Double
+    let reverseReactionFlux: Double
+    let capturedReactionWork: Double
+    let internalMembraneIntegrity: Double
+    let symbiontAbundance: Double
+    let symbiontIntegration: Double
+    let symbiontDependence: Double
+    let symbiontEnergyExport: Double
 }
 
 struct PopulationObservation: Sendable, Equatable {
@@ -143,6 +151,14 @@ struct WorldObservation: Sendable, Equatable {
     var meanProtonGradient: Double = 0
     var meanFoldedProteinFraction: Double = 0
     var meanCompartmentalization: Double = 0
+    var meanForwardReactionFlux: Double = 0
+    var meanReverseReactionFlux: Double = 0
+    var meanCapturedReactionWork: Double = 0
+    var meanInternalMembraneIntegrity: Double = 0
+    var meanSymbiontAbundance: Double = 0
+    var meanSymbiontIntegration: Double = 0
+    var meanSymbiontDependence: Double = 0
+    var meanSymbiontEnergyExport: Double = 0
     var meanReactiveMolecularLoad: Double = 0
     var meanMembranePrecursorAvailability: Double = 0
     var meanQuantumOrder: Double = 0
@@ -534,7 +550,15 @@ extension WorldObservation {
             structuralAssembly: meanStructuralAssembly,
             protonGradient: meanProtonGradient,
             foldedProteinFraction: meanFoldedProteinFraction,
-            compartmentalization: meanCompartmentalization
+            compartmentalization: meanCompartmentalization,
+            forwardReactionFlux: meanForwardReactionFlux,
+            reverseReactionFlux: meanReverseReactionFlux,
+            capturedReactionWork: meanCapturedReactionWork,
+            internalMembraneIntegrity: meanInternalMembraneIntegrity,
+            symbiontAbundance: meanSymbiontAbundance,
+            symbiontIntegration: meanSymbiontIntegration,
+            symbiontDependence: meanSymbiontDependence,
+            symbiontEnergyExport: meanSymbiontEnergyExport
         )
     }
 
