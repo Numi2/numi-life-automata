@@ -263,6 +263,7 @@ kernel void evolveMolecularExpression(
     CellIdentity identity = identities[cellIndex];
     if (identity.programIndex >= maxGenomeHeaderCount) { return; }
     CellState cell = cellsIn[cellIndex];
+    initializeCellMaterialLedger(cell);
     cellsOut[cellIndex] = cell;
     uint4 intracellularSpecies = cell.intracellularSpecies;
     intracellularSpecies.x = 0u;
@@ -637,13 +638,27 @@ kernel void evolveMolecularExpression(
             intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
             cell.molecularUptakeSpecies[route], amount, energy, overflowHeat
         );
+        uint uptakeSpeciesID = cell.molecularUptakeSpecies[route];
+        if (amount > 0.0 && uptakeSpeciesID < speciesRegistryCapacity) {
+            applySpeciesCompositionToLedger(
+                cell, speciesRegistry[uptakeSpeciesID], amount
+            );
+        }
         float removedEnergy = 0.0;
-        removeIntracellularMolecule(
+        float secreted = settlementIsCurrent
+            ? max(settlement.secretedAmount[route], 0.0) : 0.0;
+        float removed = removeIntracellularMolecule(
             intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
             cell.molecularOutputSpecies[route],
-            settlementIsCurrent ? max(settlement.secretedAmount[route], 0.0) : 0.0,
+            secreted,
             removedEnergy
         );
+        uint outputSpeciesID = cell.molecularOutputSpecies[route];
+        if (removed > 0.0 && outputSpeciesID < speciesRegistryCapacity) {
+            applySpeciesCompositionToLedger(
+                cell, speciesRegistry[outputSpeciesID], -removed
+            );
+        }
     }
 
     float forwardFlux = 0.0;
@@ -698,8 +713,16 @@ kernel void evolveMolecularExpression(
                 float localizedFraction = saturate(
                     localizedCatalyst / max(catalyst, 0.0000001)
                 );
-                float compartmentConcentration = 1.0 + priorInternalBarrier *
-                    saturate(cell.internalMembrane.z) * localizedFraction *
+                uint sourceMask = reactantSlot < chemistryIntentWidth
+                    ? (1u << reactantSlot) : 1u;
+                uint productMask = productSlot < chemistryIntentWidth
+                    ? (1u << productSlot) : 1u;
+                float causalDomainBarrier = cellDomainBarrierForSpeciesMask(
+                    cell, sourceMask | productMask
+                );
+                float compartmentConcentration = 1.0 + max(
+                    priorInternalBarrier, causalDomainBarrier
+                ) * saturate(cell.internalMembrane.z) * localizedFraction *
                     (0.18 + (1.0 - saturate(cell.internalMembrane.y)) * 0.42);
                 float forwardRate = reactantAmount * catalyst *
                     exp(-forwardBarrier / max(chemicalDrive, 0.04)) *
@@ -776,26 +799,108 @@ kernel void evolveMolecularExpression(
         intracellularSpecies, intracellularAmount, intracellularFreeEnergy,
         0u, internalMembraneBuildRequest, removedMembraneEnergy
     );
-    float internalMembraneMass = max(
-        cell.internalMembrane.x * (0.9994 - molecularStress * 0.0008) +
-            internalMembraneBuild,
-        0.0
-    );
-    float internalPermeability = saturate(
-        cell.internalMembrane.y * 0.996 + molecularExpression.y * 0.004
-    );
-    float internalSelectivity = saturate(
-        cell.internalMembrane.z * 0.997 +
-            localizationDiversity * molecularExpression.z * 0.003
-    );
-    float internalIntegrity = saturate(
-        cell.internalMembrane.w * 0.998 + internalMembraneBuild * 60.0 +
-            coupling.y * 0.0012 -
-            damagedFraction * internalMembraneMass * 0.020
-    );
+    uint activeDomains = activeCellDomainCount(cell);
+    uint buildDomain = 0u;
+    float weakestDomainMass = INFINITY;
+    for (uint domain = 0u; domain < internalDomainCount; ++domain) {
+        uint4 identity = cellDomainIdentity(cell, domain);
+        float mass = cellDomainGeometry(cell, domain).w;
+        if (identity.x == 0u) {
+            buildDomain = domain;
+            weakestDomainMass = -1.0;
+            break;
+        }
+        if (mass < weakestDomainMass) {
+            weakestDomainMass = mass;
+            buildDomain = domain;
+        }
+    }
+    bool canNucleateDomain = activeDomains < internalDomainCount &&
+        internalMembraneBuild > 0.0000005 && localizationDiversity > 0.02;
+    if (canNucleateDomain) {
+        float angle = random01(
+            hash32(cellIndex ^ uniforms.step ^ buildDomain * 0x9e3779b9u)
+        ) * 2.0 * M_PI_F;
+        uint speciesMask = 1u << ((buildDomain + identity.persistentID) % 4u);
+        setCellDomain(
+            cell, buildDomain,
+            float4(float2(cos(angle), sin(angle)) * 0.22, 0.12,
+                internalMembraneBuild),
+            float4(
+                saturate(molecularExpression.y), localizationDiversity,
+                saturate(0.34 + internalMembraneBuild * 80.0),
+                clamp(cell.molecularEnergy.x - cell.molecularEnergy.y, -1.0, 1.0)
+            ),
+            float4(0.0, 0.0, 0.0, 0.0),
+            uint4(1u, speciesMask, 1u, 0xffffffffu)
+        );
+    } else if (activeDomains > 0u && internalMembraneBuild > 0.0) {
+        float4 geometry = cellDomainGeometry(cell, buildDomain);
+        geometry.w += internalMembraneBuild;
+        geometry.z = clamp(sqrt(geometry.w * 2.4), 0.08, 0.56);
+        setCellDomain(
+            cell, buildDomain, geometry, cellDomainTransport(cell, buildDomain),
+            cellDomainChemistry(cell, buildDomain), cellDomainIdentity(cell, buildDomain)
+        );
+    }
+
+    float internalMembraneMass = 0.0;
+    float permeabilityWeighted = 0.0;
+    float selectivityWeighted = 0.0;
+    float integrityWeighted = 0.0;
+    for (uint domain = 0u; domain < internalDomainCount; ++domain) {
+        uint4 domainIdentity = cellDomainIdentity(cell, domain);
+        if (domainIdentity.x == 0u) { continue; }
+        float4 geometry = cellDomainGeometry(cell, domain);
+        float4 transport = cellDomainTransport(cell, domain);
+        float4 chemistry = cellDomainChemistry(cell, domain);
+        float erosion = geometry.w * (
+            0.0006 + molecularStress * 0.0008 + damagedFraction * 0.0012
+        );
+        geometry.w = max(geometry.w - erosion, 0.0);
+        geometry.z = clamp(sqrt(geometry.w * 2.4), 0.0, 0.56);
+        transport.x = saturate(
+            transport.x * 0.996 + molecularExpression.y * 0.004
+        );
+        transport.y = saturate(
+            transport.y * 0.997 + localizationDiversity * molecularExpression.z * 0.003
+        );
+        transport.z = saturate(
+            transport.z * 0.998 + internalMembraneBuild * 48.0 +
+                coupling.y * 0.0012 - damagedFraction * geometry.w * 0.020
+        );
+        transport.w = clamp(
+            transport.w * 0.996 +
+                (cell.molecularEnergy.x - cell.molecularEnergy.y) * 0.004,
+            -1.0, 1.0
+        );
+        chemistry.x = 0.0;
+        chemistry.y = 0.0;
+        for (uint slot = 0u; slot < chemistryIntentWidth; ++slot) {
+            if ((domainIdentity.y & (1u << slot)) == 0u) { continue; }
+            chemistry.x += intracellularAmount[slot];
+            chemistry.y += intracellularFreeEnergy[slot];
+        }
+        chemistry.z = (forwardFlux + reverseFlux) * transport.z;
+        chemistry.w = chemistry.x * transport.x * (1.0 - transport.z) * 0.001;
+        if (geometry.w <= 0.0000001 || transport.z <= 0.001) {
+            setCellDomain(
+                cell, domain, float4(0.0), float4(0.0), float4(0.0), uint4(0u)
+            );
+            continue;
+        }
+        setCellDomain(cell, domain, geometry, transport, chemistry, domainIdentity);
+        internalMembraneMass += geometry.w;
+        permeabilityWeighted += transport.x * geometry.w;
+        selectivityWeighted += transport.y * geometry.w;
+        integrityWeighted += transport.z * geometry.w;
+    }
+    float inverseDomainMass = 1.0 / max(internalMembraneMass, 0.000001);
+    float internalPermeability = saturate(permeabilityWeighted * inverseDomainMass);
+    float internalSelectivity = saturate(selectivityWeighted * inverseDomainMass);
+    float internalIntegrity = saturate(integrityWeighted * inverseDomainMass);
     cell.internalMembrane = float4(
-        internalMembraneMass, internalPermeability,
-        internalSelectivity, internalIntegrity
+        internalMembraneMass, internalPermeability, internalSelectivity, internalIntegrity
     );
 
     float symbiontAbundance = max(cell.symbiontState.x, 0.0);

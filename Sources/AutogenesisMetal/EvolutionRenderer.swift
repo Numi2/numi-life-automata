@@ -125,7 +125,7 @@ extension EvolutionRenderer {
         let readback = try makeHeadlessReadbackBuffers()
         let startedAt = ISO8601DateFormatter().string(from: Date())
         try journal.append("header", ExperimentHeader(
-            schemaVersion: 18,
+            schemaVersion: 19,
             startedAt: startedAt,
             device: device.name,
             configuration: configuration
@@ -635,7 +635,8 @@ extension EvolutionRenderer {
             (1 << 4, "orphaned_junction"),
             (1 << 5, "invalid_membrane"),
             (1 << 6, "disconnected_ownership"),
-            (1 << 7, "contact_pair_queue_overflow")
+            (1 << 7, "contact_pair_queue_overflow"),
+            (1 << 8, "invalid_cell_material")
         ]
         return ExperimentInvariantReport(
             flags: flags,
@@ -649,6 +650,7 @@ extension EvolutionRenderer {
             orphanedJunctionViolations: values[7],
             invalidMembraneViolations: values[8],
             disconnectedOwnershipViolations: values[9],
+            invalidCellMaterialViolations: values[17],
             maximumContactMomentumResidual: values[10],
             maximumEnergyResidual: Double(values[16]) / Self.energyAuditScale
         )
@@ -846,13 +848,21 @@ extension EvolutionRenderer {
         let living = (0..<Self.maxAgentCount).filter { occupancy[$0] == 1 }
         let descendants = living.filter { agents[$0].generation > 0 }
         let regenerativeDescendants = descendants.filter {
-            agents[$0].componentFlags & 2 != 0
+            agents[$0].componentPersistenceSteps >= 1_024 &&
+                aggregates[$0].physiology.x >= 4 &&
+                aggregates[$0].developmentCausality.x >= 0.01
         }
         let challengedDescendants = descendants.filter {
             agents[$0].componentFlags & 8 != 0
         }
         let homeostaticDescendants = descendants.filter {
-            agents[$0].componentFlags & 4 != 0
+            agents[$0].componentFlags & 8 != 0 &&
+                agents[$0].tissueKinematics.w <= 0 &&
+                agents[$0].componentPersistenceSteps >= 1_024 &&
+                aggregates[$0].physiology.x >= 4 &&
+                aggregates[$0].physiology.y >= 0.32 &&
+                aggregates[$0].physiology.z >= 0.55 &&
+                aggregates[$0].physiology.w <= 0.55
         }
         let maximumComponentDescentDepth = living.map { agents[$0].generation }.max() ?? 0
         let maximumProgramReplicationGeneration = living.map {
@@ -1012,6 +1022,11 @@ extension EvolutionRenderer {
                         Double(aggregate.constructionFlux.x), Double(aggregate.constructionFlux.y),
                         Double(aggregate.constructionFlux.z), Double(aggregate.constructionFlux.w)
                     ],
+                    conservedMaterialMass: Double(aggregate.materialLedger.x),
+                    recycledProvenanceMass: Double(aggregate.materialLedger.z),
+                    dominantRecycledSourceBirthID: aggregate.materialProvenanceIDs.x == 0
+                        ? nil : aggregate.materialProvenanceIDs.x,
+                    meanInternalDomainCount: Double(aggregate.materialLedger.w),
                     morphology: morphologyDescriptor(owner: owner).values
                 ))
             }
@@ -1578,6 +1593,8 @@ private struct AgentObservationRecord {
     var internalMembrane: SIMD4<Float>
     var symbiontState: SIMD4<Float>
     var symbiontExchange: SIMD4<Float>
+    var materialLedger: SIMD4<Float>
+    var materialProvenanceIDs: SIMD4<UInt32>
 }
 
 private struct CellObservationRecord {
@@ -1603,6 +1620,7 @@ private struct CellObservationRecord {
     var internalMembrane: SIMD4<Float>
     var symbiontState: SIMD4<Float>
     var symbiontExchange: SIMD4<Float>
+    var materialLedger: SIMD4<Float>
 }
 
 private struct CellState {
@@ -1646,6 +1664,27 @@ private struct CellState {
     var symbiontIdentity: SIMD4<UInt32>
     var symbiontState: SIMD4<Float>
     var symbiontExchange: SIMD4<Float>
+    var materialBasisA: SIMD4<Float>
+    var materialBasisB: SIMD4<Float>
+    var materialEnergy: SIMD4<Float>
+    var materialProvenanceIDs: SIMD4<UInt32>
+    var materialProvenanceMass: SIMD4<Float>
+    var domain0Geometry: SIMD4<Float>
+    var domain0Transport: SIMD4<Float>
+    var domain0Chemistry: SIMD4<Float>
+    var domain0Identity: SIMD4<UInt32>
+    var domain1Geometry: SIMD4<Float>
+    var domain1Transport: SIMD4<Float>
+    var domain1Chemistry: SIMD4<Float>
+    var domain1Identity: SIMD4<UInt32>
+    var domain2Geometry: SIMD4<Float>
+    var domain2Transport: SIMD4<Float>
+    var domain2Chemistry: SIMD4<Float>
+    var domain2Identity: SIMD4<UInt32>
+    var domain3Geometry: SIMD4<Float>
+    var domain3Transport: SIMD4<Float>
+    var domain3Chemistry: SIMD4<Float>
+    var domain3Identity: SIMD4<UInt32>
 }
 
 private struct CellIdentity {
@@ -1676,6 +1715,13 @@ private struct CellCorpseState {
     var episode1: SIMD2<UInt32>
     var episode2: SIMD2<UInt32>
     var episode3: SIMD2<UInt32>
+}
+
+private struct RecycledMaterialProvenance {
+    var sourceBirthID: UInt32
+    var attributedMass: UInt32
+    var releaseStep: UInt32
+    var reserved: UInt32
 }
 
 private struct ProgramLineageRecord {
@@ -1852,6 +1898,8 @@ private struct CellAggregate {
     var internalMembrane: SIMD4<Float>
     var symbiontState: SIMD4<Float>
     var symbiontExchange: SIMD4<Float>
+    var materialLedger: SIMD4<Float>
+    var materialProvenanceIDs: SIMD4<UInt32>
 }
 
 private struct ProgramExpressionCache {
@@ -1911,7 +1959,7 @@ struct AgentObservation: Sendable, Equatable {
     let position: SIMD2<Float>
     let componentDescentDepth: UInt32
     let programReplicationGeneration: UInt32
-    let hasRegeneratedDevelopment: Bool
+    let hasPersistentDescendantDevelopment: Bool
     let hasReceivedDamageChallenge: Bool
     let hasDemonstratedHomeostasis: Bool
     let isSexualOffspring: Bool
@@ -1939,6 +1987,8 @@ struct AgentObservation: Sendable, Equatable {
     let internalMembrane: SIMD4<Float>
     let symbiontState: SIMD4<Float>
     let symbiontExchange: SIMD4<Float>
+    let materialLedger: SIMD4<Float>
+    let dominantRecycledSourceBirthID: UInt32?
 
     var generation: UInt32 { componentDescentDepth }
 }
@@ -1973,6 +2023,7 @@ struct CellObservation: Sendable, Equatable {
     let internalMembrane: SIMD4<Float>
     let symbiontState: SIMD4<Float>
     let symbiontExchange: SIMD4<Float>
+    let materialLedger: SIMD4<Float>
 }
 
 struct RecordedLineageEvent: Sendable, Equatable {
@@ -2214,7 +2265,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         maxCellCount * membraneVertexCount
     private static let contactWorkStateCount = 5
     private static let cellJunctionCapacity = 32_768
-    private static let worldExchangeChannelCount = 8
+    private static let worldExchangeChannelCount = 16
     private static let energyAuditChannelCount = 10
     private static let identityCounterCount = 19
     private static let invariantStateCount = 20
@@ -2420,6 +2471,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let cellJunctions: MTLBuffer
     private let registeredJunctionIndices: MTLBuffer
     private let cellEnergyExchange: MTLBuffer
+    private let recycledMaterialProvenance: MTLBuffer
     private let energyAudit: MTLBuffer
     private let invariantState: MTLBuffer
     private let invariantScratch: MTLBuffer
@@ -2514,12 +2566,16 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
     init(view: MTKView) throws {
         precondition(MemoryLayout<AgentState>.stride == 192, "AgentState Metal ABI drift")
-        precondition(MemoryLayout<AgentObservationRecord>.stride == 368, "AgentObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellObservationRecord>.stride == 352, "CellObservationRecord Metal ABI drift")
-        precondition(MemoryLayout<CellState>.stride == 624, "CellState Metal ABI drift")
+        precondition(MemoryLayout<AgentObservationRecord>.stride == 400, "AgentObservationRecord Metal ABI drift")
+        precondition(MemoryLayout<CellObservationRecord>.stride == 368, "CellObservationRecord Metal ABI drift")
+        precondition(MemoryLayout<CellState>.stride == 960, "CellState Metal ABI drift")
         precondition(MemoryLayout<CellIdentity>.stride == 32, "CellIdentity Metal ABI drift")
         precondition(MemoryLayout<CellMemoryState>.stride == 32, "CellMemoryState Metal ABI drift")
         precondition(MemoryLayout<CellCorpseState>.stride == 56, "CellCorpseState Metal ABI drift")
+        precondition(
+            MemoryLayout<RecycledMaterialProvenance>.stride == 16,
+            "RecycledMaterialProvenance Metal ABI drift"
+        )
         precondition(MemoryLayout<ProgramLineageRecord>.stride == 128, "ProgramLineageRecord Metal ABI drift")
         precondition(MemoryLayout<ProgramSlotState>.stride == 32, "ProgramSlotState Metal ABI drift")
         precondition(MemoryLayout<SpeciesDefinition>.stride == 80, "SpeciesDefinition Metal ABI drift")
@@ -2532,7 +2588,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         precondition(MemoryLayout<TranscriptRecord>.stride == 32, "TranscriptRecord Metal ABI drift")
         precondition(MemoryLayout<ProteinRecord>.stride == 80, "ProteinRecord Metal ABI drift")
         precondition(MemoryLayout<CellJunctionState>.stride == 64, "CellJunctionState Metal ABI drift")
-        precondition(MemoryLayout<CellAggregate>.stride == 576, "CellAggregate Metal ABI drift")
+        precondition(MemoryLayout<CellAggregate>.stride == 608, "CellAggregate Metal ABI drift")
         precondition(MemoryLayout<ProgramExpressionCache>.stride == 224, "ProgramExpressionCache Metal ABI drift")
         precondition(MemoryLayout<ResonanceExpressionCache>.stride == 32, "ResonanceExpressionCache Metal ABI drift")
         precondition(MemoryLayout<ProgramMetricRecord>.stride == 256, "ProgramMetricRecord Metal ABI drift")
@@ -2940,6 +2996,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let registeredJunctionIndexLength = Self.cellJunctionCapacity * MemoryLayout<UInt32>.stride
         let cellEnergyExchangeLength = Self.gridSize * Self.gridSize * Self.worldCount *
             Self.worldExchangeChannelCount * MemoryLayout<UInt32>.stride
+        let recycledMaterialProvenanceLength = Self.gridSize * Self.gridSize * Self.worldCount *
+            MemoryLayout<RecycledMaterialProvenance>.stride
         let energyAuditLength = Self.energyAuditChannelCount * MemoryLayout<Int32>.stride
         let invariantStateLength = Self.invariantStateCount * MemoryLayout<UInt32>.stride
         let invariantScratchLength = Self.invariantScratchCount * MemoryLayout<Int32>.stride
@@ -3061,6 +3119,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
               ),
               let cellEnergyExchange = device.makeBuffer(
                 length: cellEnergyExchangeLength, options: .storageModePrivate
+              ),
+              let recycledMaterialProvenance = device.makeBuffer(
+                length: recycledMaterialProvenanceLength, options: .storageModePrivate
               ),
               let energyAudit = device.makeBuffer(
                 length: energyAuditLength, options: .storageModePrivate
@@ -3194,6 +3255,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         cellJunctions.label = "Persistent membrane junction hash"
         registeredJunctionIndices.label = "Append-once persistent junction render registry"
         cellEnergyExchange.label = "Deterministic molecule uptake, secretion, and material settlement"
+        recycledMaterialProvenance.label = "Passive recycled-material provenance by tile"
         energyAudit.label = "Global cellular energy conservation audit"
         invariantState.label = "Persistent fail-fast invariant audit"
         invariantScratch.label = "Invariant reduction scratch"
@@ -3250,6 +3312,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         self.cellJunctions = cellJunctions
         self.registeredJunctionIndices = registeredJunctionIndices
         self.cellEnergyExchange = cellEnergyExchange
+        self.recycledMaterialProvenance = recycledMaterialProvenance
         self.energyAudit = energyAudit
         self.invariantState = invariantState
         self.invariantScratch = invariantScratch
@@ -3865,6 +3928,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             resonanceExpressionCaches, membraneVertices, cellSpatialHashHeads, cellSpatialHashNext,
             contactWorkState, cellTopologySignatures, cellContactEffects, membraneContactEffects,
             cellJunctions, registeredJunctionIndices, cellEnergyExchange,
+            recycledMaterialProvenance,
             energyAudit, invariantState, invariantScratch, identityCounters, lineageEvents,
             mechanicalForcing, qualificationTargetState, qualificationTargetMeasurement,
             speciesRegistry, moleculeState, genomeHeaders, genomePages,
@@ -4282,6 +4346,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             blitEncoder.fill(
                 buffer: cellEnergyExchange,
                 range: 0..<cellEnergyExchange.length,
+                value: 0
+            )
+            blitEncoder.fill(
+                buffer: recycledMaterialProvenance,
+                range: 0..<recycledMaterialProvenance.length,
                 value: 0
             )
             blitEncoder.fill(
@@ -4851,9 +4920,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBytes(&uniforms, length: MemoryLayout<SimulationUniforms>.stride, index: 5)
         encoder.setBuffer(mechanicalForcing, offset: 0, index: 6)
         encoder.setBuffer(programExpressionCaches, offset: 0, index: 7)
-        encoder.setBuffer(genomeHeaders, offset: 0, index: 8)
-        encoder.setBuffer(genomePages, offset: 0, index: 9)
-        encoder.setBuffer(regulatoryStates, offset: 0, index: 10)
+        encoder.setBuffer(recycledMaterialProvenance, offset: 0, index: 8)
         encoder.setBuffer(resonanceExpressionCaches, offset: 0, index: 11)
         encoder.setBuffer(cellIdentities, offset: 0, index: 12)
         encoder.setBuffer(ownerCellHeads, offset: 0, index: 13)
@@ -4882,7 +4949,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.memoryBarrier(resources: [
             reactionCellState, cellOccupancy, cellIdentities, programSlots,
             identityCounters, mechanicalForcing, cellEnergyExchange, energyAudit,
-            contactWorkState, cellMemories, cellCorpses, chemistrySettlements
+            contactWorkState, cellMemories, cellCorpses, chemistrySettlements,
+            recycledMaterialProvenance
         ])
         swap(&cellState, &reactionCellState)
 
@@ -5485,6 +5553,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setBuffer(cellIdentities, offset: 0, index: 3)
         encoder.setBuffer(ownerCellHeads, offset: 0, index: 4)
         encoder.setBuffer(qualificationTargetState, offset: 0, index: 5)
+        encoder.setBuffer(cellAggregates, offset: 0, index: 6)
         encoder.dispatchThreads(
             MTLSize(width: 1, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
@@ -6170,7 +6239,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     position: record.position,
                     componentDescentDepth: record.generation,
                     programReplicationGeneration: UInt32(max(record.padding.z.rounded(), 0)),
-                    hasRegeneratedDevelopment: record.flags & 4 != 0,
+                    hasPersistentDescendantDevelopment: record.flags & 4 != 0,
                     hasReceivedDamageChallenge: record.flags & 16 != 0,
                     hasDemonstratedHomeostasis: record.flags & 8 != 0,
                     isSexualOffspring: record.flags & 32 != 0,
@@ -6197,7 +6266,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     reactionFlux: record.reactionFlux,
                     internalMembrane: record.internalMembrane,
                     symbiontState: record.symbiontState,
-                    symbiontExchange: record.symbiontExchange
+                    symbiontExchange: record.symbiontExchange,
+                    materialLedger: record.materialLedger,
+                    dominantRecycledSourceBirthID: record.materialProvenanceIDs.x == 0
+                        ? nil : record.materialProvenanceIDs.x
                 ))
             }
             let cellRecords = buffers.cellRecords.contents().bindMemory(
@@ -6245,7 +6317,8 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     reactionFlux: record.reactionFlux,
                     internalMembrane: record.internalMembrane,
                     symbiontState: record.symbiontState,
-                    symbiontExchange: record.symbiontExchange
+                    symbiontExchange: record.symbiontExchange,
+                    materialLedger: record.materialLedger
                 ))
             }
             let eventRecords = buffers.lineageEvents.contents().bindMemory(

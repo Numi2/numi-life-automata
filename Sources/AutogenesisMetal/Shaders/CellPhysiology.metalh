@@ -7,9 +7,7 @@ kernel void evolveOrganismCells(
     constant SimulationUniforms& uniforms [[buffer(5)]],
     device atomic_int* mechanicalForcing [[buffer(6)]],
     device const ProgramExpressionCache* programExpressionCaches [[buffer(7)]],
-    device const GenomeHeader* genomeHeaders [[buffer(8)]],
-    device const GenomePage* genomePages [[buffer(9)]],
-    device float* regulatoryStates [[buffer(10)]],
+    device RecycledMaterialProvenance* recycledProvenance [[buffer(8)]],
     device const ResonanceExpressionCache* resonanceExpressionCaches [[buffer(11)]],
     device CellIdentity* cellIdentities [[buffer(12)]],
     device const atomic_uint* ownerCellHeads [[buffer(13)]],
@@ -52,8 +50,8 @@ kernel void evolveOrganismCells(
                 agents[owner], abandonedCell.position, uniforms
             );
             recycleTerminalCellEnergy(
-                cellEnergyExchange, energyAudit, abandonedPosition,
-                abandonedCell, uniforms
+                cellEnergyExchange, energyAudit, recycledProvenance, abandonedPosition,
+                abandonedCell, agents[owner].birthID, uniforms
             );
             uint abandonedGenomeHash = cellIdentity.programIndex < maxGenomeHeaderCount
                 ? programLineageRecords[cellIdentity.programIndex].genomeHash : 0u;
@@ -94,8 +92,8 @@ kernel void evolveOrganismCells(
             agents[owner], orphanedCell.position, uniforms
         );
         recycleTerminalCellEnergy(
-            cellEnergyExchange, energyAudit, orphanedPosition,
-            orphanedCell, uniforms
+            cellEnergyExchange, energyAudit, recycledProvenance, orphanedPosition,
+            orphanedCell, agents[owner].birthID, uniforms
         );
         invalidateCellJunctions(
             cellJunctions, cellOccupancy, cellIdentities,
@@ -1072,6 +1070,12 @@ kernel void evolveOrganismCells(
     float settledSecretedMass = settlementIsCurrent
         ? dot(max(chemistrySettlement.secretedAmount, float4(0.0)), float4(1.0))
         : 0.0;
+    uint provenanceSource = 0u;
+    float provenanceUptake = claimRecycledProvenance(
+        recycledProvenance, coordinate.y * uniforms.width + coordinate.x,
+        dot(settledAmounts, float4(1.0)), provenanceSource
+    );
+    attributeRecycledMaterial(cell, provenanceSource, provenanceUptake);
     // Secreted free energy now leaves the finite intracellular pool; it is not
     // charged to ATP a second time after deterministic settlement.
     float committedChemicalWork = 0.0;
@@ -1240,8 +1244,20 @@ kernel void evolveOrganismCells(
     float heatExport = conversionHeat + maintenance * 0.66 + dissipation +
         rejectionCost + rejectionDamage + overflowHeat;
     float recycledMatterReturn = recycledMatterEnergy / 0.62;
-    addEnergyExchange(cellEnergyExchange, energyTileBase, 0u, recycledMatterReturn);
-    addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, heatExport);
+    float turnoverMass = min(
+        recycledMatterReturn,
+        max(cell.physiology.y, 0.0) * 0.0008
+    );
+    float currentLedgerMass = max(cellularMaterialMass(cell), 0.000001);
+    float turnoverFraction = saturate(turnoverMass / currentLedgerMass);
+    float4 turnoverBasisA = cell.materialBasisA * turnoverFraction;
+    float4 turnoverBasisB = cell.materialBasisB * turnoverFraction;
+    cell.materialBasisA -= turnoverBasisA;
+    cell.materialBasisB -= turnoverBasisB;
+    addBasisExchange(
+        cellEnergyExchange, energyTileBase, turnoverBasisA, turnoverBasisB
+    );
+    addEnergyExchange(cellEnergyExchange, energyTileBase, exchangeHeat, heatExport);
     float developmentalOutputScale = expenseScale * metabolicReadiness;
     float signalAOutput = morphogenProduction.x * secretionProgram *
         membraneExposure * developmentalOutputScale * 0.22;
@@ -1273,22 +1289,22 @@ kernel void evolveOrganismCells(
     counterOutput *= deferredMatterScale;
     deferredSecretedMass *= deferredMatterScale;
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 2u, signalAOutput
+        cellEnergyExchange, energyTileBase, exchangeSignalA, signalAOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 3u, signalBOutput
+        cellEnergyExchange, energyTileBase, exchangeSignalB, signalBOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 4u, matrixOutput
+        cellEnergyExchange, energyTileBase, exchangeStructure, matrixOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 5u, remodelingOutput
+        cellEnergyExchange, energyTileBase, exchangeRemodeling, remodelingOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 6u, catalyticOutput
+        cellEnergyExchange, energyTileBase, exchangeCatalytic, catalyticOutput
     );
     addEnergyExchange(
-        cellEnergyExchange, energyTileBase, 7u, counterOutput
+        cellEnergyExchange, energyTileBase, exchangeCounter, counterOutput
     );
     float atpStorageDelta = atp - cell.physiology.x;
     float conservationResidual = substrateEnergy + atpSharingFlux -
@@ -1387,17 +1403,29 @@ kernel void evolveOrganismCells(
         (settledSecretedMass + deferredSecretedMass) * 0.18;
     atp = min(atp + biomassCatabolicATP, 1.2);
     if (releasedBiomassEnergy > 0.0) {
-        addEnergyExchange(
-            cellEnergyExchange, energyTileBase, 0u, biomassRecycledMatterEnergy / 0.62
+        float releasedMass = min(
+            biomassRecycledMatterEnergy / 0.18,
+            max(cellularMaterialMass(cell), 0.0)
         );
-        addEnergyExchange(cellEnergyExchange, energyTileBase, 1u, biomassHeat);
+        float ledgerMass = max(cellularMaterialMass(cell), 0.000001);
+        float releasedFraction = saturate(releasedMass / ledgerMass);
+        float4 releasedBasisA = cell.materialBasisA * releasedFraction;
+        float4 releasedBasisB = cell.materialBasisB * releasedFraction;
+        cell.materialBasisA -= releasedBasisA;
+        cell.materialBasisB -= releasedBasisB;
+        addBasisExchange(
+            cellEnergyExchange, energyTileBase, releasedBasisA, releasedBasisB
+        );
+        addEnergyExchange(
+            cellEnergyExchange, energyTileBase, exchangeHeat, biomassHeat
+        );
     }
     if (secretedBiomassEnergy > 0.0) {
         // Molecule free energy is paid separately as committed chemical work.
         // The lower-grade energy stored in exported biomass is thermalized so
         // cellular storage loss has a matching environmental destination.
         addEnergyExchange(
-            cellEnergyExchange, energyTileBase, 1u, secretedBiomassEnergy
+            cellEnergyExchange, energyTileBase, exchangeHeat, secretedBiomassEnergy
         );
     }
     float storageCorrection = (atp - atpBeforeBiomass) +
@@ -1442,6 +1470,9 @@ kernel void evolveOrganismCells(
         clamp(0.12 + cell.proteostasis.w * 0.50 + (1.0 - centralProgram) * 0.12 + repairProgram * 0.16,
             0.0, 1.0), 0.0040);
     cell.physiology = float4(atp, biomass, cycle, membraneIntegrity);
+    reconcileCellMaterialLedger(
+        cell, cellsIn[gid].physiology.y, biomass, atp
+    );
     cell.dynamics = float4(voltage, recovery, oscillatorPhase, naturalFrequency);
     cell.mechanics = float4(contractility, fieldStrain, fieldWaveSpeed, localCoherence);
     cell.energetics = float4(uptake, maintenance, activeWork, dissipation);
@@ -1625,7 +1656,8 @@ kernel void evolveOrganismCells(
             ownerCellHeads, ownerCellNext, owner, gid, emptySpatialHashEntry
         );
         recycleTerminalCellEnergy(
-            cellEnergyExchange, energyAudit, worldPosition, cell, uniforms
+            cellEnergyExchange, energyAudit, recycledProvenance, worldPosition,
+            cell, agents[owner].birthID, uniforms
         );
         publishCellCorpse(
             cellCorpses, gid, embodiedMemory, worldPosition,

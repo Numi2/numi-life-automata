@@ -837,22 +837,36 @@ struct ContentView: View {
                 storyStateValue("WORLD WORK", value: storyNicheStatus, tint: .green)
             }
 
-            sectionLabel("RECENT EVENTS")
-            if store.events.isEmpty {
+            sectionLabel("LINEAGE BIOGRAPHY")
+            if store.lifeStoryEvents.isEmpty {
                 Text("The story is just beginning.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(store.events.prefix(3)) { event in
+                ForEach(store.lifeStoryEvents.prefix(3)) { event in
                     HStack(spacing: 7) {
-                        Circle()
-                            .fill(eventColor(event.kind))
-                            .frame(width: 5, height: 5)
-                        Text(plainEventTitle(event))
+                        Image(systemName: lifeStorySymbol(event.kind))
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(lifeStoryColor(event.kind))
+                            .frame(width: 12)
+                        Text(lifeStoryTitle(event))
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                }
+            }
+
+            sectionLabel("WORLD CHRONICLE")
+            ForEach(store.events.prefix(2)) { event in
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(eventColor(event.kind))
+                        .frame(width: 5, height: 5)
+                    Text(plainEventTitle(event))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -909,9 +923,6 @@ struct ContentView: View {
         }
         if storyNicheStatus != "None yet" {
             return "Life is reshaping its surroundings to make a place to live."
-        }
-        if storyLifeStatus == "Mature" {
-            return "A mature life-form is ready to create a new generation."
         }
         if store.snapshot.metrics.basisMaterialDensity < 0.015 {
             return "Life is searching for enough food to continue."
@@ -976,9 +987,9 @@ struct ContentView: View {
             return "Healing"
         }
         if store.snapshot.meanProteostasisBurden >= 0.22 { return "Aging" }
-        if store.snapshot.meanReplicationBurden >= 0.55 { return "Mature" }
         if store.snapshot.meanChronologicalAge < 0.18 { return "New life" }
-        return "Growing up"
+        if store.snapshot.dividingCellCount > 0 { return "Changing shape" }
+        return "Maintaining itself"
     }
 
     private var storyRoleStatus: String {
@@ -1954,6 +1965,11 @@ struct ContentView: View {
         case .collectiveReproduction: "A collective reproduced its organization"
         case .regeneration: "A life-form began healing"
         case .learning: "A life-form learned from experience"
+        case .development: "A multicellular body developed"
+        case .reproduction: "An offspring became independent"
+        case .senescence: "A life-form is aging"
+        case .death: "A life-form died"
+        case .recycling: "Matter from earlier life was reused"
         }
     }
 
@@ -1999,6 +2015,16 @@ struct ContentView: View {
             "Repair, reopening, and restored integrity persisted after injury; the paired wound experiment tests causation."
         case .learning:
             "Experience changed this individual's response without rewriting its genes."
+        case .development:
+            "Connected cells sustained different expression patterns while maintaining one body."
+        case .reproduction:
+            "A separated descendant maintained its own energy flow and boundary."
+        case .senescence:
+            "Damage continued rising while this body’s measured function declined."
+        case .death:
+            "Its final maintained boundary failed."
+        case .recycling:
+            "Conserved matter released by dead life entered another living body."
         }
     }
 
@@ -2462,6 +2488,11 @@ struct ContentView: View {
         case .collectiveReproduction: "circle.grid.cross"
         case .regeneration: "bandage"
         case .learning: "brain.head.profile"
+        case .development: "circle.grid.2x2"
+        case .reproduction: "arrow.triangle.branch"
+        case .senescence: "hourglass"
+        case .death: "leaf.fill"
+        case .recycling: "arrow.3.trianglepath"
         }
     }
 
@@ -2486,6 +2517,11 @@ struct ContentView: View {
         case .collectiveReproduction: .cyan
         case .regeneration: .mint
         case .learning: .blue
+        case .development: .pink
+        case .reproduction: .cyan
+        case .senescence: .orange
+        case .death: .secondary
+        case .recycling: .green
         }
     }
 
@@ -2493,9 +2529,52 @@ struct ContentView: View {
         switch kind {
         case .branching, .fusion: "FAMILY"
         case .cellDivision, .programMutation, .crossbreeding: "TRAIT"
-        case .speciesBirth, .regeneration, .learning, .collectiveReproduction: "LIFE"
+        case .speciesBirth, .regeneration, .learning, .collectiveReproduction,
+             .development, .reproduction, .senescence, .death, .recycling: "LIFE"
         case .crossFeeding, .construction, .chemicalArmsRace: "ECOLOGY"
         default: "TIME"
+        }
+    }
+
+    private func lifeStoryTitle(_ event: LifeStoryEventRecord) -> String {
+        switch event.kind {
+        case .birth: "Life #\(event.subjectBirthID) began"
+        case .multicellularDevelopment: "It developed a multicellular body"
+        case .injury: "It was injured"
+        case .regeneration: "It regenerated"
+        case .offspringSeparation: "Offspring #\(event.subjectBirthID) separated"
+        case .offspringIndependence: "The offspring became independent"
+        case .offspringReproduction: "Its offspring reproduced"
+        case .senescence: "Its function declined with damage"
+        case .death: "Life #\(event.subjectBirthID) died"
+        case .materialRelease: "Its matter returned to the world"
+        case .materialReuse: "Earlier living matter entered this body"
+        }
+    }
+
+    private func lifeStorySymbol(_ kind: LifeStoryEventKind) -> String {
+        switch kind {
+        case .birth: "sparkles"
+        case .multicellularDevelopment: "circle.grid.2x2"
+        case .injury: "bolt.heart"
+        case .regeneration: "bandage"
+        case .offspringSeparation, .offspringIndependence, .offspringReproduction:
+            "arrow.triangle.branch"
+        case .senescence: "hourglass"
+        case .death: "leaf.fill"
+        case .materialRelease, .materialReuse: "arrow.3.trianglepath"
+        }
+    }
+
+    private func lifeStoryColor(_ kind: LifeStoryEventKind) -> Color {
+        switch kind {
+        case .birth, .multicellularDevelopment: .mint
+        case .injury: .red
+        case .regeneration: .green
+        case .offspringSeparation, .offspringIndependence, .offspringReproduction: .cyan
+        case .senescence: .orange
+        case .death: .secondary
+        case .materialRelease, .materialReuse: .green
         }
     }
 

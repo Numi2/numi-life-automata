@@ -6,11 +6,11 @@ import MetalKit
 struct LifecycleExperimentConfiguration: Codable, Sendable {
     var masterSeed: UInt32 = 1
     var maximumSeedCount = 128
-    var minimumValidCycles = 8
-    var steps: UInt64 = 18_000
-    var interventionStep: UInt64 = 9_600
+    var minimumValidCycles = 16
+    var steps: UInt64 = 36_000
+    var interventionStep: UInt64 = 12_000
     var recoveryDelay: UInt64 = 1_200
-    var persistenceWindow: UInt64 = 600
+    var persistenceWindow: UInt64 = 1_024
     var batchSize = 64
     var sampleInterval: UInt64 = 600
     var auditInterval: UInt64 = 1
@@ -22,12 +22,12 @@ struct LifecycleExperimentConfiguration: Codable, Sendable {
     static let usage = """
     Usage: NumiAutomata lifeHistory-experiment [options]
 
-      --steps N             Final step for each paired run (default: 18000)
-      --intervention-step N Last unwounded baseline step (default: 9600)
+      --steps N             Final step for each paired run (default: 36000)
+      --intervention-step N Last unwounded baseline step (default: 12000)
       --recovery-delay N    Steps allowed before recovery is assessed (default: 1200)
-      --persistence-window N Required stable descendant duration (default: 600)
+      --persistence-window N Required stable descendant duration (default: 1024)
       --max-seeds N         Maximum fixed seeds attempted, 4...128 (default: 128)
-      --minimum-valid N     Eligible valid cycles required, 1...64 (default: 8)
+      --minimum-valid N     Eligible valid cycles required, 1...64 (default: 16)
       --seed N              Master UInt32 seed (default: 1)
       --batch N             Steps encoded per command buffer (default: 64)
       --sample-every N      Observer snapshot interval (default: 600)
@@ -133,7 +133,7 @@ struct LifecycleExperimentConfiguration: Codable, Sendable {
             index = arguments.index(after: index)
         }
         if !interventionWasExplicit {
-            configuration.interventionStep = min(9_600, configuration.steps * 8 / 15)
+            configuration.interventionStep = min(12_000, configuration.steps / 3)
         }
         guard configuration.minimumValidCycles <= configuration.maximumSeedCount else {
             throw HeadlessExperimentError.invalidArgument(
@@ -191,8 +191,13 @@ struct LifecycleSeedRecord: Codable {
     let recoveredAfterChallenge: Bool
     let reproducedAfterRecovery: Bool
     let postRecoveryFissionCount: Int
-    let grandchildMatured: Bool
     let completedLifecycle: Bool
+    let developedMulticellularBody: Bool
+    let offspringIndependent: Bool
+    let grandchildIndependent: Bool
+    let parentSenesced: Bool
+    let parentDied: Bool
+    let releasedMatterReused: Bool
     let targetBirthID: UInt32?
     let grandchildBirthID: UInt32?
     let grandchildBirthStep: UInt32?
@@ -218,8 +223,11 @@ struct LifecycleExperimentSummary: Codable {
     let invalidSeedCount: Int
     let recoveredTargetCount: Int
     let reproducedTargetCount: Int
-    let maturedGrandchildCount: Int
+    let independentGrandchildCount: Int
     let completedLifecycleCount: Int
+    let twoGenerationCount: Int
+    let senescentParentCount: Int
+    let recycledMatterReuseCount: Int
     let recovery: BinomialProportionEstimate
     let recoveryQualification: EvidenceClaim
     let lifecycleCompletion: BinomialProportionEstimate
@@ -246,15 +254,15 @@ enum LifecycleExperimentCLI {
         let journal = try ExperimentJournal(path: configuration.outputPath)
         let discardedJournal = ExperimentJournal.discarding()
         try journal.append("lifecycle_header", LifecycleExperimentHeader(
-            schemaVersion: 1,
+            schemaVersion: 2,
             startedAt: ISO8601DateFormatter().string(from: Date()),
             device: device.name,
             causalMutation: "None. The protocol reads existing lineage events and component physiology; no observer result is bound to a simulation kernel.",
             targetRule: "Use the same deterministic regenerative-descendant target selected by the paired sham and wound branches at the final baseline step.",
             stoppingRule: "Attempt fixed SplitMix64-derived seeds in order until the predeclared valid-cycle count is reached or maximumSeedCount is exhausted. Stopping never depends on success or resemblance.",
             validCycleRule: "The same target must exist in both baseline branches, receive the treatment wound, and both runs must retain zero invariant flags and absolute energy residual at most 0.001.",
-            completedCycleRule: "The wounded target must recover relative to its sham twin, then emit a physical fission whose descendant remains multicellular, metabolically viable, developmentally active, and persistent across the declared observation window. No life-stage threshold is used.",
-            qualificationRule: "At least minimumValidCycles are required; a two-sided 95% Wilson lower bound above 0.5 supports recovery or lifeHistory completion.",
+            completedCycleRule: "A single-cell propagule must develop at least four connected differentiated cells, recover from a real wound relative to sham, produce an independently persistent child, and that child must produce an independently persistent grandchild. The original parent must then show three-window damage-linked functional decline, die, release its exact material ledger, and have passively attributed matter taken up by later life. All thresholds classify observations only.",
+            qualificationRule: "Run sixteen preregistered valid seeds; at least twelve must complete every conjunction. Wilson intervals are reported descriptively and no observer value is bound to a simulation kernel.",
             configuration: configuration
         ))
 
@@ -265,8 +273,11 @@ enum LifecycleExperimentCLI {
         var invalid = 0
         var recovered = 0
         var reproduced = 0
-        var matured = 0
+        var independentGrandchildren = 0
         var completed = 0
+        var twoGeneration = 0
+        var senescentParents = 0
+        var recycledReuse = 0
         var morphologyResemblances: [Double] = []
         var functionalResemblances: [Double] = []
         var usedSeeds: Set<UInt32> = []
@@ -337,6 +348,15 @@ enum LifecycleExperimentCLI {
             )
             recovered += didRecover ? 1 : 0
             let targetID = controlBaseline.birthID
+            let targetDevelopmentSnapshots = treatment.componentSnapshots.filter {
+                $0.birthID == targetID && $0.step <= configuration.interventionStep &&
+                    $0.cellCount >= 4 && $0.meanInternalDomainCount > 0 &&
+                    $0.conservedMaterialMass > 0
+            }.sorted { $0.step < $1.step }
+            let developedMulticellularBody = persistentSnapshots(
+                targetDevelopmentSnapshots,
+                window: configuration.persistenceWindow
+            )
             let candidateFissions = treatment.events.filter {
                 $0.type == "fission" && $0.parentBirthID == targetID &&
                     UInt64($0.step) >= (treatmentRecovery?.step ?? .max)
@@ -362,11 +382,56 @@ enum LifecycleExperimentCLI {
                 }
             }
             let didReproduce = didRecover && !candidateFissions.isEmpty
-            let grandchildMatured = selectedFission != nil
-            let completedLifecycle = didRecover && grandchildMatured
+            let offspringIndependent = selectedFission != nil
+            let childID = selectedFission?.birthID
+            let childIndependentAt = selectedGrandchildSnapshots.last?.step
+            let secondGenerationFissions = treatment.events.filter {
+                $0.type == "fission" && $0.parentBirthID == childID &&
+                    UInt64($0.step) >= (childIndependentAt ?? .max)
+            }.sorted {
+                $0.step == $1.step ? $0.sequence < $1.sequence : $0.step < $1.step
+            }
+            var selectedGrandchild: ExperimentEvent?
+            var secondGenerationSnapshots: [ExperimentComponentSnapshot] = []
+            for fission in secondGenerationFissions {
+                let snapshots = stableGrandchildSnapshots(
+                    birthID: fission.birthID,
+                    bornAt: UInt64(fission.step),
+                    configuration: configuration,
+                    snapshots: treatment.componentSnapshots
+                )
+                if !snapshots.isEmpty {
+                    selectedGrandchild = fission
+                    secondGenerationSnapshots = snapshots
+                    break
+                }
+            }
+            let grandchildIndependent = selectedGrandchild != nil
+            let parentSnapshots = treatment.componentSnapshots.filter {
+                $0.birthID == targetID &&
+                    $0.step >= (selectedFission.map { UInt64($0.step) } ?? .max)
+            }.sorted { $0.step < $1.step }
+            let senescence = sustainedSenescence(in: parentSnapshots)
+            let parentDeath = treatment.events.first {
+                $0.type == "death" && $0.birthID == targetID &&
+                    UInt64($0.step) >= (senescence?.step ?? .max)
+            }
+            let releasedMatterReused = parentDeath.map { death in
+                treatment.componentSnapshots.contains {
+                    $0.birthID != targetID && $0.step > UInt64(death.step) &&
+                        $0.recycledProvenanceMass >= 0.00001 &&
+                        $0.dominantRecycledSourceBirthID == targetID
+                }
+            } ?? false
+            let completedLifecycle = developedMulticellularBody && didRecover &&
+                offspringIndependent && grandchildIndependent && senescence != nil &&
+                parentDeath != nil && releasedMatterReused
             reproduced += didReproduce ? 1 : 0
-            matured += grandchildMatured ? 1 : 0
+            independentGrandchildren += grandchildIndependent ? 1 : 0
             completed += completedLifecycle ? 1 : 0
+            twoGeneration += grandchildIndependent ? 1 : 0
+            senescentParents += senescence != nil ? 1 : 0
+            recycledReuse += releasedMatterReused ? 1 : 0
 
             let resemblance: LifecycleResemblance?
             if let targetID,
@@ -400,15 +465,21 @@ enum LifecycleExperimentCLI {
                 recoveredAfterChallenge: didRecover,
                 reproducedAfterRecovery: didReproduce,
                 postRecoveryFissionCount: didRecover ? candidateFissions.count : 0,
-                grandchildMatured: grandchildMatured,
                 completedLifecycle: completedLifecycle,
+                developedMulticellularBody: developedMulticellularBody,
+                offspringIndependent: offspringIndependent,
+                grandchildIndependent: grandchildIndependent,
+                parentSenesced: senescence != nil,
+                parentDied: parentDeath != nil,
+                releasedMatterReused: releasedMatterReused,
                 targetBirthID: targetID,
-                grandchildBirthID: reportedFission?.birthID,
-                grandchildBirthStep: reportedFission?.step,
+                grandchildBirthID: selectedGrandchild?.birthID ?? reportedFission?.birthID,
+                grandchildBirthStep: selectedGrandchild?.step ?? reportedFission?.step,
                 baseline: controlBaseline,
                 controlRecovery: controlRecovery,
                 treatmentRecovery: treatmentRecovery,
-                grandchildSnapshots: reportedGrandchildSnapshots,
+                grandchildSnapshots: secondGenerationSnapshots.isEmpty
+                    ? reportedGrandchildSnapshots : secondGenerationSnapshots,
                 parentGrandchildResemblance: resemblance,
                 controlInvariants: controlFinal.invariantReport,
                 treatmentInvariants: treatmentFinal.invariantReport
@@ -419,7 +490,7 @@ enum LifecycleExperimentCLI {
                 "lifecycle_seed=\(attempted)/\(configuration.maximumSeedCount) seed=\(seed) " +
                 "eligible=\(isEligible ? 1 : 0) valid=\(isValid ? 1 : 0) " +
                 "recovered=\(didRecover ? 1 : 0) reproduced=\(didReproduce ? 1 : 0) " +
-                "matured=\(grandchildMatured ? 1 : 0)"
+                "grandchild_independent=\(grandchildIndependent ? 1 : 0)"
             )
         }
 
@@ -442,8 +513,11 @@ enum LifecycleExperimentCLI {
             invalidSeedCount: invalid,
             recoveredTargetCount: recovered,
             reproducedTargetCount: reproduced,
-            maturedGrandchildCount: matured,
+            independentGrandchildCount: independentGrandchildren,
             completedLifecycleCount: completed,
+            twoGenerationCount: twoGeneration,
+            senescentParentCount: senescentParents,
+            recycledMatterReuseCount: recycledReuse,
             recovery: recoveryEstimate,
             recoveryQualification: BinomialQualification.evidence(
                 recovery: recoveryEstimate,
@@ -451,24 +525,30 @@ enum LifecycleExperimentCLI {
                 threshold: 0.5
             ),
             lifecycleCompletion: lifecycleEstimate,
-            lifecycleQualification: BinomialQualification.evidence(
-                recovery: lifecycleEstimate,
-                minimumTrials: configuration.minimumValidCycles,
-                threshold: 0.5,
-                outcomeLabel: "complete-lifeHistory",
-                validTrialDescription: "lifeHistory cycles were observed"
+            lifecycleQualification: EvidenceClaim(
+                state: valid >= 16 && completed >= 12 ? .supported : .inconclusive,
+                estimate: ConfidenceInterval(
+                    estimate: lifecycleEstimate.estimate,
+                    lower: lifecycleEstimate.lower,
+                    upper: lifecycleEstimate.upper,
+                    confidenceLevel: lifecycleEstimate.confidenceLevel,
+                    effectiveSampleCount: Double(lifecycleEstimate.trials)
+                ),
+                nullUpperBound: 0.5,
+                reason: valid >= 16 && completed >= 12
+                    ? "At least 12 of 16 preregistered valid seeds completed the full two-generation lifecycle, senescence, death, and matter-reuse conjunction."
+                    : "Qualification requires 16 valid seeds and at least 12 complete conjunctions.",
+                timeBasis: .accumulatedHistory
             ),
             meanMorphologyResemblance: mean(morphologyResemblances),
             meanFunctionalResemblance: mean(functionalResemblances),
             outputPath: journal.outputURL.path
         )
         try journal.append("lifecycle_summary", summary)
-        print(
-            "lifecycle_experiment_complete=1 attempted=\(attempted) valid=\(valid) " +
-            "recovered=\(recovered)/\(valid) completed=\(completed)/\(valid) " +
-            "qualification=\(summary.lifecycleQualification.state.rawValue) " +
-            "output=\(summary.outputPath)"
-        )
+        let resultCounts = "recovered=\(recovered)/\(valid) completed=\(completed)/\(valid)"
+        let qualification = summary.lifecycleQualification.state.rawValue
+        print("lifecycle_experiment_complete=1 attempted=\(attempted) valid=\(valid) " +
+            resultCounts + " qualification=\(qualification) output=\(summary.outputPath)")
     }
 
     private static func runConfiguration(
@@ -527,6 +607,41 @@ enum LifecycleExperimentCLI {
         guard let first = viable.first, let last = viable.last,
               last.step >= first.step + configuration.persistenceWindow else { return [] }
         return viable
+    }
+
+    private static func persistentSnapshots(
+        _ snapshots: [ExperimentComponentSnapshot],
+        window: UInt64
+    ) -> Bool {
+        guard let first = snapshots.first, let last = snapshots.last else { return false }
+        return last.step >= first.step + window
+    }
+
+    private static func sustainedSenescence(
+        in snapshots: [ExperimentComponentSnapshot]
+    ) -> ExperimentComponentSnapshot? {
+        guard snapshots.count >= 3 else { return nil }
+        var peakFunction = 0.0
+        for snapshot in snapshots {
+            let function = snapshot.replicationActivity + snapshot.maintenanceActivity +
+                snapshot.signalActivity + snapshot.constructionActivity
+            peakFunction = max(peakFunction, function)
+        }
+        guard peakFunction > 0.01 else { return nil }
+        for end in 2..<snapshots.count {
+            let window = Array(snapshots[(end - 2)...end])
+            let functions = window.map {
+                $0.replicationActivity + $0.maintenanceActivity +
+                    $0.signalActivity + $0.constructionActivity
+            }
+            let burdens = window.map {
+                max($0.proteostasisBurden, $0.replicationBurden * 0.01)
+            }
+            let declining = functions.allSatisfy { $0 <= peakFunction * 0.72 }
+            let damageRising = burdens[1] > burdens[0] && burdens[2] > burdens[1]
+            if declining && damageRising { return window.last }
+        }
+        return nil
     }
 
     private static func resemblanceBetween(

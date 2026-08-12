@@ -1,0 +1,280 @@
+constant uint internalDomainCount = 4u;
+constant uint provenanceFixedScale = 4194304u;
+
+inline void publishRecycledProvenance(
+    device RecycledMaterialProvenance* tiles,
+    uint tile,
+    uint sourceBirthID,
+    float mass,
+    uint step
+) {
+    if (mass <= 0.0 || sourceBirthID == 0u || sourceBirthID == 0xffffffffu) { return; }
+    uint fixed = uint(clamp(
+        round(mass * float(provenanceFixedScale)), 0.0, 4294967295.0
+    ));
+    if (fixed == 0u) { return; }
+    uint currentSource = atomic_load_explicit(
+        &tiles[tile].sourceBirthID, memory_order_relaxed
+    );
+    if (currentSource == 0u || currentSource == sourceBirthID) {
+        atomic_store_explicit(
+            &tiles[tile].sourceBirthID, sourceBirthID, memory_order_relaxed
+        );
+    } else {
+        atomic_store_explicit(
+            &tiles[tile].sourceBirthID, 0xfffffffeu, memory_order_relaxed
+        );
+    }
+    atomicAddSaturatingUInt(&tiles[tile].attributedMass, fixed);
+    atomic_store_explicit(&tiles[tile].releaseStep, step, memory_order_relaxed);
+}
+
+inline float claimRecycledProvenance(
+    device RecycledMaterialProvenance* tiles,
+    uint tile,
+    float requestedMass,
+    thread uint& sourceBirthID
+) {
+    sourceBirthID = atomic_load_explicit(
+        &tiles[tile].sourceBirthID, memory_order_relaxed
+    );
+    if (requestedMass <= 0.0 || sourceBirthID == 0u || sourceBirthID == 0xffffffffu) { return 0.0; }
+    uint requested = uint(clamp(
+        round(requestedMass * float(provenanceFixedScale)), 0.0, 4294967295.0
+    ));
+    uint available = atomic_load_explicit(
+        &tiles[tile].attributedMass, memory_order_relaxed
+    );
+    while (available > 0u) {
+        uint taken = min(available, requested);
+        uint desired = available - taken;
+        if (atomic_compare_exchange_weak_explicit(
+            &tiles[tile].attributedMass, &available, desired,
+            memory_order_relaxed, memory_order_relaxed
+        )) {
+            if (desired == 0u) {
+                atomic_store_explicit(
+                    &tiles[tile].sourceBirthID, 0u, memory_order_relaxed
+                );
+            }
+            return float(taken) / float(provenanceFixedScale);
+        }
+    }
+    return 0.0;
+}
+
+inline void attributeRecycledMaterial(
+    thread CellState& cell,
+    uint sourceBirthID,
+    float mass
+) {
+    if (mass <= 0.0 || sourceBirthID == 0u || sourceBirthID == 0xffffffffu) { return; }
+    uint slot = cell.materialProvenanceIDs.x == sourceBirthID ? 0u :
+        (cell.materialProvenanceIDs.y == sourceBirthID ? 1u :
+            (cell.materialProvenanceMass.x <= cell.materialProvenanceMass.y ? 0u : 1u));
+    if (slot == 0u) {
+        cell.materialProvenanceIDs.x = sourceBirthID;
+        cell.materialProvenanceMass.x += mass;
+    } else {
+        cell.materialProvenanceIDs.y = sourceBirthID;
+        cell.materialProvenanceMass.y += mass;
+    }
+}
+
+inline float cellularMaterialMass(CellState cell) {
+    return max(dot(cell.materialBasisA, float4(1.0)) +
+        dot(cell.materialBasisB, float4(1.0)), 0.0);
+}
+
+inline void initializeCellMaterialLedger(thread CellState& cell) {
+    if (cellularMaterialMass(cell) > 0.000001) { return; }
+    float mass = max(cell.physiology.y, 0.0);
+    cell.materialBasisA = mass * float4(0.30, 0.22, 0.14, 0.08);
+    cell.materialBasisB = mass * float4(0.08, 0.07, 0.06, 0.05);
+    cell.materialEnergy = float4(max(cell.physiology.x, 0.0), mass * 0.18, 0.0, 0.0);
+    cell.materialProvenanceIDs = uint4(0xffffffffu);
+    cell.materialProvenanceMass = float4(0.0);
+}
+
+inline void scaleCellMaterialLedger(thread CellState& cell, float scale) {
+    float safeScale = max(scale, 0.0);
+    cell.materialBasisA *= safeScale;
+    cell.materialBasisB *= safeScale;
+    cell.materialEnergy.xy *= safeScale;
+    cell.materialProvenanceMass *= safeScale;
+}
+
+inline void reconcileCellMaterialLedger(
+    thread CellState& cell,
+    float previousBiomass,
+    float newBiomass,
+    float newATP
+) {
+    initializeCellMaterialLedger(cell);
+    float currentMass = cellularMaterialMass(cell);
+    float targetMass = max(newBiomass, 0.0);
+    if (currentMass > 0.000001) {
+        scaleCellMaterialLedger(cell, targetMass / currentMass);
+    } else if (targetMass > 0.0) {
+        cell.materialBasisA = targetMass * float4(0.30, 0.22, 0.14, 0.08);
+        cell.materialBasisB = targetMass * float4(0.08, 0.07, 0.06, 0.05);
+    }
+    cell.materialEnergy.x = max(newATP, 0.0);
+    cell.materialEnergy.y = targetMass * 0.18;
+    cell.materialEnergy.z = max(
+        cell.materialEnergy.z + max(previousBiomass - newBiomass, 0.0), 0.0
+    );
+}
+
+inline void applySpeciesCompositionToLedger(
+    thread CellState& cell,
+    SpeciesDefinition species,
+    float signedAmount
+) {
+    float compositionTotal = max(float(
+        species.basisA.x + species.basisA.y + species.basisA.z + species.basisA.w +
+        species.basisB.x + species.basisB.y + species.basisB.z + species.basisB.w
+    ), 1.0);
+    float scale = signedAmount / compositionTotal;
+    cell.materialBasisA = max(
+        cell.materialBasisA + float4(species.basisA) * scale, float4(0.0)
+    );
+    cell.materialBasisB = max(
+        cell.materialBasisB + float4(species.basisB) * scale, float4(0.0)
+    );
+}
+
+inline float4 cellDomainGeometry(CellState cell, uint domain) {
+    switch (domain) {
+        case 0u: return cell.domain0Geometry;
+        case 1u: return cell.domain1Geometry;
+        case 2u: return cell.domain2Geometry;
+        default: return cell.domain3Geometry;
+    }
+}
+
+inline float4 cellDomainTransport(CellState cell, uint domain) {
+    switch (domain) {
+        case 0u: return cell.domain0Transport;
+        case 1u: return cell.domain1Transport;
+        case 2u: return cell.domain2Transport;
+        default: return cell.domain3Transport;
+    }
+}
+
+inline float4 cellDomainChemistry(CellState cell, uint domain) {
+    switch (domain) {
+        case 0u: return cell.domain0Chemistry;
+        case 1u: return cell.domain1Chemistry;
+        case 2u: return cell.domain2Chemistry;
+        default: return cell.domain3Chemistry;
+    }
+}
+
+inline uint4 cellDomainIdentity(CellState cell, uint domain) {
+    switch (domain) {
+        case 0u: return cell.domain0Identity;
+        case 1u: return cell.domain1Identity;
+        case 2u: return cell.domain2Identity;
+        default: return cell.domain3Identity;
+    }
+}
+
+inline void setCellDomain(
+    thread CellState& cell,
+    uint domain,
+    float4 geometry,
+    float4 transport,
+    float4 chemistry,
+    uint4 identity
+) {
+    switch (domain) {
+        case 0u:
+            cell.domain0Geometry = geometry; cell.domain0Transport = transport;
+            cell.domain0Chemistry = chemistry; cell.domain0Identity = identity; break;
+        case 1u:
+            cell.domain1Geometry = geometry; cell.domain1Transport = transport;
+            cell.domain1Chemistry = chemistry; cell.domain1Identity = identity; break;
+        case 2u:
+            cell.domain2Geometry = geometry; cell.domain2Transport = transport;
+            cell.domain2Chemistry = chemistry; cell.domain2Identity = identity; break;
+        default:
+            cell.domain3Geometry = geometry; cell.domain3Transport = transport;
+            cell.domain3Chemistry = chemistry; cell.domain3Identity = identity; break;
+    }
+}
+
+inline void initializeCellDomains(thread CellState& cell) {
+    cell.domain0Geometry = float4(0.0); cell.domain0Transport = float4(0.0);
+    cell.domain0Chemistry = float4(0.0); cell.domain0Identity = uint4(0u);
+    cell.domain1Geometry = float4(0.0); cell.domain1Transport = float4(0.0);
+    cell.domain1Chemistry = float4(0.0); cell.domain1Identity = uint4(0u);
+    cell.domain2Geometry = float4(0.0); cell.domain2Transport = float4(0.0);
+    cell.domain2Chemistry = float4(0.0); cell.domain2Identity = uint4(0u);
+    cell.domain3Geometry = float4(0.0); cell.domain3Transport = float4(0.0);
+    cell.domain3Chemistry = float4(0.0); cell.domain3Identity = uint4(0u);
+}
+
+inline uint activeCellDomainCount(CellState cell) {
+    uint count = 0u;
+    for (uint domain = 0u; domain < internalDomainCount; ++domain) {
+        count += cellDomainIdentity(cell, domain).x != 0u ? 1u : 0u;
+    }
+    return count;
+}
+
+inline float cellDomainBarrierForSpeciesMask(CellState cell, uint speciesMask) {
+    float barrier = 0.0;
+    for (uint domain = 0u; domain < internalDomainCount; ++domain) {
+        uint4 identity = cellDomainIdentity(cell, domain);
+        if (identity.x == 0u || (identity.y & speciesMask) == 0u) { continue; }
+        float4 geometry = cellDomainGeometry(cell, domain);
+        float4 transport = cellDomainTransport(cell, domain);
+        barrier = max(barrier,
+            saturate(geometry.w * 18.0) * saturate(transport.z) *
+            (0.25 + saturate(transport.y) * 0.75) *
+            (0.35 + (1.0 - saturate(transport.x)) * 0.65)
+        );
+    }
+    return saturate(barrier);
+}
+
+inline void partitionCellDomains(
+    thread CellState& parent,
+    thread CellState& child,
+    float parentShare,
+    float childShare,
+    float2 divisionAxis
+) {
+    for (uint domain = 0u; domain < internalDomainCount; ++domain) {
+        float4 geometry = cellDomainGeometry(parent, domain);
+        float4 transport = cellDomainTransport(parent, domain);
+        float4 chemistry = cellDomainChemistry(parent, domain);
+        uint4 identity = cellDomainIdentity(parent, domain);
+        if (identity.x == 0u || geometry.w <= 0.0000001) {
+            setCellDomain(parent, domain, float4(0.0), float4(0.0), float4(0.0), uint4(0u));
+            setCellDomain(child, domain, float4(0.0), float4(0.0), float4(0.0), uint4(0u));
+            continue;
+        }
+        float parentBias = saturate(0.5 - dot(geometry.xy, divisionAxis) * 0.35);
+        float domainParentShare = clamp(
+            mix(parentShare, parentBias, saturate(transport.y) * 0.34), 0.12, 0.88
+        );
+        float domainChildShare = 1.0 - domainParentShare;
+        float4 parentGeometry = geometry;
+        float4 childGeometry = geometry;
+        parentGeometry.xy -= divisionAxis * 0.08;
+        childGeometry.xy += divisionAxis * 0.08;
+        parentGeometry.z *= sqrt(domainParentShare);
+        childGeometry.z *= sqrt(domainChildShare);
+        parentGeometry.w *= domainParentShare;
+        childGeometry.w *= domainChildShare;
+        float4 parentChemistry = chemistry * domainParentShare;
+        float4 childChemistry = chemistry * domainChildShare;
+        uint4 childIdentity = identity;
+        childIdentity.z += 1u;
+        childIdentity.w = domain;
+        setCellDomain(parent, domain, parentGeometry, transport, parentChemistry, identity);
+        setCellDomain(child, domain, childGeometry, transport, childChemistry, childIdentity);
+    }
+}

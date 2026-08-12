@@ -95,8 +95,7 @@ kernel void markDamagedComponents(
         cellIndex = nextCell;
     }
     if (!struck) { return; }
-    agent.componentFlags = (agent.componentFlags | componentChallengedFlag) &
-        ~componentHomeostaticFlag;
+    agent.componentFlags |= componentChallengedFlag;
     // This component-local coordinate stores the recovery observation window.
     // It affects no cell dynamics or survival decision.
     agent.tissueKinematics.w = 1.0;
@@ -110,6 +109,7 @@ kernel void selectRegenerativeQualificationTarget(
     device const CellIdentity* cellIdentities [[buffer(3)]],
     device const atomic_uint* ownerCellHeads [[buffer(4)]],
     device uint* targetState [[buffer(5)]],
+    device const CellAggregate* aggregates [[buffer(6)]],
     uint gid [[thread_position_in_grid]]
 ) {
     if (gid != 0u) { return; }
@@ -121,9 +121,12 @@ kernel void selectRegenerativeQualificationTarget(
             continue;
         }
         AgentState candidate = agents[owner];
+        CellAggregate aggregate = aggregates[owner];
         bool eligible = candidate.generation > 0u &&
-            (candidate.componentFlags & componentRegeneratedFlag) != 0u &&
-            (candidate.componentFlags & componentMulticellularFlag) != 0u;
+            candidate.componentPersistenceSteps >= 1024u &&
+            aggregate.physiology.x >= 4.0 &&
+            aggregate.developmentCausality.x >= 0.01 &&
+            aggregate.physiology.z >= 0.55;
         if (!eligible) { continue; }
         uint anchorCell = atomic_load_explicit(
             &ownerCellHeads[owner], memory_order_relaxed
@@ -262,8 +265,7 @@ kernel void markSelectedTargetChallenged(
         return;
     }
     AgentState agent = agents[owner];
-    agent.componentFlags = (agent.componentFlags | componentQualificationTargetFlag |
-        componentChallengedFlag) & ~componentHomeostaticFlag;
+    agent.componentFlags |= componentQualificationTargetFlag | componentChallengedFlag;
     agent.tissueKinematics.w = 1.0;
     agents[owner] = agent;
     targetState[3] = 2u;
@@ -544,6 +546,12 @@ inline CellState emptyCell() {
     cell.symbiontIdentity = uint4(0xffffffffu, 0xffffffffu, 0u, 0u);
     cell.symbiontState = float4(0.0);
     cell.symbiontExchange = float4(0.0);
+    cell.materialBasisA = float4(0.0);
+    cell.materialBasisB = float4(0.0);
+    cell.materialEnergy = float4(0.0);
+    cell.materialProvenanceIDs = uint4(0xffffffffu);
+    cell.materialProvenanceMass = float4(0.0);
+    initializeCellDomains(cell);
     return cell;
 }
 
@@ -621,6 +629,12 @@ inline CellState founderCell(AgentState agent, uint seed) {
     cell.symbiontIdentity = uint4(0xffffffffu, 0xffffffffu, 0u, 0u);
     cell.symbiontState = float4(0.0);
     cell.symbiontExchange = float4(0.0);
+    cell.materialBasisA = cell.physiology.y * float4(0.30, 0.22, 0.14, 0.08);
+    cell.materialBasisB = cell.physiology.y * float4(0.08, 0.07, 0.06, 0.05);
+    cell.materialEnergy = float4(cell.physiology.x, cell.physiology.y * 0.18, 0.0, 0.0);
+    cell.materialProvenanceIDs = uint4(0xffffffffu);
+    cell.materialProvenanceMass = float4(0.0);
+    initializeCellDomains(cell);
     return cell;
 }
 
@@ -865,14 +879,34 @@ inline void addEnergyExchange(
     }
 }
 
-/// Close terminal storage on every death path, including defensive cleanup of
-/// orphaned cells. Corpse structure is informational and mechanical; ATP and
-/// biomass energy must still return to local chemistry exactly once.
+inline void addBasisExchange(
+    device atomic_uint* cellEnergyExchange,
+    uint tileBase,
+    float4 basisA,
+    float4 basisB
+) {
+    for (uint basis = 0u; basis < 4u; ++basis) {
+        addEnergyExchange(
+            cellEnergyExchange, tileBase, exchangeBasisA0 + basis,
+            max(basisA[basis], 0.0)
+        );
+        addEnergyExchange(
+            cellEnergyExchange, tileBase, exchangeBasisB0 + basis,
+            max(basisB[basis], 0.0)
+        );
+    }
+}
+
+/// Close terminal matter and energy on every death path. The exact eight-basis
+/// ledger returns to local chemistry; no scalar "recycled matter" constructor
+/// is allowed to invent a replacement mixture.
 inline void recycleTerminalCellEnergy(
     device atomic_uint* cellEnergyExchange,
     device atomic_int* energyAudit,
+    device RecycledMaterialProvenance* recycledProvenance,
     float2 worldPosition,
     CellState cell,
+    uint donorBirthID,
     constant SimulationUniforms& uniforms
 ) {
     uint2 coordinate = min(
@@ -882,14 +916,24 @@ inline void recycleTerminalCellEnergy(
     );
     uint tileBase = (coordinate.y * uniforms.width + coordinate.x) *
         worldExchangeChannelCount;
-    float terminalEnergy = max(cell.physiology.x, 0.0) +
-        max(cell.physiology.y, 0.0) * 0.18;
-    float recycledMatterEnergy = terminalEnergy * 0.72;
-    float heat = terminalEnergy - recycledMatterEnergy;
-    addEnergyExchange(
-        cellEnergyExchange, tileBase, 0u, recycledMatterEnergy / 0.62
+    uint tile = coordinate.y * uniforms.width + coordinate.x;
+    initializeCellMaterialLedger(cell);
+    addBasisExchange(
+        cellEnergyExchange, tileBase, cell.materialBasisA, cell.materialBasisB
     );
-    addEnergyExchange(cellEnergyExchange, tileBase, 1u, heat);
+    float recycledMatterEnergy = max(cell.materialEnergy.y, 0.0);
+    float heat = max(cell.materialEnergy.x, 0.0) +
+        max(cell.materialEnergy.w, 0.0);
+    float terminalEnergy = recycledMatterEnergy + heat;
+    addEnergyExchange(cellEnergyExchange, tileBase, exchangeHeat, heat);
+    addEnergyExchange(
+        cellEnergyExchange, tileBase, exchangeProvenanceMass,
+        dot(max(cell.materialProvenanceMass, float4(0.0)), float4(1.0))
+    );
+    publishRecycledProvenance(
+        recycledProvenance, tile, donorBirthID,
+        cellularMaterialMass(cell), uniforms.step
+    );
     addEnergyAudit(energyAudit, 2u, -terminalEnergy);
     addEnergyAudit(energyAudit, 6u, heat);
     addEnergyAudit(energyAudit, 7u, recycledMatterEnergy);
@@ -1263,6 +1307,12 @@ inline uint seedOrganismCells(
     aggregate.internalMembrane = founder.internalMembrane;
     aggregate.symbiontState = founder.symbiontState;
     aggregate.symbiontExchange = founder.symbiontExchange;
+    aggregate.materialLedger = float4(
+        cellularMaterialMass(founder), founder.materialEnergy.x,
+        dot(max(founder.materialProvenanceMass, float4(0.0)), float4(1.0)),
+        float(activeCellDomainCount(founder))
+    );
+    aggregate.materialProvenanceIDs = uint4(0u);
     aggregates[owner] = aggregate;
     return cellIndex;
 }

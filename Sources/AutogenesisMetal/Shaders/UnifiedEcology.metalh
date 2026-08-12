@@ -755,34 +755,45 @@ kernel void evolveWorldChemistry(
     }
 
     uint exchangeBase = tile * worldExchangeChannelCount;
-    float returnedReducedMatter = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase]
-    ));
+    float4 returnedBasisA;
+    float4 returnedBasisB;
+    for (uint basis = 0u; basis < 4u; ++basis) {
+        returnedBasisA[basis] = substrateFromFixed(consumePublishedUInt(
+            &deferredCellExchange[exchangeBase + exchangeBasisA0 + basis]
+        ));
+        returnedBasisB[basis] = substrateFromFixed(consumePublishedUInt(
+            &deferredCellExchange[exchangeBase + exchangeBasisB0 + basis]
+        ));
+    }
     float returnedHeat = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase + 1u]
+        &deferredCellExchange[exchangeBase + exchangeHeat]
     ));
-    basisA.x += returnedReducedMatter * 0.42;
-    basisA.y += returnedReducedMatter * 0.36;
-    basisA.z += returnedReducedMatter * 0.22;
+    basisA += returnedBasisA;
+    basisB += returnedBasisB;
     packetHeat += returnedHeat;
     float signalA = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase + 2u]
+        &deferredCellExchange[exchangeBase + exchangeSignalA]
     ));
     float signalB = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase + 3u]
+        &deferredCellExchange[exchangeBase + exchangeSignalB]
     ));
     float depositedMaterial = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase + 4u]
+        &deferredCellExchange[exchangeBase + exchangeStructure]
     ));
     float remodeling = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase + 5u]
+        &deferredCellExchange[exchangeBase + exchangeRemodeling]
     ));
     float catalyticMoleculeOutput = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase + 6u]
+        &deferredCellExchange[exchangeBase + exchangeCatalytic]
     ));
     float counterOutput = substrateFromFixed(consumePublishedUInt(
-        &deferredCellExchange[exchangeBase + 7u]
+        &deferredCellExchange[exchangeBase + exchangeCounter]
     ));
+    // Provenance is consumed only to keep the observer stream synchronized.
+    // It never enters any chemical or physical equation.
+    consumePublishedUInt(
+        &deferredCellExchange[exchangeBase + exchangeProvenanceMass]
+    );
     // Legacy field-exchange channels no longer name global molecule roles.
     // Their already-paid matter returns to conserved basis pools; persistent
     // construction enters the material ledger. Sequence-derived secretion is

@@ -525,18 +525,12 @@ struct CellRasterData {
     float4 physiology;
     float4 phenotype;
     float4 signals;
-    float4 interaction;
     float4 dynamics;
     float4 mechanics;
-    float4 energetics;
-    float4 regulation;
-    float4 regulationB;
-    float4 resonance;
     float4 signaling;
     float4 signalCausality;
     float4 tissueGeometry;
     float4 tissueForce;
-    float4 environment;
     float4 development;
     float4 boundaryDynamics;
     float4 programEcology;
@@ -554,7 +548,31 @@ struct CellRasterData {
     float2 footState;
     float organism;
     float4 localMembrane;
+    float4 domain0Geometry;
+    float4 domain0Transport;
+    float4 domain1Geometry;
+    float4 domain1Transport;
+    float4 domain2Geometry;
+    float4 domain2Transport;
+    float4 domain3Geometry;
+    float4 domain3Transport;
 };
+
+inline float causalDomainBody(float2 point, float4 geometry, float4 transport) {
+    if (geometry.w <= 0.0000001 || transport.z <= 0.001) { return 0.0; }
+    float distance = length(point - geometry.xy);
+    float edge = max(fwidth(distance) * 1.25, 0.006);
+    return (1.0 - smoothstep(geometry.z, geometry.z + edge, distance)) *
+        saturate(transport.z);
+}
+
+inline float causalDomainBoundary(float2 point, float4 geometry, float4 transport) {
+    if (geometry.w <= 0.0000001 || transport.z <= 0.001) { return 0.0; }
+    float distance = length(point - geometry.xy);
+    float edge = max(fwidth(distance) * 1.35, 0.007);
+    return (1.0 - smoothstep(edge, edge * 2.8, abs(distance - geometry.z))) *
+        saturate(transport.z) * saturate(geometry.w * 24.0);
+}
 
 inline float4 organismOverviewCellColor(
     CellRasterData input,
@@ -576,22 +594,24 @@ inline float4 organismOverviewCellColor(
     float2 developmentalDirection = normalizedOr(
         input.development.xy, float2(1.0, 0.0)
     );
-    float2 nucleusOffset = developmentalDirection * 0.16;
-    float nucleus = (1.0 - smoothstep(
-        0.18, 0.29, length(input.local - nucleusOffset)
-    )) * cytoplasm;
-    float vacuole = (1.0 - smoothstep(
-        0.10, 0.19, length(input.local + nucleusOffset * 1.7)
-    )) * cytoplasm;
+    float domainBody = max(
+        causalDomainBody(input.local, input.domain0Geometry, input.domain0Transport),
+        causalDomainBody(input.local, input.domain1Geometry, input.domain1Transport)
+    );
+    float domainBoundary = max(
+        causalDomainBoundary(input.local, input.domain0Geometry, input.domain0Transport),
+        causalDomainBoundary(input.local, input.domain1Geometry, input.domain1Transport)
+    );
     float polarity = saturate(
         0.5 + dot(input.local, developmentalDirection) * 0.5
     );
     float calcium = saturate(input.signaling.x);
     float erk = saturate(input.signaling.y);
     float3 color = cytoplasmColor * cytoplasm * (0.54 + atp * 0.58);
-    color += mix(float3(0.90, 0.28, 0.72), lineage, 0.28) * nucleus *
-        (0.54 + erk * 0.52);
-    color += float3(0.06, 0.78, 1.0) * vacuole * (0.34 + calcium * 0.66);
+    color += mix(float3(0.06, 0.44, 0.58), lineage, 0.34) * domainBody *
+        (0.24 + erk * 0.30);
+    color += float3(0.18, 0.86, 1.0) * domainBoundary *
+        (0.32 + calcium * 0.48);
     color += mix(float3(0.05, 0.72, 1.0), float3(1.0, 0.18, 0.62), polarity) *
         cytoplasm * (calcium + erk) * 0.20;
     float membraneFailure = saturate(1.0 - integrity);
@@ -821,18 +841,12 @@ inline CellRasterData makeCellRasterData(
     output.physiology = cell.physiology;
     output.phenotype = cell.phenotype;
     output.signals = cell.signals;
-    output.interaction = cell.interaction;
     output.dynamics = cell.dynamics;
     output.mechanics = cell.mechanics;
-    output.energetics = cell.energetics;
-    output.regulation = cell.regulation;
-    output.regulationB = cell.regulationB;
-    output.resonance = cell.resonance;
     output.signaling = cell.signaling;
     output.signalCausality = cell.signalCausality;
     output.tissueGeometry = cell.tissueGeometry;
     output.tissueForce = cell.tissueForce;
-    output.environment = cell.environment;
     output.development = cell.development;
     output.boundaryDynamics = cell.boundaryDynamics;
     float molecularRasterBlend = smoothstep(36.0, 54.0, observationZoom);
@@ -907,5 +921,13 @@ inline CellRasterData makeCellRasterData(
     output.localMembrane = float4(
         localIntegrity, localPressure, localStrain, paidRepair
     );
+    output.domain0Geometry = cell.domain0Geometry;
+    output.domain0Transport = cell.domain0Transport;
+    output.domain1Geometry = cell.domain1Geometry;
+    output.domain1Transport = cell.domain1Transport;
+    output.domain2Geometry = cell.domain2Geometry;
+    output.domain2Transport = cell.domain2Transport;
+    output.domain3Geometry = cell.domain3Geometry;
+    output.domain3Transport = cell.domain3Transport;
     return output;
 }

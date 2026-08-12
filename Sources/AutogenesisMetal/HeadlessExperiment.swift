@@ -332,6 +332,10 @@ struct ExperimentComponentSnapshot: Codable, Sendable, Equatable {
     let habituation: Double
     let acquiredBehavior: Double
     let materialSynthesis: [Double]
+    let conservedMaterialMass: Double
+    let recycledProvenanceMass: Double
+    let dominantRecycledSourceBirthID: UInt32?
+    let meanInternalDomainCount: Double
     let morphology: [Double]
 }
 
@@ -347,6 +351,7 @@ struct ExperimentInvariantReport: Codable, Sendable {
     let orphanedJunctionViolations: UInt32
     let invalidMembraneViolations: UInt32
     let disconnectedOwnershipViolations: UInt32
+    let invalidCellMaterialViolations: UInt32
     let maximumContactMomentumResidual: UInt32
     let maximumEnergyResidual: Double
 }

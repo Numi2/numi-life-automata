@@ -89,10 +89,21 @@ constant uint sexualPartnerIndexMask = (1u << sexualPartnerIndexBits) - 1u;
 // cell-produced developmental outputs into the next extracellular-field step:
 // ligand A, ligand B, matrix deposition, wound/remodeling cue, catalytic
 // molecule secretion, and reactive-molecule neutralization.
-constant uint worldExchangeChannelCount = 8u;
+// Eight exact basis-material returns, heat, five paid ecological outputs, and
+// two observer-only provenance lanes.  Matter never collapses to a scalar on
+// the path from a dying cell back into environmental chemistry.
+constant uint worldExchangeChannelCount = 16u;
+constant uint exchangeBasisA0 = 0u;
+constant uint exchangeBasisB0 = 4u;
+constant uint exchangeHeat = 8u;
+constant uint exchangeSignalA = 9u;
+constant uint exchangeSignalB = 10u;
+constant uint exchangeStructure = 11u;
+constant uint exchangeRemodeling = 12u;
+constant uint exchangeCatalytic = 13u;
+constant uint exchangeCounter = 14u;
+constant uint exchangeProvenanceMass = 15u;
 constant uint componentMulticellularFlag = 1u << 0u;
-constant uint componentRegeneratedFlag = 1u << 1u;
-constant uint componentHomeostaticFlag = 1u << 2u;
 constant uint componentChallengedFlag = 1u << 3u;
 constant uint componentQualificationTargetFlag = 1u << 4u;
 constant uint componentSexualOffspringFlag = 1u << 5u;
@@ -125,6 +136,7 @@ constant uint invariantOrphanedJunction = 1u << 4u;
 constant uint invariantInvalidMembrane = 1u << 5u;
 constant uint invariantDisconnectedOwnership = 1u << 6u;
 constant uint invariantContactPairOverflow = 1u << 7u;
+constant uint invariantInvalidCellMaterial = 1u << 8u;
 struct AgentState {
     float2 position;
     float2 velocity;
@@ -236,6 +248,36 @@ struct CellState {
     float4 symbiontState;
     // Energy export, redox export, host substrate supplied, and conflict/leak.
     float4 symbiontExchange;
+    // Conserved intracellular basis material. Physiology.x/y are fast caches;
+    // every change is reconciled against these extensive stores before publish.
+    float4 materialBasisA;
+    float4 materialBasisB;
+    // ATP-equivalent carrier, structural reserve, turnover debt, and released heat.
+    float4 materialEnergy;
+    // Passive matter provenance: two source component birth IDs and their
+    // attributed masses. Attribution is observer-only and never gates chemistry.
+    uint4 materialProvenanceIDs;
+    float4 materialProvenanceMass;
+    // Four causal, paid membrane domains. geometry=(center.xy,radius,mass),
+    // transport=(permeability,selectivity,integrity,potential),
+    // chemistry=(contained amount,free energy,reaction flux,leak), and identity
+    // stores active/species-mask/generation/parent-domain. No named organelle exists.
+    float4 domain0Geometry;
+    float4 domain0Transport;
+    float4 domain0Chemistry;
+    uint4 domain0Identity;
+    float4 domain1Geometry;
+    float4 domain1Transport;
+    float4 domain1Chemistry;
+    uint4 domain1Identity;
+    float4 domain2Geometry;
+    float4 domain2Transport;
+    float4 domain2Chemistry;
+    uint4 domain2Identity;
+    float4 domain3Geometry;
+    float4 domain3Transport;
+    float4 domain3Chemistry;
+    uint4 domain3Identity;
 };
 
 // Four packed half4 episodes. Each episode is
@@ -253,6 +295,15 @@ struct CellCorpseState {
     uint donorGenomeHash;
     uint reserved;
     uint2 episodes[embodiedMemoryCount];
+};
+
+// Observer-only attribution accompanying ordinary conserved environmental
+// matter. Fixed-point mass moves with uptake, but these tags never alter rates.
+struct RecycledMaterialProvenance {
+    atomic_uint sourceBirthID;
+    atomic_uint attributedMass;
+    atomic_uint releaseStep;
+    uint reserved;
 };
 
 struct CellIdentity {
@@ -383,6 +434,11 @@ struct CellAggregate {
     float4 internalMembrane;
     float4 symbiontState;
     float4 symbiontExchange;
+    // Total basis mass, chemical carrier energy, passively attributed recycled
+    // mass, and mean active internal-domain count.
+    float4 materialLedger;
+    // Dominant passively attributed recycled source, followed by reserved lanes.
+    uint4 materialProvenanceIDs;
 };
 
 struct QualificationTargetMeasurement {
@@ -483,6 +539,8 @@ struct AgentObservationRecord {
     float4 internalMembrane;
     float4 symbiontState;
     float4 symbiontExchange;
+    float4 materialLedger;
+    uint4 materialProvenanceIDs;
 };
 
 struct CellObservationRecord {
@@ -517,6 +575,7 @@ struct CellObservationRecord {
     float4 internalMembrane;
     float4 symbiontState;
     float4 symbiontExchange;
+    float4 materialLedger;
 };
 
 struct LineageEventRecord {
@@ -1856,6 +1915,7 @@ inline float4 quantumCoinPrepared(float4 spinor, float2 coin) {
     );
 }
 
+#include "LifecycleBiology.metalh"
 #include "QuantumChemistry.metalh"
 #include "GenomeCells.metalh"
 #include "GenomeObservation.metalh"

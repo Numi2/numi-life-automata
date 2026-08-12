@@ -120,7 +120,9 @@ Open-endedness is measured across increasing windows using persistent inherited 
 
 Story uses plain language and a chronological sidebar. It requires persistent evidence before reporting ecological candidates, and it explicitly withholds causal claims until paired ablations exist. Research exposes Chemistry, Materials, Physiology, Signals, Interactions, and Lineages over the same live world.
 
-Journal schema 18 keeps observer events such as species birth, cross-feeding candidates, construction, chemical conflict, and collective reproduction. Older journals remain files on disk, but obsolete world state is not replayed.
+Journal schema 19 adds persistent lineage biographies for development, injury, regeneration, physical separation, independence, reproduction, senescence, death, exact material release, and source-specific material reuse. Older journals remain files on disk, but obsolete world state is not replayed.
+
+Cells carry an eight-basis `CellMaterialLedger`; ATP and biomass are fast caches reconciled to those conserved pools. Up to four paid internal membrane domains can grow, divide, fuse, leak, and decay from expressed molecular rules. Lifecycle names exist only in the observer: the solver contains causal age, replication, damage, turnover, chemistry, voltage, contacts, membrane state, and inherited regulation—not maturity, senescence, regeneration, germline, soma, or role flags.
 
 ## GPU architecture
 
@@ -146,7 +148,7 @@ swift build -c release --product NumiAutomata --jobs 4
 ./Scripts/install-macos-app.sh
 ```
 
-The installer builds Metal assets and the release executable, signs the app locally, installs it at `~/Applications/Numi Automata.app`, registers it with Launch Services, and opens it.
+The installer builds Metal assets and the release executable, signs the app locally, installs it at `~/Applications/Numi Automata.app`, and registers it with Launch Services. Pass `--no-open` to install without launching.
 
 For a bounded deterministic command-line run:
 
@@ -160,7 +162,7 @@ swift run NumiAutomata experiment \
   --output /tmp/numi-automata-smoke.jsonl
 ```
 
-Long multi-seed evolutionary and performance studies should run on a suitably cooled Apple Silicon desktop. The MacBook release gate is compilation, conservation and observer unit tests, a smoke simulation capped at 2,000 steps or 30 seconds, release signing, installation, launch, and a brief Story/Research inspection.
+Long multi-seed evolutionary and performance studies should run on a suitably cooled Apple Silicon desktop. The MacBook release gate is compilation, conservation and observer unit tests, a smoke simulation capped at 2,000 steps or 30 seconds, release signing, installation, and nonvisual bundle verification.
 
 ## Evidence boundaries
 

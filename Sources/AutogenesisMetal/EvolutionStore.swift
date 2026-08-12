@@ -47,6 +47,37 @@ enum EvolutionEventKind: Sendable, Equatable {
     case collectiveReproduction
     case regeneration
     case learning
+    case development
+    case reproduction
+    case senescence
+    case death
+    case recycling
+}
+
+enum LifeStoryEventKind: String, Codable, Sendable, Equatable {
+    case birth
+    case multicellularDevelopment
+    case injury
+    case regeneration
+    case offspringSeparation
+    case offspringIndependence
+    case offspringReproduction
+    case senescence
+    case death
+    case materialRelease
+    case materialReuse
+}
+
+struct LifeStoryEventRecord: Identifiable, Codable, Sendable, Equatable {
+    let id: UInt64
+    let kind: LifeStoryEventKind
+    let step: UInt64
+    let subjectBirthID: UInt32
+    let parentBirthID: UInt32?
+    let offspringBirthID: UInt32?
+    let position: SIMD2<Float>?
+    let evidenceWindows: UInt8
+    let detail: String
 }
 
 struct EvolutionEvent: Identifiable, Sendable, Equatable {
@@ -136,6 +167,24 @@ struct RuntimeObservation: Sendable, Equatable {
     let energyConservationResidual: Double
     let cellPoolUtilization: Double
     let genomeHeaderPoolUtilization: Double
+}
+
+struct LifecycleObservation: Sendable, Equatable {
+    var developingBodies: Int
+    var regeneratingBodies: Int
+    var independentOffspring: Int
+    var senescingBodies: Int
+    var recycledMatterCarriers: Int
+    var completedTwoGenerationLineages: Int
+
+    static let empty = LifecycleObservation(
+        developingBodies: 0,
+        regeneratingBodies: 0,
+        independentOffspring: 0,
+        senescingBodies: 0,
+        recycledMatterCarriers: 0,
+        completedTwoGenerationLineages: 0
+    )
 }
 
 struct WorldObservation: Sendable, Equatable {
@@ -293,6 +342,7 @@ struct WorldObservation: Sendable, Equatable {
     var successfulFusionContactSamples: UInt32 = 0
     var metrics: WorldMetrics = .empty
     var openEndedness: OpenEndednessObservation = .empty
+    var lifecycle: LifecycleObservation = .empty
 
     init(
         generation: Int = 0,
@@ -643,6 +693,7 @@ final class EvolutionStore: ObservableObject {
     @Published private(set) var snapshot = WorldObservation()
     @Published private(set) var history: [WorldObservation] = []
     @Published private(set) var events: [EvolutionEvent] = []
+    @Published private(set) var lifeStoryEvents: [LifeStoryEventRecord] = []
     @Published private(set) var founderCount = 0
     @Published private(set) var fusionEventCount = 0
     @Published private(set) var crossbreedingEventCount = 0
@@ -686,7 +737,13 @@ final class EvolutionStore: ObservableObject {
         var regenerationWindows: UInt8 = 0
         var learningWindows: UInt8 = 0
         var constructionWindows: UInt8 = 0
-        var emittedFlags: UInt8 = 0
+        var developmentWindows: UInt8 = 0
+        var independenceWindows: UInt8 = 0
+        var senescenceWindows: UInt8 = 0
+        var recyclingWindows: UInt8 = 0
+        var peakFunction: Float = 0
+        var previousBurden: Float = 0
+        var emittedFlags: UInt16 = 0
     }
     private var persistentLifeEvidence: [UInt32: PersistentLifeEvidence] = [:]
     private var crossFeedingEvidenceWindows: UInt8 = 0
@@ -942,7 +999,7 @@ final class EvolutionStore: ObservableObject {
         cellObservations: [CellObservation]
     ) {
         observedAgents = agents
-        observeLifeMilestones(in: agents)
+        observeLifeMilestones(in: agents, cells: cellObservations)
         if observableAgentCount != agents.count {
             observableAgentCount = agents.count
         }
@@ -957,7 +1014,7 @@ final class EvolutionStore: ObservableObject {
         let livingDescendants = agents.filter { $0.generation > 0 }
         livingDescendantCount = livingDescendants.count
         regenerativeDescendantCount = livingDescendants.count {
-            $0.hasRegeneratedDevelopment
+            $0.hasPersistentDescendantDevelopment
         }
         challengedDescendantCount = livingDescendants.count {
             $0.hasReceivedDamageChallenge
@@ -1004,10 +1061,13 @@ final class EvolutionStore: ObservableObject {
                 if simd_distance_squared(cameraCenter, followed.position) > 1.0e-14 {
                     cameraCenter = followed.position
                 }
-            } else if let replacement = agents.first {
-                follow(replacement)
             } else {
-                clearFollow()
+                // Preserve the dead subject's biography and final camera location.
+                // Following an offspring is an explicit Story action, never an
+                // automatic substitution that looks like a world reset.
+                followedAgentID = nil
+                followedEnergeticIndependence = 0
+                followedMechanochemicalClosure = 0
             }
         }
 
@@ -1094,11 +1154,18 @@ final class EvolutionStore: ObservableObject {
         runtimeTelemetry = telemetry
     }
 
-    private func observeLifeMilestones(in agents: [AgentObservation]) {
-        let speciesFlag: UInt8 = 1 << 0
-        let regenerationFlag: UInt8 = 1 << 1
-        let learningFlag: UInt8 = 1 << 2
-        let constructionFlag: UInt8 = 1 << 3
+    private func observeLifeMilestones(
+        in agents: [AgentObservation],
+        cells: [CellObservation]
+    ) {
+        let speciesFlag: UInt16 = 1 << 0
+        let regenerationFlag: UInt16 = 1 << 1
+        let learningFlag: UInt16 = 1 << 2
+        let constructionFlag: UInt16 = 1 << 3
+        let developmentFlag: UInt16 = 1 << 4
+        let independenceFlag: UInt16 = 1 << 5
+        let senescenceFlag: UInt16 = 1 << 6
+        let recyclingFlag: UInt16 = 1 << 7
         let ordered = agents.sorted {
             let lhsFollowed = $0.birthID == followedBirthID
             let rhsFollowed = $1.birthID == followedBirthID
@@ -1110,6 +1177,23 @@ final class EvolutionStore: ObservableObject {
         for agent in ordered {
             var evidence = persistentLifeEvidence[agent.birthID, default: .init()]
             let label = "Life-form #\(agent.birthID)"
+            let componentCells = cells.filter { $0.componentBirthID == agent.birthID }
+            let meanExpression = componentCells.isEmpty ? SIMD4<Float>(repeating: 0) :
+                componentCells.reduce(SIMD4<Float>(repeating: 0)) {
+                    $0 + $1.molecularExpression
+                } / Float(componentCells.count)
+            let expressionVariance = componentCells.isEmpty ? 0 :
+                componentCells.reduce(Float.zero) {
+                    $0 + simd_length_squared($1.molecularExpression - meanExpression)
+                } / Float(componentCells.count)
+            let cellCount = max(Int((agent.morphology.x * 24).rounded()), 1)
+            let currentFunction = max(
+                agent.functionalActivity.x + agent.functionalActivity.y +
+                    agent.functionalActivity.z + agent.functionalActivity.w,
+                0
+            )
+            evidence.peakFunction = max(evidence.peakFunction, currentFunction)
+            let burden = max(agent.lifeHistory.z, agent.proteostasis.y)
 
             func advance(_ value: inout UInt8, while condition: Bool) {
                 value = condition ? min(value &+ 1, 3) : 0
@@ -1120,6 +1204,28 @@ final class EvolutionStore: ObservableObject {
                 while: agent.programReplicationGeneration > 0 &&
                     agent.mutationDistance > 0.001 && agent.energeticIndependence > 0.35
             )
+            advance(
+                &evidence.developmentWindows,
+                while: cellCount >= 4 && expressionVariance >= 0.0002 &&
+                    agent.energeticIndependence >= 0.30 && agent.boundary.w >= 0.58
+            )
+            advance(
+                &evidence.independenceWindows,
+                while: agent.parentBirthID != .max &&
+                    agent.energeticIndependence >= 0.50 && agent.boundary.w >= 0.62 &&
+                    cellCount >= 2
+            )
+            advance(
+                &evidence.senescenceWindows,
+                while: evidence.peakFunction > 0.05 &&
+                    currentFunction <= evidence.peakFunction * 0.72 &&
+                    burden > evidence.previousBurden + 0.002 && agent.lifeHistory.x > 0
+            )
+            advance(
+                &evidence.recyclingWindows,
+                while: agent.materialLedger.z >= 0.00001
+            )
+            evidence.previousBurden = burden
             advance(
                 &evidence.regenerationWindows,
                 while: agent.hasReceivedDamageChallenge && agent.lifeHistory.w >= 0.12 &&
@@ -1138,7 +1244,7 @@ final class EvolutionStore: ObservableObject {
             )
 
             func recordPersistentEvidence(
-                flag: UInt8,
+                flag: UInt16,
                 windows: UInt8,
                 kind: EvolutionEventKind,
                 title: String,
@@ -1164,13 +1270,71 @@ final class EvolutionStore: ObservableObject {
                 title: "\(label) sustained a novel inherited program",
                 detail: "The observer found a mutated genome persisting with independent energy capture for three windows. This is an observer classification and does not affect survival or reproduction."
             )
-            _ = recordPersistentEvidence(
+            if recordPersistentEvidence(
+                flag: developmentFlag,
+                windows: evidence.developmentWindows,
+                kind: .development,
+                title: "\(label) developed a persistent multicellular body",
+                detail: "At least four connected cells sustained autonomous energy capture and divergent molecular expression for three observer windows. No solver life-stage flag was used."
+            ) {
+                recordLifeStory(
+                    kind: .multicellularDevelopment, subject: agent,
+                    windows: evidence.developmentWindows,
+                    detail: "A connected body developed persistent expression differences among its cells."
+                )
+            }
+            if recordPersistentEvidence(
+                flag: independenceFlag,
+                windows: evidence.independenceWindows,
+                kind: .reproduction,
+                title: "\(label) became an independent offspring",
+                detail: "A physically separated descendant sustained its own uptake, boundary repair, and multicellular persistence for three observer windows."
+            ) {
+                recordLifeStory(
+                    kind: .offspringIndependence, subject: agent,
+                    windows: evidence.independenceWindows,
+                    detail: "The separated descendant maintained itself independently."
+                )
+            }
+            if recordPersistentEvidence(
+                flag: senescenceFlag,
+                windows: evidence.senescenceWindows,
+                kind: .senescence,
+                title: "\(label) showed sustained functional decline",
+                detail: "Damage burden rose while measured cellular function remained below 72% of the same body’s earlier peak for three windows."
+            ) {
+                recordLifeStory(
+                    kind: .senescence, subject: agent,
+                    windows: evidence.senescenceWindows,
+                    detail: "Accumulated molecular and membrane damage exceeded ongoing repair."
+                )
+            }
+            if recordPersistentEvidence(
+                flag: recyclingFlag,
+                windows: evidence.recyclingWindows,
+                kind: .recycling,
+                title: "\(label) incorporated recycled biological matter",
+                detail: "Passive provenance accompanied conserved matter from a dead component into this body for three windows; the attribution did not affect uptake."
+            ) {
+                recordLifeStory(
+                    kind: .materialReuse, subject: agent,
+                    windows: evidence.recyclingWindows,
+                    detail: "Conserved matter released by earlier life was incorporated into this body."
+                )
+            }
+            if recordPersistentEvidence(
                 flag: regenerationFlag,
                 windows: evidence.regenerationWindows,
                 kind: .regeneration,
                 title: "\(label) sustained an injury-repair pattern",
                 detail: "After measured damage, maintenance activity, developmental reopening, and membrane integrity persisted together for three observer windows. Causation requires the paired wound/sham experiment."
-            )
+            ) {
+                recordLifeStory(
+                    kind: .regeneration, subject: agent,
+                    windows: evidence.regenerationWindows,
+                    detail: "The wounded body restored maintained membrane and developmental organization."
+                )
+            }
             _ = recordPersistentEvidence(
                 flag: learningFlag,
                 windows: evidence.learningWindows,
@@ -1189,11 +1353,58 @@ final class EvolutionStore: ObservableObject {
             persistentLifeEvidence[agent.birthID] = evidence
         }
 
+        let independentIDs = Set(persistentLifeEvidence.compactMap {
+            $0.value.independenceWindows >= 3 ? $0.key : nil
+        })
+        let parentsWithIndependentChildren = Set(agents.compactMap {
+            independentIDs.contains($0.birthID) && $0.parentBirthID != .max
+                ? $0.parentBirthID : nil
+        })
+        let completedLineages = agents.filter {
+            parentsWithIndependentChildren.contains($0.birthID) &&
+                $0.parentBirthID != .max && independentIDs.contains($0.birthID)
+        }.count
+        snapshot.lifecycle = LifecycleObservation(
+            developingBodies: persistentLifeEvidence.values.count {
+                $0.developmentWindows > 0 && $0.developmentWindows < 3
+            },
+            regeneratingBodies: persistentLifeEvidence.values.count {
+                $0.regenerationWindows > 0 && $0.regenerationWindows < 3
+            },
+            independentOffspring: independentIDs.count,
+            senescingBodies: persistentLifeEvidence.values.count { $0.senescenceWindows >= 3 },
+            recycledMatterCarriers: persistentLifeEvidence.values.count { $0.recyclingWindows >= 3 },
+            completedTwoGenerationLineages: completedLineages
+        )
+
         if persistentLifeEvidence.count > 8_192 {
             let livingBirthIDs = Set(agents.map(\.birthID))
             persistentLifeEvidence = persistentLifeEvidence.filter {
                 livingBirthIDs.contains($0.key)
             }
+        }
+    }
+
+    private func recordLifeStory(
+        kind: LifeStoryEventKind,
+        subject: AgentObservation,
+        windows: UInt8,
+        detail: String
+    ) {
+        lifeStoryEvents.insert(LifeStoryEventRecord(
+            id: nextEventID,
+            kind: kind,
+            step: snapshot.totalSteps,
+            subjectBirthID: subject.birthID,
+            parentBirthID: subject.parentBirthID == .max ? nil : subject.parentBirthID,
+            offspringBirthID: nil,
+            position: subject.position,
+            evidenceWindows: windows,
+            detail: detail
+        ), at: 0)
+        nextEventID &+= 1
+        if lifeStoryEvents.count > 512 {
+            lifeStoryEvents.removeLast(lifeStoryEvents.count - 512)
         }
     }
 
@@ -1506,6 +1717,20 @@ final class EvolutionStore: ObservableObject {
                     genomeHash: record.genomeHash,
                     topologyHash: record.topologyHash
                 ))
+                lifeStoryEvents.insert(LifeStoryEventRecord(
+                    id: nextEventID,
+                    kind: parent == nil ? .birth : .offspringSeparation,
+                    step: UInt64(record.step),
+                    subjectBirthID: record.birthID,
+                    parentBirthID: parent,
+                    offspringBirthID: parent == nil ? nil : record.birthID,
+                    position: nil,
+                    evidenceWindows: 0,
+                    detail: parent == nil
+                        ? "A material-consuming protocell acquired a persistent component identity."
+                        : "A connected descendant physically separated; independence still requires persistent evidence."
+                ), at: 0)
+                nextEventID &+= 1
                 recordEvent(
                     generation: Int(record.generation),
                     kind: parent == nil ? .founding : .branching,
@@ -1525,6 +1750,31 @@ final class EvolutionStore: ObservableObject {
                 if let index = lineageBranches.firstIndex(where: { $0.id == record.birthID }) {
                     lineageBranches[index].deathStep = record.step
                 }
+                lifeStoryEvents.insert(contentsOf: [
+                    LifeStoryEventRecord(
+                        id: nextEventID,
+                        kind: .death,
+                        step: UInt64(record.step),
+                        subjectBirthID: record.birthID,
+                        parentBirthID: nil,
+                        offspringBirthID: nil,
+                        position: nil,
+                        evidenceWindows: 1,
+                        detail: "The component lost its final maintained cell boundary."
+                    ),
+                    LifeStoryEventRecord(
+                        id: nextEventID &+ 1,
+                        kind: .materialRelease,
+                        step: UInt64(record.step),
+                        subjectBirthID: record.birthID,
+                        parentBirthID: nil,
+                        offspringBirthID: nil,
+                        position: nil,
+                        evidenceWindows: 1,
+                        detail: "Its exact basis-material ledger returned to local chemistry with passive provenance."
+                    )
+                ], at: 0)
+                nextEventID &+= 2
                 recordEvent(
                     generation: Int(record.generation),
                     kind: .disturbance,
@@ -1605,6 +1855,9 @@ final class EvolutionStore: ObservableObject {
                     )
                 )
             }
+        }
+        if lifeStoryEvents.count > 512 {
+            lifeStoryEvents.removeLast(lifeStoryEvents.count - 512)
         }
     }
 

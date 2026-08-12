@@ -138,6 +138,36 @@ kernel void accumulateSimulationInvariants(
         }
 
         CellState cell = cells[gid];
+        bool validMaterial = all(isfinite(cell.materialBasisA)) &&
+            all(isfinite(cell.materialBasisB)) &&
+            all(isfinite(cell.materialEnergy)) &&
+            all(isfinite(cell.materialProvenanceMass)) &&
+            all(cell.materialBasisA >= float4(0.0)) &&
+            all(cell.materialBasisB >= float4(0.0)) &&
+            all(cell.materialEnergy >= float4(0.0)) &&
+            all(cell.materialProvenanceMass >= float4(0.0)) &&
+            abs(cellularMaterialMass(cell) - max(cell.physiology.y, 0.0)) <=
+                max(0.00005, max(cell.physiology.y, 0.0) * 0.002);
+        for (uint domain = 0u; domain < internalDomainCount; ++domain) {
+            float4 geometry = cellDomainGeometry(cell, domain);
+            float4 transport = cellDomainTransport(cell, domain);
+            float4 chemistry = cellDomainChemistry(cell, domain);
+            uint4 identity = cellDomainIdentity(cell, domain);
+            validMaterial = validMaterial && all(isfinite(geometry)) &&
+                all(isfinite(transport)) && all(isfinite(chemistry)) &&
+                all(geometry >= float4(-1.0001, -1.0001, 0.0, 0.0)) &&
+                geometry.z <= 1.0001 && geometry.w <= cellularMaterialMass(cell) + 0.0001 &&
+                all(transport.xyz >= float3(0.0)) &&
+                all(transport.xyz <= float3(1.0001)) && chemistry.x >= 0.0;
+            if (identity.x == 0u) {
+                validMaterial = validMaterial && geometry.w <= 0.0000001;
+            }
+        }
+        if (!validMaterial) {
+            recordInvariantFailure(
+                invariantState, invariantInvalidCellMaterial, 17u, uniforms.step
+            );
+        }
         bool validState = all(isfinite(cell.position)) && all(isfinite(cell.velocity)) &&
             all(isfinite(cell.physiology)) && all(isfinite(cell.membrane)) &&
             all(isfinite(cell.development)) && all(isfinite(cell.boundaryDynamics)) &&
@@ -808,6 +838,13 @@ kernel void divideAndReduceOrganismCells(
             child.internalMembrane.x *= childMaterialShare;
             parent.symbiontState.x *= parentMaterialShare;
             child.symbiontState.x *= childMaterialShare;
+            scaleCellMaterialLedger(parent, parentMaterialShare);
+            scaleCellMaterialLedger(child, childMaterialShare);
+            parent.materialEnergy.x = parent.physiology.x;
+            child.materialEnergy.x = child.physiology.x;
+            partitionCellDomains(
+                parent, child, parentMaterialShare, childMaterialShare, axis
+            );
             if (child.symbiontState.x > 0.000001 &&
                 child.symbiontIdentity.x != 0xffffffffu) {
                 child.symbiontIdentity.w += 1u;
@@ -1166,11 +1203,6 @@ kernel void divideAndReduceOrganismCells(
                 ownerCellNext[previous] = divisionTarget;
             }
             agent.biomass = min(agent.biomass + 0.0008, 1.0);
-            if (agent.generation > 0u) {
-                // A separated fragment becomes a regenerative descendant only
-                // after its own cells restart and complete the division cycle.
-                agent.componentFlags |= componentRegeneratedFlag;
-            }
             agents[owner] = agent;
             atomic_store_explicit(&contactWorkState[2], 1u, memory_order_relaxed);
             ProgramLineageRecord childProgram = programLineageRecords[childIdentity.programIndex];
@@ -1266,6 +1298,9 @@ kernel void divideAndReduceOrganismCells(
     float4 internalMembraneTotal = float4(0.0);
     float4 symbiontStateTotal = float4(0.0);
     float4 symbiontExchangeTotal = float4(0.0);
+    float4 materialLedgerTotal = float4(0.0);
+    uint dominantProvenanceSource = 0u;
+    float dominantProvenanceMass = 0.0;
     uint programFingerprint = 0u;
     uint maximumProgramReplicationGeneration = 0u;
     index = atomic_load_explicit(&ownerCellHeads[owner], memory_order_relaxed);
@@ -1288,6 +1323,19 @@ kernel void divideAndReduceOrganismCells(
         internalMembraneTotal += cell.internalMembrane;
         symbiontStateTotal += cell.symbiontState;
         symbiontExchangeTotal += cell.symbiontExchange;
+        materialLedgerTotal += float4(
+            cellularMaterialMass(cell), cell.materialEnergy.x,
+            dot(max(cell.materialProvenanceMass, float4(0.0)), float4(1.0)),
+            float(activeCellDomainCount(cell))
+        );
+        if (cell.materialProvenanceMass.x > dominantProvenanceMass) {
+            dominantProvenanceMass = cell.materialProvenanceMass.x;
+            dominantProvenanceSource = cell.materialProvenanceIDs.x;
+        }
+        if (cell.materialProvenanceMass.y > dominantProvenanceMass) {
+            dominantProvenanceMass = cell.materialProvenanceMass.y;
+            dominantProvenanceSource = cell.materialProvenanceIDs.y;
+        }
         molecularEnergyTotal += cell.molecularEnergy;
         molecularExpressionTotal += cell.molecularExpression;
         proteostasisTotal += cell.proteostasis;
@@ -1621,6 +1669,13 @@ kernel void divideAndReduceOrganismCells(
     aggregate.internalMembrane = internalMembraneTotal * inverseCount;
     aggregate.symbiontState = symbiontStateTotal * inverseCount;
     aggregate.symbiontExchange = symbiontExchangeTotal * inverseCount;
+    aggregate.materialLedger = float4(
+        materialLedgerTotal.x,
+        materialLedgerTotal.y,
+        materialLedgerTotal.z,
+        materialLedgerTotal.w * inverseCount
+    );
+    aggregate.materialProvenanceIDs = uint4(dominantProvenanceSource, 0u, 0u, 0u);
     aggregates[owner] = aggregate;
     agent.programReplicationGeneration = maximumProgramReplicationGeneration;
     agents[owner] = agent;

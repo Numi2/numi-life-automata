@@ -325,14 +325,25 @@ fragment float4 cellFragment(
         float3(0.02, 0.34, 1.0), float3(1.0, 0.08, 0.02), voltagePolarity
     );
 
-    float nucleusRadius = 0.20 + input.signals.x * 0.08;
-    float2 nucleusPosition = morphologyAxis * (input.development.z - 0.5) * 0.18;
-    float nucleus = (1.0 - smoothstep(
-        nucleusRadius, nucleusRadius + aa * 2.0, length(p - nucleusPosition)
-    )) * body;
+    float causalInterior = max(max(
+        causalDomainBody(p, input.domain0Geometry, input.domain0Transport),
+        causalDomainBody(p, input.domain1Geometry, input.domain1Transport)
+    ), max(
+        causalDomainBody(p, input.domain2Geometry, input.domain2Transport),
+        causalDomainBody(p, input.domain3Geometry, input.domain3Transport)
+    ));
+    float causalInteriorBoundary = max(max(
+        causalDomainBoundary(p, input.domain0Geometry, input.domain0Transport),
+        causalDomainBoundary(p, input.domain1Geometry, input.domain1Transport)
+    ), max(
+        causalDomainBoundary(p, input.domain2Geometry, input.domain2Transport),
+        causalDomainBoundary(p, input.domain3Geometry, input.domain3Transport)
+    ));
+    float2 signalOrigin = input.domain0Geometry.w > 0.0000001
+        ? input.domain0Geometry.xy : float2(0.0);
     float signalPhase = fract(input.dynamics.z + neighborSignal * 0.18);
     float signalFront = (1.0 - smoothstep(
-        0.025, 0.075, abs(length(p - nucleusPosition) - (0.20 + signalPhase * 0.58))
+        0.025, 0.075, abs(length(p - signalOrigin) - (0.20 + signalPhase * 0.58))
     )) * cytoplasm;
     float tractionMagnitude = saturate(length(input.tissueForce.xy) * 11000.0);
     float2 tractionDirection = length(input.tissueForce.xy) > 0.000001
@@ -347,9 +358,10 @@ fragment float4 cellFragment(
         (0.30 + integrity * 0.36);
     color += mix(lineage, float3(0.84, 1.0, 0.94), 0.30 + integumentTension * 0.28) *
         integumentBand * (0.68 + integumentTension * 0.74);
-    color += mix(float3(0.86, 0.06, 0.68), lineage, 0.34) * nucleus * 0.66;
+    color += mix(float3(0.05, 0.50, 0.62), lineage, 0.34) * causalInterior * 0.36;
+    color += float3(0.18, 0.86, 1.0) * causalInteriorBoundary * 0.72;
     color += float3(0.02, 0.88, 1.0) * signalFront * calciumSignal * 0.92;
-    color += float3(0.98, 0.08, 0.66) * nucleus * erkSignal * 0.46;
+    color += float3(0.98, 0.08, 0.66) * causalInterior * erkSignal * 0.34;
     color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.82;
     color += float3(0.08, 1.0, 0.62) * repairFront * 0.92;
     color += float3(0.04, 0.58, 1.0) * repairBoundary * 0.86;
@@ -395,7 +407,7 @@ fragment float4 cellFragment(
         color = float3(0.006, 0.012, 0.020) * body +
             morphogenColor * cytoplasm * (0.34 + differentiation * 0.66) +
             mix(float3(1.0, 0.70, 0.02), float3(0.08, 1.0, 0.56),
-                saturate(input.development.z)) * nucleus * 0.68 +
+                saturate(input.development.z)) * causalInteriorBoundary * 0.68 +
             float3(0.90, 0.98, 1.0) * tractionTrack * 0.32;
     } else if (uniforms.displayMode == 5u) {
         float mechanicsCalciumCause = saturate(input.signalCausality.x * 48.0);
@@ -404,7 +416,7 @@ fragment float4 cellFragment(
         float signalingCost = saturate(input.signalCausality.w * 18000.0);
         color = float3(0.010, 0.018, 0.028) * body;
         color += float3(0.02, 0.88, 1.0) * signalFront * mechanicsCalciumCause * 1.75;
-        color += float3(0.98, 0.08, 0.66) * nucleus * calciumERKCause * 1.55;
+        color += float3(0.98, 0.08, 0.66) * causalInterior * calciumERKCause * 1.55;
         color += float3(0.08, 1.0, 0.56) * tractionTrack * erkTractionCause * 1.50;
         color += float3(1.0, 0.42, 0.02) * cytoplasm * signalingCost * 0.34;
         color += float3(0.12, 0.48, 1.0) * membrane * paidRepair * 0.72;
@@ -487,8 +499,6 @@ fragment float4 molecularCellFragment(
     float structural = saturate(input.constructionFlux.w);
     float folded = saturate(input.learning.x);
     float molecularDamage = saturate(input.learning.y);
-    float compartmentalization = saturate(input.functionalActivity.x);
-    float internalMembraneMass = saturate(input.functionalActivity.y);
     float internalMembraneIntegrity = saturate(input.functionalActivity.z);
     float symbiontAbundance = saturate(input.functionalActivity.w);
     float symbiontIntegration = saturate(input.learning.z);
@@ -565,47 +575,50 @@ fragment float4 molecularCellFragment(
         0.055, 0.16, abs(fract(membraneAngle * 26.0) - 0.5)
     );
     float3 lineage = hsvToRGB(float3(input.lineageHue, 0.72, 0.52));
-    float2 expressionDirection = normalizedOr(
-        input.development.xy, float2(1.0, 0.0)
+    float domain0Body = causalDomainBody(
+        p, input.domain0Geometry, input.domain0Transport
     );
-    float2 expressionPosition = expressionDirection *
-        (input.development.z - 0.5) * 0.22;
-    float expressionDistance = length(p - expressionPosition);
-    float expressionRegion = (1.0 - smoothstep(
-        mix(0.10, 0.20, compartmentalization),
-        mix(0.18, 0.31, compartmentalization), expressionDistance
+    float domain1Body = causalDomainBody(
+        p, input.domain1Geometry, input.domain1Transport
+    );
+    float domain2Body = causalDomainBody(
+        p, input.domain2Geometry, input.domain2Transport
+    );
+    float domain3Body = causalDomainBody(
+        p, input.domain3Geometry, input.domain3Transport
+    );
+    float expressionRegion = max(max(domain0Body, domain1Body), max(domain2Body, domain3Body));
+    float internalMembraneBoundary = max(max(
+        causalDomainBoundary(p, input.domain0Geometry, input.domain0Transport),
+        causalDomainBoundary(p, input.domain1Geometry, input.domain1Transport)
+    ), max(
+        causalDomainBoundary(p, input.domain2Geometry, input.domain2Transport),
+        causalDomainBoundary(p, input.domain3Geometry, input.domain3Transport)
     )) * cytoplasm;
-    float compartmentBoundary = (1.0 - smoothstep(
-        0.018, 0.050, abs(expressionDistance -
-            mix(0.16, 0.25, compartmentalization))
-    )) * cytoplasm * compartmentalization;
-    float internalMembraneRadius = mix(0.28, 0.54, compartmentalization);
+    float compartmentBoundary = internalMembraneBoundary;
+    float2 expressionPosition = input.domain0Geometry.w > 0.0000001
+        ? input.domain0Geometry.xy : float2(0.0);
+    float expressionDistance = length(p - expressionPosition);
     float internalMembraneAA = max(fwidth(expressionDistance) * 1.35, 0.008);
-    float internalMembraneBoundary = (1.0 - smoothstep(
-        0.018, 0.018 + internalMembraneAA,
-        abs(expressionDistance - internalMembraneRadius)
-    )) * cytoplasm * internalMembraneMass * internalMembraneIntegrity;
-    // A retained molecular propagule is drawn as an inclusion only after real
-    // cross-lineage transfer and enclosure. Its orbit tightens as integration
-    // rises; no named organelle or fixed morphology is supplied by the viewer.
+    // A retained molecular propagule is visible only inside a causal enclosure.
     float symbiontPhase = flowPhase * (0.42 + symbiontEnergyExport * 0.36) +
         float(lineageSeed & 255u) * 0.021;
     float2 symbiontCenter = expressionPosition + float2(
         cos(symbiontPhase), sin(symbiontPhase * 0.83)
-    ) * mix(0.32, 0.14, symbiontIntegration);
+    ) * input.domain0Geometry.z * mix(0.48, 0.16, symbiontIntegration);
     float symbiontRadius = mix(0.055, 0.14, sqrt(symbiontAbundance));
     float symbiontDistance = length(p - symbiontCenter);
     float symbiontBody = (1.0 - smoothstep(
         symbiontRadius, symbiontRadius + internalMembraneAA,
         symbiontDistance
-    )) * cytoplasm * symbiontAbundance;
+    )) * domain0Body * symbiontAbundance;
     float symbiontBoundary = (1.0 - smoothstep(
         internalMembraneAA, internalMembraneAA * 2.8,
         abs(symbiontDistance - symbiontRadius)
-    )) * cytoplasm * symbiontAbundance;
+    )) * domain0Body * symbiontAbundance;
     float translationFocus = (1.0 - smoothstep(
         0.045, 0.085, length(
-            p - expressionPosition - expressionDirection * 0.055
+            p - expressionPosition
         )
     )) * expressionRegion;
     float cytoplasmicFlow = 0.5 + 0.5 * sin(
@@ -622,7 +635,7 @@ fragment float4 molecularCellFragment(
         internalMembraneBoundary * (0.42 + internalMembraneIntegrity * 0.58);
     color += float3(1.0, 0.54, 0.18) * translationFocus *
         (0.28 + folded * 0.52);
-    color += moleculeColor * glyph * moleculeVisibility * cytoplasm *
+    color += moleculeColor * glyph * moleculeVisibility * expressionRegion *
         (0.54 + abundance * 0.72);
     float3 symbiontColor = hsvToRGB(float3(
         fract(input.lineageHue + 0.37),
