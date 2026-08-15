@@ -1087,7 +1087,7 @@ vertex WaveCellRasterData waveCellVertex(
     output.organism = organism;
     output.collectiveSurface = collectiveSurface;
     output.construction = construction;
-    output.visibility = smoothstep(240.0, 320.0, observationZoom);
+    output.visibility = smoothstep(200.0, 280.0, observationZoom);
     return output;
 }
 
@@ -1226,7 +1226,7 @@ fragment float4 scientificContinuumFragment(
     float scientificVisibility = smoothstep(log2(44.0), log2(96.0), logZoom);
     if (scientificVisibility <= 0.001) { discard_fragment(); }
     float waveDetail = smoothstep(log2(88.0), log2(260.0), logZoom);
-    float spinorDetail = smoothstep(log2(200.0), log2(440.0), logZoom);
+    float spinorDetail = smoothstep(log2(180.0), log2(340.0), logZoom);
 
     float3 wave = waveSurfaceColor(input, quantum, coupling, uniforms);
     // At molecular scale the quantum field first appears as quiet context. Its
