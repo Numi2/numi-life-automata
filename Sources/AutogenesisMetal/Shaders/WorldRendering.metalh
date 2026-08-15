@@ -240,7 +240,7 @@ inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStren
     );
     float3 phaseColor = mix(float3(0.05, 0.13, 0.24),
         mix(phaseCycle, sqrt(max(phaseCycle, 0.0)), 0.56), 0.88);
-    float3 componentColor = mix(componentBase, phaseColor, 0.44);
+    float3 componentColor = mix(componentBase, phaseColor, 0.32);
     float radius = length(componentPosition);
     float antialiasWidth = max(fwidth(radius) * 1.25, 0.0015);
     float componentMask = 1.0 - smoothstep(0.46 - antialiasWidth, 0.46 + antialiasWidth, radius);
@@ -274,17 +274,32 @@ inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStren
         smoothstep(0.19, 0.27, quantumCell.x) *
         (1.0 - smoothstep(0.73, 0.81, quantumCell.x));
 
-    float radialShading = 0.38 + 0.62 * sqrt(saturate(1.0 - radius * radius / 0.22));
+    float2 surfaceCoordinate = componentPosition / 0.46;
+    float surfaceZ = sqrt(saturate(1.0 - dot(surfaceCoordinate, surfaceCoordinate)));
+    float3 surfaceNormal = normalize(float3(surfaceCoordinate.x, -surfaceCoordinate.y, surfaceZ));
+    const float3 quantumLight = float3(-0.421, 0.557, 0.716);
+    float wrappedDiffuse = saturate((dot(surfaceNormal, quantumLight) + 0.34) / 1.34);
+    float fresnel = pow(saturate(1.0 - surfaceZ), 3.2);
+    float3 halfVector = normalize(quantumLight + float3(0.0, 0.0, 1.0));
+    float probabilitySpecular = pow(saturate(dot(surfaceNormal, halfVector)), 34.0) *
+        componentDensity;
+    float radialShading = 0.12 + wrappedDiffuse * 0.72 + surfaceZ * 0.08;
     float3 color = float3(0.0015, 0.003, 0.009);
     color += componentColor * componentMask * componentDensity * radialShading;
-    color += componentBase * componentEdge * (0.38 + componentDensity * 0.42);
-    color += componentColor * probabilityRing * componentMask * 0.72;
-    color += float3(0.94, 0.985, 1.0) * max(phasorLine, arrowHead) * componentMask *
-        (0.54 + componentDensity * 0.72);
+    color += mix(componentBase, phaseColor, 0.26) * componentMask * fresnel *
+        (0.08 + componentDensity * 0.28);
+    color += float3(0.82, 0.94, 1.0) * componentMask * probabilitySpecular * 0.58;
+    color += componentBase * componentEdge * (0.20 + componentDensity * 0.36 +
+        currentStrength * 0.12);
+    color += mix(componentBase, phaseColor, 0.42) * probabilityRing *
+        componentMask * 0.58;
+    color += mix(float3(0.72, 0.90, 1.0), phaseColor, 0.16) *
+        max(phasorLine, arrowHead) * componentMask *
+        (0.46 + componentDensity * 0.64);
     color += mix(float3(0.12, 0.52, 0.96), float3(0.96, 0.28, 0.48), phaseAlignment) *
         coherenceBridge * localCoherence * (0.42 + currentStrength * 0.46);
-    color += float3(0.08, 0.18, 0.27) * latticeEdge * 0.72;
-    color += float3(0.18, 0.38, 0.50) * componentDivider * 0.44;
+    color += float3(0.08, 0.18, 0.27) * latticeEdge * 0.42;
+    color += float3(0.18, 0.38, 0.50) * componentDivider * 0.26;
     return color;
 }
 

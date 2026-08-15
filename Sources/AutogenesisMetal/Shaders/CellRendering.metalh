@@ -1133,7 +1133,7 @@ fragment float4 scientificContinuumFragment(
     float scientificVisibility = smoothstep(log2(44.0), log2(96.0), logZoom);
     if (scientificVisibility <= 0.001) { discard_fragment(); }
     float waveDetail = smoothstep(log2(88.0), log2(260.0), logZoom);
-    float spinorDetail = smoothstep(log2(260.0), log2(900.0), logZoom);
+    float spinorDetail = smoothstep(log2(150.0), log2(400.0), logZoom);
 
     float3 wave = waveSurfaceColor(input, quantum, coupling, uniforms);
     // At molecular scale the quantum field first appears as quiet context. Its
@@ -1143,10 +1143,11 @@ fragment float4 scientificContinuumFragment(
     float3 color = mix(molecularContext, wave, waveDetail);
     if (spinorDetail > 0.001) {
         float3 spinor = spinorSurfaceColor(input, quantum, uniforms);
-        color = mix(color, spinor, spinorDetail);
+        float spinorBlend = 1.0 - (1.0 - spinorDetail) * (1.0 - spinorDetail);
+        color = mix(color, spinor, spinorBlend);
     }
     float alpha = scientificVisibility * mix(
-        0.34, 0.84, max(waveDetail, spinorDetail)
+        0.34, 1.0, max(waveDetail, spinorDetail)
     );
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
     return float4(clamp(color, 0.0, 16.0), saturate(alpha));
