@@ -83,6 +83,42 @@ kernel void bloomPrefilter(
     destination.write(half4(half3(color * contribution), half(1.0)), gid);
 }
 
+kernel void bloomBlur(
+    texture2d<half, access::sample> source [[texture(0)]],
+    texture2d<half, access::write> destination [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= destination.get_width() || gid.y >= destination.get_height()) { return; }
+    constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 size = float2(destination.get_width(), destination.get_height());
+    float2 uv = (float2(gid) + 0.5) / size;
+    float2 texel = 1.0 / max(size, float2(1.0));
+    float2 inner = texel * 1.5;
+    float2 outer = texel * 3.5;
+
+    float3 color = float3(source.sample(linearSampler, uv).rgb) * 0.20;
+    color += (
+        float3(source.sample(linearSampler, uv + float2( inner.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-inner.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0,  inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0, -inner.y)).rgb)
+    ) * 0.10;
+    color += (
+        float3(source.sample(linearSampler, uv + float2( inner.x,  inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-inner.x,  inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2( inner.x, -inner.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-inner.x, -inner.y)).rgb)
+    ) * 0.075;
+    color += (
+        float3(source.sample(linearSampler, uv + float2( outer.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(-outer.x, 0.0)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0,  outer.y)).rgb) +
+        float3(source.sample(linearSampler, uv + float2(0.0, -outer.y)).rgb)
+    ) * 0.025;
+    color = all(isfinite(color)) ? clamp(color, 0.0, 16.0) : float3(0.0);
+    destination.write(half4(half3(color), half(1.0)), gid);
+}
+
 inline float3 mapToDisplay(
     float3 linearScene,
     float3 linearBloom,

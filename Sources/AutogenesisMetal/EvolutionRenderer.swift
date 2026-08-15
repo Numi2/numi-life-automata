@@ -1697,20 +1697,23 @@ private final class RenderTargetSet {
     let heap: any MTLHeap
     let residencySet: MTLResidencySet
     let sceneColor: MTLTexture
-    let bloomTexture: MTLTexture
+    let bloomTextureA: MTLTexture
+    let bloomTextureB: MTLTexture
 
     init(
         size: MTLSize,
         heap: any MTLHeap,
         residencySet: MTLResidencySet,
         sceneColor: MTLTexture,
-        bloomTexture: MTLTexture
+        bloomTextureA: MTLTexture,
+        bloomTextureB: MTLTexture
     ) {
         self.size = size
         self.heap = heap
         self.residencySet = residencySet
         self.sceneColor = sceneColor
-        self.bloomTexture = bloomTexture
+        self.bloomTextureA = bloomTextureA
+        self.bloomTextureB = bloomTextureB
     }
 }
 
@@ -2642,6 +2645,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private let waveCellRenderPipeline: MTLRenderPipelineState
     private let junctionRenderPipeline: MTLRenderPipelineState
     private let bloomPrefilterPipeline: MTLComputePipelineState
+    private let bloomBlurPipeline: MTLComputePipelineState
     private let compositePipeline: MTLRenderPipelineState
     private let pipelineBuildTelemetry: Metal4PipelineBuildTelemetry
     private let renderSubmissionResources: [RenderSubmissionResources]
@@ -2990,6 +2994,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             named: "finalizeRenderDrawArguments"
         )
         bloomPrefilterPipeline = try pipelineFactory.makeComputePipeline(named: "bloomPrefilter")
+        bloomBlurPipeline = try pipelineFactory.makeComputePipeline(named: "bloomBlur")
 
         scaleSurfacePipelines = try [
             pipelineFactory.makeRenderPipeline(
@@ -4245,6 +4250,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             waveCellRenderPipeline,
             junctionRenderPipeline,
             bloomPrefilterPipeline,
+            bloomBlurPipeline,
             compositePipeline
         ]
         let textures: [any MTLAllocation] = [
@@ -6087,13 +6093,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             return
         }
         let sceneColor = renderTargets.sceneColor
-        let bloomTextureA = renderTargets.bloomTexture
+        let bloomTextureA = renderTargets.bloomTextureA
+        let bloomTextureB = renderTargets.bloomTextureB
         commandBuffer.useResidencySet(renderTargets.residencySet)
         commandBuffer.retainResources([
             drawableTexture as AnyObject,
             renderTargets.heap as AnyObject,
             sceneColor as AnyObject,
-            bloomTextureA as AnyObject
+            bloomTextureA as AnyObject,
+            bloomTextureB as AnyObject
         ])
         postUniforms.sourceSize = SIMD2<Float>(Float(sceneColor.width), Float(sceneColor.height))
         let rendersTissueOverlay = observationZoom > 0.35
@@ -6252,6 +6260,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             guard encodeBloom(
                 source: sceneColor,
                 textureA: bloomTextureA,
+                textureB: bloomTextureB,
                 uniforms: &postUniforms,
                 into: commandBuffer
             ) else { return }
@@ -6270,7 +6279,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         compositeEncoder.label = "Composite HDR scene into display gamut"
         compositeEncoder.setRenderPipelineState(compositePipeline)
         compositeEncoder.setFragmentTexture(sceneColor, index: 0)
-        compositeEncoder.setFragmentTexture(bloomTextureA, index: 1)
+        compositeEncoder.setFragmentTexture(bloomTextureB, index: 1)
         compositeEncoder.setFragmentBytes(
             &postUniforms,
             length: MemoryLayout<PostProcessUniforms>.stride,
@@ -6314,6 +6323,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private func encodeBloom(
         source: MTLTexture,
         textureA: MTLTexture,
+        textureB: MTLTexture,
         uniforms: inout PostProcessUniforms,
         into commandBuffer: Metal4CommandBufferContext
     ) -> Bool {
@@ -6326,6 +6336,11 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.setTexture(textureA, index: 1)
         encoder.setBytes(&uniforms, length: MemoryLayout<PostProcessUniforms>.stride, index: 0)
         dispatchTexture(encoder, pipeline: bloomPrefilterPipeline, texture: textureA)
+        encoder.memoryBarrier(resources: [textureA])
+        encoder.setComputePipelineState(bloomBlurPipeline)
+        encoder.setTexture(textureA, index: 0)
+        encoder.setTexture(textureB, index: 1)
+        dispatchTexture(encoder, pipeline: bloomBlurPipeline, texture: textureB)
         encoder.endEncoding()
         return true
     }
@@ -6362,19 +6377,24 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
         let sceneSizeAndAlign = device.heapTextureSizeAndAlign(descriptor: sceneDescriptor)
         let bloomSizeAndAlign = device.heapTextureSizeAndAlign(descriptor: bloomDescriptor)
-        let bloomOffset = Self.alignUp(
+        let bloomAOffset = Self.alignUp(
             sceneSizeAndAlign.size,
+            alignment: bloomSizeAndAlign.align
+        )
+        let bloomBOffset = Self.alignUp(
+            bloomAOffset + bloomSizeAndAlign.size,
             alignment: bloomSizeAndAlign.align
         )
         let heapDescriptor = MTLHeapDescriptor()
         heapDescriptor.storageMode = .private
         heapDescriptor.hazardTrackingMode = .tracked
         heapDescriptor.type = .automatic
-        heapDescriptor.size = bloomOffset + bloomSizeAndAlign.size
+        heapDescriptor.size = bloomBOffset + bloomSizeAndAlign.size
 
         guard let heap = device.makeHeap(descriptor: heapDescriptor),
               let nextScene = heap.makeTexture(descriptor: sceneDescriptor),
-              let nextBloomA = heap.makeTexture(descriptor: bloomDescriptor) else {
+              let nextBloomA = heap.makeTexture(descriptor: bloomDescriptor),
+              let nextBloomB = heap.makeTexture(descriptor: bloomDescriptor) else {
             return nil
         }
         let residencyDescriptor = MTLResidencySetDescriptor()
@@ -6388,13 +6408,15 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         residencySet.requestResidency()
         heap.label = "Bounded transient render targets \(width)x\(height)"
         nextScene.label = "Linear HDR simulation scene"
-        nextBloomA.label = "Single-pass quarter-resolution bloom"
+        nextBloomA.label = "Quarter-resolution bloom prefilter"
+        nextBloomB.label = "Quarter-resolution bloom blur"
         let targets = RenderTargetSet(
             size: size,
             heap: heap,
             residencySet: residencySet,
             sceneColor: nextScene,
-            bloomTexture: nextBloomA
+            bloomTextureA: nextBloomA,
+            bloomTextureB: nextBloomB
         )
         resources.renderTargets = targets
         commandQueue.reportTransientResidentBytes(
