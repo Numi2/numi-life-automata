@@ -271,7 +271,11 @@ kernel void finalizeRenderDrawArguments(
     // Filled cell fans consume three vertices per smooth segment.  At deep
     // scale the boundary ribbon consumes six, so reserve the larger count once
     // that representation becomes visible.
-    uint cellVertexCount = observationZoom >= 240.0
+    // The wave-scale membrane ribbon begins fading in above 200x and consumes
+    // two triangles per segment. Allocate its full topology from the ramp's
+    // zero-opacity boundary so the contour cannot gain half its segments at
+    // 240x. Fan-based cell passes reject the unused second triangle.
+    uint cellVertexCount = observationZoom >= 200.0
         ? membraneRenderSegmentCount * 6u
         : (observationZoom < 64.0
             ? (membraneRenderSegmentCount / 2u) * 3u
