@@ -6184,7 +6184,9 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 indirectBufferOffset: 0
             )
 
-            if tuningProfile == .m4Optimized && Self.experimentalMeshCellRenderingEnabled {
+            let observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1)
+            if tuningProfile == .m4Optimized &&
+                Self.experimentalMeshCellRenderingEnabled && observationZoom < 64 {
                 encoder.setRenderPipelineState(cellMeshRenderPipeline)
                 encoder.setMeshBuffer(agentState, offset: 0, index: 0)
                 encoder.setMeshBuffer(agentOccupancy, offset: 0, index: 1)
