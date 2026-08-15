@@ -29,17 +29,17 @@
         "library": "7B8BDB92A94C03638E95A5C222A52D97E748958C7F0933E5D1D7958CAC700512"
       },
       {
-        "label": "7525E1325C0E6C169B79B302564D395548888E4BAC96851C67504EACB1BB1FE3",
-        "name": "molecularCellFragment",
-        "library": "7B8BDB92A94C03638E95A5C222A52D97E748958C7F0933E5D1D7958CAC700512"
-      },
-      {
         "label": "FE0C11139BD60A1FA2A4D8CBF0E1FF2687FD63CDE731AF060220F9DA00709FAA",
         "name": "deepBodyContextVertex",
         "library": "7B8BDB92A94C03638E95A5C222A52D97E748958C7F0933E5D1D7958CAC700512"
       },
       {
-        "label": "4D1A5BC73D2519BEB4776EC797D5345B331FF176F4FCF5E7B26B82AFA20A07EC",
+        "label": "7525E1325C0E6C169B79B302564D395548888E4BAC96851C67504EACB1BB1FE3",
+        "name": "molecularCellFragment",
+        "library": "7B8BDB92A94C03638E95A5C222A52D97E748958C7F0933E5D1D7958CAC700512"
+      },
+      {
+        "label": "BCA948D93C229DDF461D16AA3D1D3177AE244E71EF955BDDBEACD397F31B874D",
         "name": "cellFragment",
         "library": "7B8BDB92A94C03638E95A5C222A52D97E748958C7F0933E5D1D7958CAC700512"
       },
@@ -1106,7 +1106,7 @@
       },
       {
         "vertex_function_descriptor": "fnd:E0BF202A4EE483159F955EF753BE69E343F962C7306099630FB7EE38A53F5CA4",
-        "fragment_function_descriptor": "fnd:4D1A5BC73D2519BEB4776EC797D5345B331FF176F4FCF5E7B26B82AFA20A07EC",
+        "fragment_function_descriptor": "fnd:BCA948D93C229DDF461D16AA3D1D3177AE244E71EF955BDDBEACD397F31B874D",
         "color_attachments": [
           {
             "pixel_format": "RG11B10Float",
@@ -1182,7 +1182,7 @@
     "mesh_render_pipeline_descriptors": [
       {
         "mesh_function_descriptor": "fnd:4AECFB21B96C8D0911225F58B0660B1C915B5E186379FF603E7F25C37E19362C",
-        "fragment_function_descriptor": "fnd:4D1A5BC73D2519BEB4776EC797D5345B331FF176F4FCF5E7B26B82AFA20A07EC",
+        "fragment_function_descriptor": "fnd:BCA948D93C229DDF461D16AA3D1D3177AE244E71EF955BDDBEACD397F31B874D",
         "mesh_threadgroup_size_is_multiple_of_thread_execution_width": true,
         "max_total_threads_per_mesh_threadgroup": 64,
         "required_threads_per_mesh_threadgroup": [

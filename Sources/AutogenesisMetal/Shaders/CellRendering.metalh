@@ -280,6 +280,12 @@ fragment float4 cellFragment(
         color = applyCausalCellOptics(
             color, p, body, visibleMembrane, lineage, integrity, atp
         );
+        float tissueOpticalDepth = sqrt(saturate(1.0 - dot(p, p)));
+        float tissueLight = saturate(0.56 - dot(p, float2(0.24, 0.32)));
+        color *= mix(0.72, 1.08, tissueLight) *
+            mix(0.88, 1.04, tissueOpticalDepth);
+        color += lineage * body * pow(saturate(1.0 - tissueOpticalDepth), 3.0) *
+            (0.025 + atp * 0.035);
         float alpha = body * input.visibility * 0.95 * (1.0 - apoptosis * 0.35);
         color *= input.visibility;
         if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
