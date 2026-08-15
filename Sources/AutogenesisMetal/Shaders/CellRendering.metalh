@@ -172,9 +172,13 @@ fragment float4 cellFragment(
         if (overview.a <= 0.001) { discard_fragment(); }
         return overview;
     }
+    float cellularToTissueBlend = smoothstep(14.0, 22.0, observationZoom);
     float tissueToCellularBlend = smoothstep(52.0, 68.0, observationZoom);
+    float cellularDetailBlend = max(
+        1.0 - cellularToTissueBlend, tissueToCellularBlend
+    );
     float4 tissueScaleSample = float4(0.0);
-    if (observationZoom >= 18.0 && observationZoom < 68.0) {
+    if (observationZoom >= 14.0 && observationZoom < 68.0) {
         // Dense tissue is dominated by fragment occupancy. Preserve the causal
         // observables that distinguish cells and bodies, but omit sub-pixel
         // organelles, traveling rings, and construction ornament at this scale.
@@ -346,7 +350,7 @@ fragment float4 cellFragment(
         color *= input.visibility;
         if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
         tissueScaleSample = float4(clamp(color, 0.0, 16.0), saturate(alpha));
-        if (tissueToCellularBlend <= 0.001) { return tissueScaleSample; }
+        if (cellularDetailBlend <= 0.001) { return tissueScaleSample; }
     }
 
     float phaseAngle = input.dynamics.z * 2.0 * M_PI_F;
@@ -578,8 +582,8 @@ fragment float4 cellFragment(
     float alpha = body * input.visibility * 0.92 * (1.0 - apoptosis * 0.35);
     color *= input.visibility;
     if (tissueScaleSample.a > 0.0) {
-        color = mix(tissueScaleSample.rgb, color, tissueToCellularBlend);
-        alpha = mix(tissueScaleSample.a, alpha, tissueToCellularBlend);
+        color = mix(tissueScaleSample.rgb, color, cellularDetailBlend);
+        alpha = mix(tissueScaleSample.a, alpha, cellularDetailBlend);
     }
     float detailBlend = smoothstep(6.0, 9.0, observationZoom);
     if (detailBlend < 0.999) {
