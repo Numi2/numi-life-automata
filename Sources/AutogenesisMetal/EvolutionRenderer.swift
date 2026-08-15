@@ -42,13 +42,15 @@ extension EvolutionRenderer {
         captureSettings.cameraCenter = SIMD2<Float>(repeating: 0.500_488_281_25)
         captureSettings.cameraZoom = configuration.magnification
         captureSettings.worldScale = 1
-        captureSettings.displayMode = configuration.magnification >= 64 &&
-            configuration.magnification < 160 ? FieldDisplayMode.materials.rawValue :
-            (configuration.magnification >= 18 && configuration.magnification < 64
-                ? FieldDisplayMode.physiology.rawValue :
-                (configuration.magnification >= 6 && configuration.magnification < 18
-                    ? FieldDisplayMode.lineages.rawValue
-                    : FieldDisplayMode.chemistry.rawValue))
+        captureSettings.displayMode = configuration.displayMode ?? (
+            configuration.magnification >= 64 && configuration.magnification < 160
+                ? FieldDisplayMode.materials.rawValue
+                : (configuration.magnification >= 18 && configuration.magnification < 64
+                    ? FieldDisplayMode.physiology.rawValue
+                    : (configuration.magnification >= 6 && configuration.magnification < 18
+                        ? FieldDisplayMode.lineages.rawValue
+                        : FieldDisplayMode.chemistry.rawValue))
+        )
 
         totalSteps = 0
         quantumStep = 0

@@ -10,6 +10,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
     let seed: UInt32
     let magnification: Float
     let introducesFounder: Bool
+    let displayMode: UInt32?
 
     static func parse(_ arguments: ArraySlice<String>) throws -> Self {
         var outputPath: String?
@@ -19,6 +20,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
         var seed: UInt32 = 1
         var magnification: Float = 96
         var introducesFounder = false
+        var displayMode: UInt32?
         var index = arguments.startIndex
 
         func value(after option: String) throws -> String {
@@ -65,6 +67,21 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
                     throw AutomatedVisualCaptureError.invalidValue(argument, raw)
                 }
                 magnification = parsed
+            case "--mode":
+                let raw = try value(after: argument)
+                let parsed: FieldDisplayMode? = switch raw.lowercased() {
+                case "chemistry": .chemistry
+                case "materials": .materials
+                case "lineages": .lineages
+                case "signals": .signals
+                case "physiology": .physiology
+                case "interactions": .interactions
+                default: nil
+                }
+                guard let parsed else {
+                    throw AutomatedVisualCaptureError.invalidValue(argument, raw)
+                }
+                displayMode = parsed.rawValue
             case "--add-life":
                 introducesFounder = true
             case "-h", "--help":
@@ -75,6 +92,8 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
                   --steps N             Biological steps before capture (default: 720)
                   --seed N              Deterministic world seed (default: 1)
                   --magnification VALUE Observation magnification (default: 96)
+                  --mode NAME           chemistry, materials, lineages, signals,
+                                        physiology, or interactions (default: auto)
                   --add-life            Introduce one audited founder before simulation
                 """)
                 exit(EXIT_SUCCESS)
@@ -92,7 +111,8 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
             steps: steps,
             seed: seed,
             magnification: magnification,
-            introducesFounder: introducesFounder
+            introducesFounder: introducesFounder,
+            displayMode: displayMode
         )
     }
 }
@@ -132,9 +152,11 @@ enum AutomatedVisualCaptureCLI {
         view.isPaused = true
         let renderer = try EvolutionRenderer(view: view)
         try renderer.runHeadlessVisualCapture(configuration: configuration)
+        let modeDescription = configuration.displayMode.map { String($0) } ?? "auto"
         print(
             "numi_capture=\(configuration.outputURL.path) " +
                 "steps=\(configuration.steps) magnification=\(configuration.magnification) " +
+                "mode=\(modeDescription) " +
                 "add_life=\(configuration.introducesFounder ? 1 : 0) " +
                 "size=\(configuration.width)x\(configuration.height)"
         )
