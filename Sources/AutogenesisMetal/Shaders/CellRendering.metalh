@@ -851,15 +851,16 @@ vertex DeepBodyContextRasterData deepBodyContextVertex(
         return output;
     }
 
-    uint membraneBase = cellIndex * membraneVertexCount;
-    uint startVertex = (renderSegment / membraneRenderSubdivision) %
-        membraneVertexCount;
-    uint endVertex = ((renderSegment + 1u) / membraneRenderSubdivision) %
-        membraneVertexCount;
     float2 membraneStart = smoothMembranePosition(
         membraneVertices, cellIndex, renderSegment
     );
     float2 membraneEnd = smoothMembranePosition(
+        membraneVertices, cellIndex, renderSegment + 1u
+    );
+    float4 startMembraneState = smoothMembraneRenderState(
+        membraneVertices, cellIndex, renderSegment
+    );
+    float4 endMembraneState = smoothMembraneRenderState(
         membraneVertices, cellIndex, renderSegment + 1u
     );
     float startRadius = length(membraneStart);
@@ -901,16 +902,14 @@ vertex DeepBodyContextRasterData deepBodyContextVertex(
     output.radialCoordinate = corner == 0u ? 0.0 : 1.0;
     output.edgeExposure = corner == 0u
         ? saturate(cell.tissueGeometry.z)
-        : (membraneVertices[
-            membraneBase + (corner == 1u ? startVertex : endVertex)
-        ].mechanics.w > 0.0 ? 1.0 : 0.0);
+        : saturate(corner == 1u
+            ? startMembraneState.w : endMembraneState.w);
     output.organism =
         (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
     output.integrity = corner == 0u
         ? saturate(cell.physiology.w)
-        : saturate(membraneVertices[
-            membraneBase + (corner == 1u ? startVertex : endVertex)
-        ].mechanics.y);
+        : saturate(corner == 1u
+            ? startMembraneState.x : endMembraneState.x);
     output.collectiveSurface = saturate(
         cell.boundaryDynamics.x * cell.boundaryDynamics.y
     );

@@ -741,6 +741,48 @@ inline float2 smoothMembranePosition(
         currentPosition * (2.0 * oneMinusT * t) + curveEnd * (t * t);
 }
 
+inline float4 smoothMembraneRenderState(
+    device const MembraneVertex* membraneVertices,
+    uint cellIndex,
+    uint renderSample
+) {
+    // Rendering interpolates the same 12 causal membrane samples used by the
+    // solver; this adds no simulated degrees of freedom or observer state.
+    uint wrappedSample = renderSample % membraneRenderSegmentCount;
+    uint vertexIndex = wrappedSample / membraneRenderSubdivision;
+    uint subdivisionIndex = wrappedSample % membraneRenderSubdivision;
+    uint previous = (vertexIndex + membraneVertexCount - 1u) % membraneVertexCount;
+    uint next = (vertexIndex + 1u) % membraneVertexCount;
+    uint base = cellIndex * membraneVertexCount;
+    MembraneVertex previousVertex = membraneVertices[base + previous];
+    MembraneVertex currentVertex = membraneVertices[base + vertexIndex];
+    MembraneVertex nextVertex = membraneVertices[base + next];
+    float4 previousState = float4(
+        previousVertex.mechanics.y,
+        previousVertex.mechanics.z,
+        abs(previousVertex.mechanics.w),
+        previousVertex.mechanics.w > 0.0 ? 1.0 : 0.0
+    );
+    float4 currentState = float4(
+        currentVertex.mechanics.y,
+        currentVertex.mechanics.z,
+        abs(currentVertex.mechanics.w),
+        currentVertex.mechanics.w > 0.0 ? 1.0 : 0.0
+    );
+    float4 nextState = float4(
+        nextVertex.mechanics.y,
+        nextVertex.mechanics.z,
+        abs(nextVertex.mechanics.w),
+        nextVertex.mechanics.w > 0.0 ? 1.0 : 0.0
+    );
+    float4 curveStart = (previousState + currentState) * 0.5;
+    float4 curveEnd = (currentState + nextState) * 0.5;
+    float t = float(subdivisionIndex) / float(membraneRenderSubdivision);
+    float oneMinusT = 1.0 - t;
+    return curveStart * (oneMinusT * oneMinusT) +
+        currentState * (2.0 * oneMinusT * t) + curveEnd * (t * t);
+}
+
 inline CellRasterData makeCellRasterData(
     device const AgentState* agents,
     device const uint* agentOccupancy,
@@ -798,14 +840,13 @@ inline CellRasterData makeCellRasterData(
         : (triangleVertex == 1u ? membraneStart : membraneEnd);
     float startRadius = length(membraneStart);
     float endRadius = length(membraneEnd);
-    uint physicalEdge = (membraneSample / membraneRenderSubdivision) % membraneVertexCount;
-    MembraneVertex localVertex = membraneVertices[
-        cellIndex * membraneVertexCount + physicalEdge
-    ];
+    float4 localMembraneState = smoothMembraneRenderState(
+        membraneVertices, cellIndex, membraneSample
+    );
     // measureCellMembraneExposure encodes physical union-boundary membership in
     // the sign while retaining the strain magnitude. Only a maintained exposed
     // arc can project the supracellular surface beyond the cellular membrane.
-    float edgeExposure = localVertex.mechanics.w > 0.0 ? 1.0 : 0.0;
+    float edgeExposure = saturate(localMembraneState.w);
     float multicellularBody =
         (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
     float renderProtrusionGrowth = multicellularBody *
@@ -843,7 +884,7 @@ inline CellRasterData makeCellRasterData(
     float constructedSurface = edgeExposure *
         saturate(cell.boundaryDynamics.x) *
         (0.34 + saturate(cell.boundaryDynamics.y) * 0.66) *
-        mix(0.38, 1.0, saturate(localVertex.mechanics.y));
+        mix(0.38, 1.0, saturate(localMembraneState.x));
     float surfaceExtension = constructedSurface * (
         0.006 + saturate(cell.boundaryDynamics.x) * 0.014 +
         saturate(cell.boundaryDynamics.y) * 0.006
@@ -975,13 +1016,13 @@ inline CellRasterData makeCellRasterData(
     output.footState = float2(renderedFootPad, renderFootStance);
     output.organism = multicellularBody;
     float localIntegrity = triangleVertex == 0u
-        ? saturate(cell.physiology.w) : saturate(localVertex.mechanics.y);
+        ? saturate(cell.physiology.w) : saturate(localMembraneState.x);
     float localPressure = triangleVertex == 0u
         ? saturate(cell.tissueForce.z * 900.0)
-        : saturate(localVertex.mechanics.z * 120.0);
+        : saturate(localMembraneState.y * 120.0);
     float localStrain = triangleVertex == 0u
         ? saturate(cell.mechanics.y)
-        : saturate(abs(localVertex.mechanics.w) * 18.0);
+        : saturate(localMembraneState.z * 18.0);
     float paidRepair = saturate(
         cell.regulation.w * cell.physiology.x *
         (0.45 + saturate(cell.energetics.y * 2400.0) * 0.55)
