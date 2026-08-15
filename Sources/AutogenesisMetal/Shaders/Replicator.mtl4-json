@@ -34,7 +34,7 @@
         "library": "7B8BDB92A94C03638E95A5C222A52D97E748958C7F0933E5D1D7958CAC700512"
       },
       {
-        "label": "BCA948D93C229DDF461D16AA3D1D3177AE244E71EF955BDDBEACD397F31B874D",
+        "label": "8B8B6B289F8A3F1A420DEAA89B33BB514BABBD8260FBE9A63E27CD9642E9145F",
         "name": "cellFragment",
         "library": "7B8BDB92A94C03638E95A5C222A52D97E748958C7F0933E5D1D7958CAC700512"
       },
@@ -1106,7 +1106,7 @@
       },
       {
         "vertex_function_descriptor": "fnd:592D6B443073657769F72136644D8C6DD9FE2E4E65969FACEBF1C55CDCD09FA4",
-        "fragment_function_descriptor": "fnd:BCA948D93C229DDF461D16AA3D1D3177AE244E71EF955BDDBEACD397F31B874D",
+        "fragment_function_descriptor": "fnd:8B8B6B289F8A3F1A420DEAA89B33BB514BABBD8260FBE9A63E27CD9642E9145F",
         "color_attachments": [
           {
             "pixel_format": "RG11B10Float",
@@ -1182,7 +1182,7 @@
     "mesh_render_pipeline_descriptors": [
       {
         "mesh_function_descriptor": "fnd:3C5C62144046496C15417AC5E6A01B33DF883EC2A1B02421492B8E75FA1C4F6B",
-        "fragment_function_descriptor": "fnd:BCA948D93C229DDF461D16AA3D1D3177AE244E71EF955BDDBEACD397F31B874D",
+        "fragment_function_descriptor": "fnd:8B8B6B289F8A3F1A420DEAA89B33BB514BABBD8260FBE9A63E27CD9642E9145F",
         "mesh_threadgroup_size_is_multiple_of_thread_execution_width": true,
         "max_total_threads_per_mesh_threadgroup": 64,
         "required_threads_per_mesh_threadgroup": [

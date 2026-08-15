@@ -251,14 +251,43 @@ fragment float4 cellFragment(
         color += functionalSurfaceColor(input.construction) *
             visibleMembrane * membraneProperties * 0.34;
 
-        if (uniforms.displayMode == 4u) {
+        if (uniforms.displayMode == 1u) {
+            float materialSynthesis = saturate(
+                input.constructionFlux.x + input.constructionFlux.y +
+                input.constructionFlux.z + input.constructionFlux.w
+            );
+            float surfaceMaterial = functionalSurfaceMagnitude(input.construction);
+            color = float3(0.007, 0.012, 0.019) * body +
+                roleColor * cytoplasm * (0.14 + atp * 0.20) +
+                functionalSurfaceColor(input.construction) * visibleMembrane *
+                    (0.30 + surfaceMaterial * 0.52) +
+                float3(1.0, 0.52, 0.04) * cytoplasm * materialSynthesis * 0.24;
+        } else if (uniforms.displayMode == 2u) {
+            color = lineage * cytoplasm * (0.34 + atp * 0.38) +
+                mix(lineage, float3(0.88, 1.0, 0.96), 0.48) *
+                    visibleMembrane * (0.38 + integrity * 0.42);
+        } else if (uniforms.displayMode == 3u) {
             float morphogenA = saturate(input.signals.x);
             float morphogenB = saturate(input.signals.y);
             color = float3(0.006, 0.012, 0.020) * body +
                 float3(0.00, 0.92, 1.0) * cytoplasm * morphogenA * 0.86 +
                 float3(1.0, 0.06, 0.58) * cytoplasm * morphogenB * 0.86 +
+                float3(0.02, 0.88, 1.0) * calciumBody * 0.78 +
+                float3(0.98, 0.08, 0.66) * erkBody * 0.62 +
                 float3(0.90, 0.98, 1.0) * tractionTrack * 0.34 +
                 float3(0.08, 1.0, 0.56) * visibleMembrane * integrity * 0.52;
+        } else if (uniforms.displayMode == 4u) {
+            float biomass = saturate(input.physiology.y);
+            float cellCycle = saturate(input.physiology.z);
+            float3 metabolicColor = mix(
+                float3(0.04, 0.42, 1.0), float3(1.0, 0.54, 0.04), biomass
+            );
+            color = float3(0.006, 0.012, 0.018) * body +
+                metabolicColor * cytoplasm * (0.18 + atp * 0.62) +
+                float3(0.72, 0.16, 1.0) * cytoplasm * cellCycle * 0.18 +
+                float3(0.08, 1.0, 0.56) * visibleMembrane *
+                    (0.24 + integrity * 0.58) +
+                float3(0.12, 0.48, 1.0) * repairFront * 0.66;
         } else if (uniforms.displayMode == 5u) {
             float mechanicsCalciumCause = saturate(input.signalCausality.x * 48.0);
             float calciumERKCause = saturate(input.signalCausality.y * 56.0);
@@ -446,7 +475,23 @@ fragment float4 cellFragment(
         float3(0.06, 0.88, 0.62), float3(0.92, 0.98, 1.0), autonomySignal
     ) * exposedArc * autonomySignal * 0.44;
 
-    if (uniforms.displayMode == 4u) {
+    if (uniforms.displayMode == 1u) {
+        float materialSynthesis = saturate(
+            input.constructionFlux.x + input.constructionFlux.y +
+            input.constructionFlux.z + input.constructionFlux.w
+        );
+        float surfaceMaterial = functionalSurfaceMagnitude(input.construction);
+        color = float3(0.007, 0.012, 0.019) * body +
+            roleColor * cytoplasm * (0.12 + atp * 0.18) +
+            functionalSurfaceColor(input.construction) * visibleMembrane *
+                (0.26 + surfaceMaterial * 0.56) +
+            float3(1.0, 0.52, 0.04) * cytoplasm * materialSynthesis * 0.28;
+    } else if (uniforms.displayMode == 2u) {
+        color = lineage * cytoplasm * (0.30 + atp * 0.42) +
+            mix(lineage, float3(0.88, 1.0, 0.96), 0.44) *
+                visibleMembrane * (0.34 + integrity * 0.46) +
+            lineage * causalInteriorBoundary * 0.42;
+    } else if (uniforms.displayMode == 3u) {
         float morphogenA = saturate(input.signals.x);
         float morphogenB = saturate(input.signals.y);
         float differentiation = saturate(abs(morphogenA - morphogenB) * 1.8);
@@ -458,7 +503,21 @@ fragment float4 cellFragment(
             morphogenColor * cytoplasm * (0.34 + differentiation * 0.66) +
             mix(float3(1.0, 0.70, 0.02), float3(0.08, 1.0, 0.56),
                 saturate(input.development.z)) * causalInteriorBoundary * 0.68 +
+            float3(0.02, 0.88, 1.0) * signalFront * calciumSignal * 0.92 +
+            float3(0.98, 0.08, 0.66) * causalInterior * erkSignal * 0.42 +
             float3(0.90, 0.98, 1.0) * tractionTrack * 0.32;
+    } else if (uniforms.displayMode == 4u) {
+        float biomass = saturate(input.physiology.y);
+        float cellCycle = saturate(input.physiology.z);
+        float3 metabolicColor = mix(
+            float3(0.04, 0.42, 1.0), float3(1.0, 0.54, 0.04), biomass
+        );
+        color = float3(0.006, 0.012, 0.018) * body +
+            metabolicColor * cytoplasm * (0.16 + atp * 0.66) +
+            float3(0.72, 0.16, 1.0) * cytoplasm * cellCycle * 0.20 +
+            float3(0.08, 1.0, 0.56) * visibleMembrane *
+                (0.22 + integrity * 0.60) +
+            float3(0.12, 0.48, 1.0) * repairFront * 0.72;
     } else if (uniforms.displayMode == 5u) {
         float mechanicsCalciumCause = saturate(input.signalCausality.x * 48.0);
         float calciumERKCause = saturate(input.signalCausality.y * 56.0);
