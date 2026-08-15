@@ -9,7 +9,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
     let steps: UInt64
     let seed: UInt32
     let magnification: Float
-    let introducesFounder: Bool
+    let founderCount: Int
     let displayMode: UInt32?
 
     static func parse(_ arguments: ArraySlice<String>) throws -> Self {
@@ -19,7 +19,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
         var steps: UInt64 = 720
         var seed: UInt32 = 1
         var magnification: Float = 96
-        var introducesFounder = false
+        var founderCount = 0
         var displayMode: UInt32?
         var index = arguments.startIndex
 
@@ -82,8 +82,14 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
                     throw AutomatedVisualCaptureError.invalidValue(argument, raw)
                 }
                 displayMode = parsed.rawValue
+            case "--founders":
+                let raw = try value(after: argument)
+                guard let parsed = Int(raw), (1...64).contains(parsed) else {
+                    throw AutomatedVisualCaptureError.invalidValue(argument, raw)
+                }
+                founderCount = parsed
             case "--add-life":
-                introducesFounder = true
+                founderCount = max(founderCount, 1)
             case "-h", "--help":
                 print("""
                 Usage: NumiAutomata capture --output PATH [options]
@@ -94,7 +100,8 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
                   --magnification VALUE Observation magnification (default: 96)
                   --mode NAME           chemistry, materials, lineages, signals,
                                         physiology, or interactions (default: auto)
-                  --add-life            Introduce one audited founder before simulation
+                  --founders N          Introduce 1...64 audited founders for visual stress
+                  --add-life            Shorthand for at least one audited founder
                 """)
                 exit(EXIT_SUCCESS)
             default:
@@ -111,7 +118,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
             steps: steps,
             seed: seed,
             magnification: magnification,
-            introducesFounder: introducesFounder,
+            founderCount: founderCount,
             displayMode: displayMode
         )
     }
@@ -157,7 +164,7 @@ enum AutomatedVisualCaptureCLI {
             "numi_capture=\(configuration.outputURL.path) " +
                 "steps=\(configuration.steps) magnification=\(configuration.magnification) " +
                 "mode=\(modeDescription) " +
-                "add_life=\(configuration.introducesFounder ? 1 : 0) " +
+                "founders=\(configuration.founderCount) " +
                 "size=\(configuration.width)x\(configuration.height)"
         )
     }

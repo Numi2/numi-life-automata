@@ -71,18 +71,32 @@ extension EvolutionRenderer {
         appliedResetToken = captureSettings.resetToken
         appliedExpansionToken = captureSettings.expansionToken
 
-        if configuration.introducesFounder {
+        if configuration.founderCount > 0 {
             guard let introduction = commandQueue.makeCommandBuffer() else {
                 throw EvolutionRendererError.resourceAllocation(
                     "visual capture founder introduction"
                 )
             }
             introduction.label = "Visual capture audited founder introduction"
-            encodeFounderInjection(
-                into: introduction,
-                settings: captureSettings,
-                position: SIMD2<Float>(repeating: 0.5)
-            )
+            for founderIndex in 0..<configuration.founderCount {
+                let position: SIMD2<Float>
+                if founderIndex == 0 {
+                    position = SIMD2<Float>(repeating: 0.5)
+                } else {
+                    let index = Float(founderIndex)
+                    let angle = index * 2.399_963_1
+                    let radius = 0.003_35 * sqrt(index)
+                    position = SIMD2<Float>(
+                        0.5 + cos(angle) * radius,
+                        0.5 + sin(angle) * radius
+                    )
+                }
+                encodeFounderInjection(
+                    into: introduction,
+                    settings: captureSettings,
+                    position: position
+                )
+            }
             introduction.commit()
             introduction.waitUntilCompleted()
             if let error = introduction.error { throw error }
