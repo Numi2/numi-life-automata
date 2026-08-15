@@ -143,9 +143,17 @@ inline float3 mapToDisplay(
         (hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e)
     );
     float luminance = dot(mapped, float3(0.2126, 0.7152, 0.0722));
-    float saturation = uniforms.observationZoom >= 420.0 ? 1.02 :
-        (uniforms.observationZoom >= 160.0 ? 1.18 :
-            (uniforms.observationZoom >= 64.0 ? 1.15 : 1.08));
+    float saturation = mix(
+        1.08, 1.15, smoothstep(56.0, 72.0, uniforms.observationZoom)
+    );
+    saturation = mix(
+        saturation, 1.18,
+        smoothstep(148.0, 172.0, uniforms.observationZoom)
+    );
+    saturation = mix(
+        saturation, 1.02,
+        smoothstep(384.0, 456.0, uniforms.observationZoom)
+    );
     mapped = mix(float3(luminance), mapped, saturation);
 
     float2 screenUV = (float2(pixel) + 0.5) /
