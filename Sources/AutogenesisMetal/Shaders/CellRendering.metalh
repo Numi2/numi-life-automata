@@ -504,7 +504,7 @@ fragment float4 molecularCellFragment(
 
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
     float molecularVisibility = smoothstep(44.0, 72.0, observationZoom) *
-        (1.0 - smoothstep(150.0, 240.0, observationZoom));
+        (1.0 - smoothstep(180.0, 240.0, observationZoom));
     if (input.visibility * molecularVisibility <= 0.001) { discard_fragment(); }
 
     float integrity = saturate(input.localMembrane.x);
@@ -767,15 +767,15 @@ vertex DeepBodyContextRasterData deepBodyContextVertex(
 ) {
     DeepBodyContextRasterData output = {};
     output.position = float4(3.0, 3.0, 0.0, 1.0);
-    if (instanceID >= maxCellCount || vertexID >= membraneVertexCount * 6u) {
+    if (instanceID >= maxCellCount ||
+        vertexID >= membraneRenderSegmentCount * 3u) {
         return output;
     }
-    uint corner = vertexID % 6u;
-    if (corner >= 3u) { return output; }
-
-    uint edge = vertexID / 6u;
+    uint corner = vertexID % 3u;
+    uint renderSegment = vertexID / 3u;
     uint cellIndex = visibleCellIndices[instanceID];
-    if (edge >= membraneVertexCount || cellIndex >= maxCellCount) {
+    if (renderSegment >= membraneRenderSegmentCount ||
+        cellIndex >= maxCellCount) {
         return output;
     }
     uint owner = cellIdentities[cellIndex].owner;
@@ -785,9 +785,16 @@ vertex DeepBodyContextRasterData deepBodyContextVertex(
     }
 
     uint membraneBase = cellIndex * membraneVertexCount;
-    uint nextEdge = (edge + 1u) % membraneVertexCount;
-    float2 membraneStart = membraneVertices[membraneBase + edge].position;
-    float2 membraneEnd = membraneVertices[membraneBase + nextEdge].position;
+    uint startVertex = (renderSegment / membraneRenderSubdivision) %
+        membraneVertexCount;
+    uint endVertex = ((renderSegment + 1u) / membraneRenderSubdivision) %
+        membraneVertexCount;
+    float2 membraneStart = smoothMembranePosition(
+        membraneVertices, cellIndex, renderSegment
+    );
+    float2 membraneEnd = smoothMembranePosition(
+        membraneVertices, cellIndex, renderSegment + 1u
+    );
     float startRadius = length(membraneStart);
     float endRadius = length(membraneEnd);
     float edgeLength = length(membraneEnd - membraneStart);
@@ -828,14 +835,14 @@ vertex DeepBodyContextRasterData deepBodyContextVertex(
     output.edgeExposure = corner == 0u
         ? saturate(cell.tissueGeometry.z)
         : (membraneVertices[
-            membraneBase + (corner == 1u ? edge : nextEdge)
+            membraneBase + (corner == 1u ? startVertex : endVertex)
         ].mechanics.w > 0.0 ? 1.0 : 0.0);
     output.organism =
         (agent.componentFlags & componentMulticellularFlag) != 0u ? 1.0 : 0.0;
     output.integrity = corner == 0u
         ? saturate(cell.physiology.w)
         : saturate(membraneVertices[
-            membraneBase + (corner == 1u ? edge : nextEdge)
+            membraneBase + (corner == 1u ? startVertex : endVertex)
         ].mechanics.y);
     output.collectiveSurface = saturate(
         cell.boundaryDynamics.x * cell.boundaryDynamics.y
@@ -844,7 +851,7 @@ vertex DeepBodyContextRasterData deepBodyContextVertex(
         saturate(cell.membraneProperties)
     );
     output.lineageHue = agent.dynamicExpression.w;
-    output.visibility = smoothstep(112.0, 176.0, observationZoom) *
+    output.visibility = smoothstep(160.0, 240.0, observationZoom) *
         trackingVisibility;
     return output;
 }
@@ -881,8 +888,8 @@ fragment float4 deepBodyContextFragment(
     color += float3(0.12, 0.82, 1.0) * boundaryContext *
         functionalSurface * 0.14;
     float alpha = body * input.visibility * (
-        mix(0.060, 0.155, organism) +
-        boundaryContext * organism * (0.040 + collectiveSurface * 0.070)
+        mix(0.022, 0.085, organism) +
+        boundaryContext * organism * (0.025 + collectiveSurface * 0.045)
     );
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
     return float4(clamp(color, 0.0, 1.0), saturate(alpha));
@@ -914,12 +921,13 @@ vertex WaveCellRasterData waveCellVertex(
 ) {
     WaveCellRasterData output = {};
     output.position = float4(3.0, 3.0, 0.0, 1.0);
-    if (instanceID >= maxCellCount || vertexID >= membraneVertexCount * 6u) {
+    if (instanceID >= maxCellCount ||
+        vertexID >= membraneRenderSegmentCount * 6u) {
         return output;
     }
 
-    uint edge = vertexID / 6u;
-    if (edge >= membraneVertexCount) { return output; }
+    uint renderSegment = vertexID / 6u;
+    if (renderSegment >= membraneRenderSegmentCount) { return output; }
     uint cellIndex = visibleCellIndices[instanceID];
     if (cellIndex >= maxCellCount) { return output; }
     uint owner = cellIdentities[cellIndex].owner;
@@ -927,14 +935,20 @@ vertex WaveCellRasterData waveCellVertex(
         cellOccupancy[cellIndex] != cellOccupancyAlive) { return output; }
 
     uint membraneBase = cellIndex * membraneVertexCount;
+    uint edge = (renderSegment / membraneRenderSubdivision) %
+        membraneVertexCount;
     uint nextEdge = (edge + 1u) % membraneVertexCount;
     // At wave scale, show the physical boundary of the individual rather than
     // every membrane hidden inside its component.
     if (membraneVertices[membraneBase + edge].mechanics.w <= 0.0) {
         return output;
     }
-    float2 membraneStart = membraneVertices[membraneBase + edge].position;
-    float2 membraneEnd = membraneVertices[membraneBase + nextEdge].position;
+    float2 membraneStart = smoothMembranePosition(
+        membraneVertices, cellIndex, renderSegment
+    );
+    float2 membraneEnd = smoothMembranePosition(
+        membraneVertices, cellIndex, renderSegment + 1u
+    );
     CellState cell = cells[cellIndex];
     AgentState agent = agents[owner];
     float2 center = cellWorldPosition(agent, cell.position, uniforms);
@@ -990,9 +1004,16 @@ vertex WaveCellRasterData waveCellVertex(
     );
     output.across = side;
     output.lineageHue = agent.dynamicExpression.w;
-    output.integrity = saturate(membraneVertices[
-        membraneBase + (usesEnd ? nextEdge : edge)
-    ].mechanics.y);
+    float startT = float(renderSegment % membraneRenderSubdivision) /
+        float(membraneRenderSubdivision);
+    float endT = float((renderSegment % membraneRenderSubdivision) + 1u) /
+        float(membraneRenderSubdivision);
+    float edgeIntegrity = mix(
+        membraneVertices[membraneBase + edge].mechanics.y,
+        membraneVertices[membraneBase + nextEdge].mechanics.y,
+        usesEnd ? endT : startT
+    );
+    output.integrity = saturate(edgeIntegrity);
     output.activity = saturate(
         cell.physiology.x * 0.55 + cell.signaling.x * 0.24 +
         cell.signaling.y * 0.21
@@ -1000,7 +1021,7 @@ vertex WaveCellRasterData waveCellVertex(
     output.organism = organism;
     output.collectiveSurface = collectiveSurface;
     output.construction = construction;
-    output.visibility = smoothstep(112.0, 176.0, observationZoom);
+    output.visibility = smoothstep(240.0, 320.0, observationZoom);
     return output;
 }
 
@@ -1139,7 +1160,7 @@ fragment float4 scientificContinuumFragment(
     float scientificVisibility = smoothstep(log2(44.0), log2(96.0), logZoom);
     if (scientificVisibility <= 0.001) { discard_fragment(); }
     float waveDetail = smoothstep(log2(88.0), log2(260.0), logZoom);
-    float spinorDetail = smoothstep(log2(260.0), log2(520.0), logZoom);
+    float spinorDetail = smoothstep(log2(200.0), log2(440.0), logZoom);
 
     float3 wave = waveSurfaceColor(input, quantum, coupling, uniforms);
     // At molecular scale the quantum field first appears as quiet context. Its

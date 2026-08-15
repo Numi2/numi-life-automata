@@ -268,11 +268,11 @@ kernel void finalizeRenderDrawArguments(
         cellJunctionCapacity
     );
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    // The filled cell and molecular fans remain visible until 240x and require
-    // all 36 subdivided membrane triangles.  The deep-context and wave passes
-    // can safely consume the shorter 12-edge draw after those fills disappear.
+    // Filled cell fans consume three vertices per smooth segment.  At deep
+    // scale the boundary ribbon consumes six, so reserve the larger count once
+    // that representation becomes visible.
     uint cellVertexCount = observationZoom >= 240.0
-        ? membraneVertexCount * 6u
+        ? membraneRenderSegmentCount * 6u
         : (observationZoom < 64.0
             ? (membraneRenderSegmentCount / 2u) * 3u
             : membraneRenderSegmentCount * 3u);

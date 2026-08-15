@@ -50,7 +50,9 @@ constant uint mixedComponentOwner = maxAgentCount + 1u;
 constant float referenceTissueCellCount = 24.0;
 constant uint regulatoryStateChannelCount = 12u;
 constant uint membraneVertexCount = 12u;
-constant uint membraneRenderSubdivision = 3u;
+// Five quadratic samples per physical membrane edge produce 60 contour
+// segments while keeping the mesh fan (center + rim) inside one 64-lane group.
+constant uint membraneRenderSubdivision = 5u;
 constant uint membraneRenderSegmentCount = membraneVertexCount * membraneRenderSubdivision;
 // A division can publish a birth, mutation, and recombination record, while a
 // topology pass can publish one component record per cell.  Keeping four slots

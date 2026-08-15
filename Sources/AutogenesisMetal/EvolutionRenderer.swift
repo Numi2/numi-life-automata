@@ -2517,7 +2517,7 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private static let transcriptSlotsPerCell = 8
     private static let proteinSlotsPerCell = 16
     private static let membraneVertexCount = 12
-    private static let membraneRenderSubdivision = 3
+    private static let membraneRenderSubdivision = 5
     private static let cellSpatialHashBucketCount = 16_384
     private static let membraneContactPairCapacity =
         maxCellCount * membraneVertexCount
