@@ -777,6 +777,44 @@ inline float4 smoothMembraneRenderState(
         currentState * (2.0 * oneMinusT * t) + curveEnd * (t * t);
 }
 
+inline float2 detailMorphedMembranePosition(
+    device const MembraneVertex* membraneVertices,
+    uint cellIndex,
+    uint renderSample,
+    float detailBlend
+) {
+    float2 detailed = smoothMembranePosition(
+        membraneVertices, cellIndex, renderSample
+    );
+    if ((renderSample & 1u) == 0u || detailBlend >= 1.0) {
+        return detailed;
+    }
+    float2 coarseEdgeMidpoint = 0.5 * (
+        smoothMembranePosition(membraneVertices, cellIndex, renderSample - 1u) +
+        smoothMembranePosition(membraneVertices, cellIndex, renderSample + 1u)
+    );
+    return mix(coarseEdgeMidpoint, detailed, detailBlend);
+}
+
+inline float4 detailMorphedMembraneState(
+    device const MembraneVertex* membraneVertices,
+    uint cellIndex,
+    uint renderSample,
+    float detailBlend
+) {
+    float4 detailed = smoothMembraneRenderState(
+        membraneVertices, cellIndex, renderSample
+    );
+    if ((renderSample & 1u) == 0u || detailBlend >= 1.0) {
+        return detailed;
+    }
+    float4 coarseEdgeMidpoint = 0.5 * (
+        smoothMembraneRenderState(membraneVertices, cellIndex, renderSample - 1u) +
+        smoothMembraneRenderState(membraneVertices, cellIndex, renderSample + 1u)
+    );
+    return mix(coarseEdgeMidpoint, detailed, detailBlend);
+}
+
 inline CellRasterData makeCellRasterData(
     device const AgentState* agents,
     device const uint* agentOccupancy,
@@ -821,11 +859,12 @@ inline CellRasterData makeCellRasterData(
     uint triangleVertex = vertexID % 3u;
     uint membraneStartSample = triangle * safeRasterStep;
     uint membraneEndSample = membraneStartSample + safeRasterStep;
-    float2 membraneStart = smoothMembranePosition(
-        membraneVertices, cellIndex, membraneStartSample
+    float membraneDetailBlend = smoothstep(52.0, 68.0, observationZoom);
+    float2 membraneStart = detailMorphedMembranePosition(
+        membraneVertices, cellIndex, membraneStartSample, membraneDetailBlend
     );
-    float2 membraneEnd = smoothMembranePosition(
-        membraneVertices, cellIndex, membraneEndSample
+    float2 membraneEnd = detailMorphedMembranePosition(
+        membraneVertices, cellIndex, membraneEndSample, membraneDetailBlend
     );
     uint membraneSample = triangleVertex == 2u
         ? membraneEndSample : membraneStartSample;
@@ -834,8 +873,8 @@ inline CellRasterData makeCellRasterData(
         : (triangleVertex == 1u ? membraneStart : membraneEnd);
     float startRadius = length(membraneStart);
     float endRadius = length(membraneEnd);
-    float4 localMembraneState = smoothMembraneRenderState(
-        membraneVertices, cellIndex, membraneSample
+    float4 localMembraneState = detailMorphedMembraneState(
+        membraneVertices, cellIndex, membraneSample, membraneDetailBlend
     );
     // measureCellMembraneExposure encodes physical union-boundary membership in
     // the sign while retaining the strain magnitude. Only a maintained exposed

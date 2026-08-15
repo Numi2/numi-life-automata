@@ -277,7 +277,7 @@ kernel void finalizeRenderDrawArguments(
     // 240x. Fan-based cell passes reject the unused second triangle.
     uint cellVertexCount = observationZoom >= 200.0
         ? membraneRenderSegmentCount * 6u
-        : (observationZoom < 64.0
+        : (observationZoom < 52.0
             ? (membraneRenderSegmentCount / 2u) * 3u
             : membraneRenderSegmentCount * 3u);
     atomic_store_explicit(&cellDrawArguments[0], cellVertexCount, memory_order_relaxed);

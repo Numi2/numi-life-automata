@@ -14,7 +14,7 @@ vertex CellRasterData cellVertex(
     uint instanceID [[instance_id]]
 ) {
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    uint rasterStep = observationZoom < 64.0 ? 2u : 1u;
+    uint rasterStep = observationZoom < 52.0 ? 2u : 1u;
     return makeCellRasterData(
         agents, agentOccupancy, cells, cellOccupancy, membraneVertices, uniforms,
         visibleCellIndices, cellIdentities, programLineageRecords, programInteractions,
