@@ -95,14 +95,31 @@ inline float3 mapToDisplay(
     linearBloom = clamp(linearBloom, 0.0, 16.0);
     float3 hdr = linearScene * uniforms.exposure + linearBloom * uniforms.bloomIntensity;
 
-    float peak = max(max(hdr.r, hdr.g), hdr.b);
-    float peakScale = (1.0 - exp(-peak)) / max(peak, 0.0001);
-    float3 mapped = hdr * peakScale;
+    // ACES-inspired display rendering preserves dim field structure while
+    // rolling emissive membranes and signals into a soft highlight shoulder.
+    // The simulation remains linear HDR until this final presentation pass.
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    float3 mapped = saturate(
+        (hdr * (a * hdr + b)) / (hdr * (c * hdr + d) + e)
+    );
     float luminance = dot(mapped, float3(0.2126, 0.7152, 0.0722));
     float saturation = uniforms.observationZoom >= 420.0 ? 1.02 :
         (uniforms.observationZoom >= 160.0 ? 1.18 :
             (uniforms.observationZoom >= 64.0 ? 1.15 : 1.08));
     mapped = mix(float3(luminance), mapped, saturation);
+
+    float2 screenUV = (float2(pixel) + 0.5) /
+        max(uniforms.sourceSize, float2(1.0));
+    float2 vignetteCoordinate = screenUV * (1.0 - screenUV);
+    float vignette = pow(saturate(
+        16.0 * vignetteCoordinate.x * vignetteCoordinate.y
+    ), 0.10);
+    mapped *= mix(0.92, 1.0, vignette);
+    mapped += float3(0.002, 0.004, 0.008) * (1.0 - luminance);
 
     float dither = random01(pixel.x * 1597334677u ^ pixel.y * 3812015801u ^
         uniforms.frameIndex * 2246822519u) - 0.5;

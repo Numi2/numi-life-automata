@@ -69,6 +69,23 @@ extension EvolutionRenderer {
         appliedResetToken = captureSettings.resetToken
         appliedExpansionToken = captureSettings.expansionToken
 
+        if configuration.introducesFounder {
+            guard let introduction = commandQueue.makeCommandBuffer() else {
+                throw EvolutionRendererError.resourceAllocation(
+                    "visual capture founder introduction"
+                )
+            }
+            introduction.label = "Visual capture audited founder introduction"
+            encodeFounderInjection(
+                into: introduction,
+                settings: captureSettings,
+                position: SIMD2<Float>(repeating: 0.5)
+            )
+            introduction.commit()
+            introduction.waitUntilCompleted()
+            if let error = introduction.error { throw error }
+        }
+
         while totalSteps < configuration.steps {
             guard let commandBuffer = commandQueue.makeCommandBuffer() else {
                 throw EvolutionRendererError.resourceAllocation(

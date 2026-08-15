@@ -9,6 +9,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
     let steps: UInt64
     let seed: UInt32
     let magnification: Float
+    let introducesFounder: Bool
 
     static func parse(_ arguments: ArraySlice<String>) throws -> Self {
         var outputPath: String?
@@ -17,6 +18,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
         var steps: UInt64 = 720
         var seed: UInt32 = 1
         var magnification: Float = 96
+        var introducesFounder = false
         var index = arguments.startIndex
 
         func value(after option: String) throws -> String {
@@ -63,6 +65,8 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
                     throw AutomatedVisualCaptureError.invalidValue(argument, raw)
                 }
                 magnification = parsed
+            case "--add-life":
+                introducesFounder = true
             case "-h", "--help":
                 print("""
                 Usage: NumiAutomata capture --output PATH [options]
@@ -71,6 +75,7 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
                   --steps N             Biological steps before capture (default: 720)
                   --seed N              Deterministic world seed (default: 1)
                   --magnification VALUE Observation magnification (default: 96)
+                  --add-life            Introduce one audited founder before simulation
                 """)
                 exit(EXIT_SUCCESS)
             default:
@@ -86,7 +91,8 @@ struct AutomatedVisualCaptureConfiguration: Sendable {
             height: height,
             steps: steps,
             seed: seed,
-            magnification: magnification
+            magnification: magnification,
+            introducesFounder: introducesFounder
         )
     }
 }
@@ -129,6 +135,7 @@ enum AutomatedVisualCaptureCLI {
         print(
             "numi_capture=\(configuration.outputURL.path) " +
                 "steps=\(configuration.steps) magnification=\(configuration.magnification) " +
+                "add_life=\(configuration.introducesFounder ? 1 : 0) " +
                 "size=\(configuration.width)x\(configuration.height)"
         )
     }

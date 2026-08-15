@@ -89,6 +89,47 @@ inline float3 functionalSurfaceColor(float4 construction) {
     ) / total;
 }
 
+inline float3 applyCausalCellOptics(
+    float3 color,
+    float2 localPosition,
+    float body,
+    float membrane,
+    float3 lineageColor,
+    float integrity,
+    float activity
+) {
+    float radialSquared = saturate(dot(localPosition, localPosition));
+    float opticalDepth = sqrt(max(1.0 - radialSquared, 0.0));
+    float3 normal = normalize(float3(
+        localPosition.x * 0.82,
+        localPosition.y * 0.82,
+        max(opticalDepth, 0.025)
+    ));
+    float3 lightDirection = normalize(float3(-0.44, -0.58, 0.68));
+    float3 halfDirection = normalize(lightDirection + float3(0.0, 0.0, 1.0));
+    float wrappedDiffuse = saturate(
+        (dot(normal, lightDirection) + 0.42) / 1.42
+    );
+    float volume = mix(0.76, 1.08, pow(opticalDepth, 0.62));
+    color *= mix(0.58, 1.0, wrappedDiffuse) * volume;
+
+    float fresnel = pow(saturate(1.0 - opticalDepth), 2.6);
+    float forwardScatter = pow(
+        saturate(dot(-normal, lightDirection)), 2.0
+    ) * fresnel;
+    float specular = pow(
+        saturate(dot(normal, halfDirection)),
+        mix(42.0, 76.0, integrity)
+    );
+    color += lineageColor * body * fresnel *
+        (0.035 + activity * 0.075);
+    color += mix(lineageColor, float3(1.0, 0.48, 0.20), 0.34) *
+        body * forwardScatter * (0.08 + activity * 0.06);
+    color += float3(0.72, 0.94, 1.0) * membrane * specular *
+        (0.16 + integrity * 0.34);
+    return color;
+}
+
 fragment float4 cellFragment(
     CellRasterData input [[stage_in]],
     constant SimulationUniforms& uniforms [[buffer(0)]]
@@ -236,6 +277,9 @@ fragment float4 cellFragment(
         color += float3(0.76, 0.12, 1.0) * apoptosis * visibleMembrane * 0.66;
         color += float3(0.10, 0.92, 1.0) * input.tracked *
             max(visibleMembrane, integumentBand * 0.72) * 0.24;
+        color = applyCausalCellOptics(
+            color, p, body, visibleMembrane, lineage, integrity, atp
+        );
         float alpha = body * input.visibility * 0.95 * (1.0 - apoptosis * 0.35);
         color *= input.visibility;
         if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
@@ -427,6 +471,9 @@ fragment float4 cellFragment(
     color += float3(0.76, 0.12, 1.0) * apoptosis * membrane * 0.66;
     color += float3(0.10, 0.92, 1.0) * input.tracked *
         max(visibleMembrane, integumentBand * 0.72) * 0.24;
+    color = applyCausalCellOptics(
+        color, p, body, visibleMembrane, lineage, integrity, atp
+    );
     float alpha = body * input.visibility * 0.92 * (1.0 - apoptosis * 0.35);
     color *= input.visibility;
     float detailBlend = smoothstep(6.0, 9.0, observationZoom);
@@ -624,6 +671,11 @@ fragment float4 molecularCellFragment(
     float cytoplasmicFlow = 0.5 + 0.5 * sin(
         p.x * 8.0 - p.y * 5.0 + flowPhase
     );
+    float particulate = visualNoise(
+        p * 11.0 + float2(float(lineageSeed & 127u) * 0.031, flowPhase * 0.08)
+    );
+    float particulateHighlight = smoothstep(0.72, 0.94, particulate) *
+        cytoplasm * (0.18 + folded * 0.42);
     float3 color = mix(float3(0.008, 0.075, 0.092), lineage, 0.22) *
         cytoplasm * (0.42 + atp * 0.24);
     color += mix(float3(0.025, 0.28, 0.30), lineage, 0.34) *
@@ -647,13 +699,26 @@ fragment float4 molecularCellFragment(
     color += mix(symbiontColor, float3(0.94, 1.0, 0.76), 0.36) *
         symbiontBoundary * (0.52 + symbiontIntegration * 0.48);
     color += mix(float3(0.04, 0.74, 1.0), float3(0.04, 1.0, 0.58), integrity) *
-        visibleMembrane * (0.62 + lipidHead * 0.22);
+        visibleMembrane * (0.40 + lipidHead * 0.12);
+    float bilayerAA = max(fwidth(radius) * 1.45, 0.005);
+    float outerBilayer = 1.0 - smoothstep(
+        bilayerAA, bilayerAA * 3.0, abs(radius - (1.0 - bilayerAA * 1.5))
+    );
+    float innerBilayerRadius = 1.0 - membraneThickness * 0.78;
+    float innerBilayer = 1.0 - smoothstep(
+        bilayerAA, bilayerAA * 3.2, abs(radius - innerBilayerRadius)
+    );
+    color += mix(float3(0.08, 0.66, 0.90), float3(0.36, 1.0, 0.72), integrity) *
+        (outerBilayer * (0.48 + lipidHead * 0.16) + innerBilayer * 0.30) *
+        membraneContinuity;
     color += mix(lineage, float3(0.88, 1.0, 0.96), 0.42) * integumentBand *
         (0.58 + integumentTension * 0.72);
     color += float3(0.08, 1.0, 0.62) * membrane * paidRepair *
         saturate(1.0 - integrity) * 0.84;
     color += float3(1.0, 0.055, 0.018) * membrane * localFailure * 0.72;
     color += float3(1.0, 0.16, 0.04) * cytoplasm * molecularDamage * 0.18;
+    color += mix(float3(0.16, 0.66, 0.82), lineage, 0.42) *
+        particulateHighlight * 0.12;
     float molecularSurfaceMaterial =
         functionalSurfaceMagnitude(input.construction);
     color += functionalSurfaceColor(input.construction) *
@@ -661,6 +726,9 @@ fragment float4 molecularCellFragment(
     color = mix(color, float3(0.012, 0.085, 0.070), footPad * 0.58);
     color += float3(0.08, 1.0, 0.56) * footSole *
         (0.24 + footState.y * 0.54);
+    color = applyCausalCellOptics(
+        color, p, body, visibleMembrane, lineage, integrity, atp
+    );
     float alpha = body * input.visibility * molecularVisibility * 0.90;
     color *= input.visibility * molecularVisibility;
     if (!all(isfinite(color)) || !isfinite(alpha)) { discard_fragment(); }
@@ -1183,11 +1251,14 @@ fragment float4 worldSurfaceFragment(
     float3 color;
     if (uniforms.displayMode == 1) {
         color = float3(0.002, 0.006, 0.012);
-        color += float3(0.00, 0.42, 0.90) * feedstockA;
-        color += float3(0.66, 0.04, 0.78) * feedstockB;
-        color += float3(1.00, 0.45, 0.015) * recycledMatter;
-        color += float3(1.00, 0.04, 0.015) * reactiveMolecule * 0.72;
-        color += frequencyColor * frequencyBand * 0.34;
+        // Material channels can be close to capacity over large regions. Keep
+        // them diagnostic without driving the entire HDR scene into the
+        // display shoulder; edges and local mixtures retain the visual range.
+        color += float3(0.00, 0.42, 0.90) * feedstockA * 0.34;
+        color += float3(0.66, 0.04, 0.78) * feedstockB * 0.30;
+        color += float3(1.00, 0.45, 0.015) * recycledMatter * 0.32;
+        color += float3(1.00, 0.04, 0.015) * reactiveMolecule * 0.28;
+        color += frequencyColor * frequencyBand * 0.18;
     } else if (uniforms.displayMode == 2) {
         float fieldEdge = smoothstep(0.015, 0.16, abs(feedstockA - feedstockB));
         float substrateTotal = saturate(sqrt(feedstockA + feedstockB) * 0.72);
