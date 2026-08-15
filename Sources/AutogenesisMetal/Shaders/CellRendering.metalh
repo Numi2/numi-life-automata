@@ -1428,12 +1428,18 @@ fragment float4 worldSurfaceFragment(
             (1.0 - rock) * 0.14;
     }
 
-    float overviewCalm = 1.0 - smoothstep(2.0, 6.0,
+    float overviewCalm = 1.0 - smoothstep(3.0, 18.0,
         uniforms.cameraZoom / max(uniforms.worldScale, 1.0));
     float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
-    float3 quietWorld = mix(float3(0.0025, 0.005, 0.010), color, 0.58) +
-        float3(luminance) * 0.06;
-    color = mix(color, quietWorld, overviewCalm * 0.52);
+    float overviewCompression = 1.0 / (1.0 + luminance * 3.2);
+    float compressedLuminance = luminance * overviewCompression;
+    float3 quietWorld = mix(
+        float3(0.0025, 0.005, 0.010), color * overviewCompression, 0.54
+    ) + float3(compressedLuminance) * 0.04;
+    color = mix(color, quietWorld, overviewCalm * 0.66);
+    float overviewDiagnosticGain = uniforms.displayMode == 1u
+        ? 0.28 : (uniforms.displayMode == 3u ? 0.52 : 1.0);
+    color *= mix(1.0, overviewDiagnosticGain, overviewCalm);
 
     return finiteHDRColor(color, 1.08);
 }
