@@ -1294,6 +1294,32 @@ final class Metal4BlitCommandEncoderAdapter {
         hasUnbarrieredCommands = true
     }
 
+    func copy(
+        from source: MTLTexture,
+        sourceSlice: Int,
+        sourceLevel: Int,
+        sourceOrigin: MTLOrigin,
+        sourceSize: MTLSize,
+        to destination: MTLBuffer,
+        destinationOffset: Int,
+        destinationBytesPerRow: Int,
+        destinationBytesPerImage: Int
+    ) {
+        guard encodingState.isValid else { return }
+        encoder.copy(
+            sourceTexture: source,
+            sourceSlice: sourceSlice,
+            sourceLevel: sourceLevel,
+            sourceOrigin: sourceOrigin,
+            sourceSize: sourceSize,
+            destinationBuffer: destination,
+            destinationOffset: destinationOffset,
+            destinationBytesPerRow: destinationBytesPerRow,
+            destinationBytesPerImage: destinationBytesPerImage
+        )
+        hasUnbarrieredCommands = true
+    }
+
     func endEncoding() {
         guard hasUnbarrieredCommands else { return }
         encoder.barrier(

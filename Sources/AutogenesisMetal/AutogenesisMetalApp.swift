@@ -64,6 +64,8 @@ enum NumiAutomataEntrypoint {
         }
         do {
             switch command {
+            case "capture":
+                try AutomatedVisualCaptureCLI.run(arguments: arguments.dropFirst())
             case "experiment":
                 try HeadlessExperimentCLI.run(arguments: arguments.dropFirst())
             case "causal-experiment":
@@ -93,4 +95,5 @@ enum NumiAutomataEntrypoint {
             application.run()
         }
     }
+
 }

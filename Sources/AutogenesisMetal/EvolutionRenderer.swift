@@ -1,4 +1,6 @@
+import AppKit
 import AutogenesisCore
+import CoreGraphics
 import Foundation
 import Metal
 import MetalKit
@@ -27,6 +29,199 @@ private struct SimulationUniforms {
     var worldScale: Float
     var viewportAspect: Float
     var intervention: SIMD4<Float>
+}
+
+extension EvolutionRenderer {
+    func runHeadlessVisualCapture(
+        configuration: AutomatedVisualCaptureConfiguration
+    ) throws {
+        var captureSettings = settings
+        captureSettings.isRunning = false
+        captureSettings.stepsPerFrame = 1
+        captureSettings.resetToken = UInt64(configuration.seed)
+        captureSettings.cameraCenter = SIMD2<Float>(repeating: 0.500_488_281_25)
+        captureSettings.cameraZoom = configuration.magnification
+        captureSettings.worldScale = 1
+        captureSettings.displayMode = configuration.magnification >= 64 &&
+            configuration.magnification < 160 ? FieldDisplayMode.materials.rawValue :
+            (configuration.magnification >= 18 && configuration.magnification < 64
+                ? FieldDisplayMode.physiology.rawValue :
+                (configuration.magnification >= 6 && configuration.magnification < 18
+                    ? FieldDisplayMode.lineages.rawValue
+                    : FieldDisplayMode.chemistry.rawValue))
+
+        totalSteps = 0
+        quantumStep = 0
+        generation = 0
+        frameSerial = 0
+        viewportAspect = Float(configuration.width) / Float(configuration.height)
+
+        guard let initialization = commandQueue.makeCommandBuffer() else {
+            throw EvolutionRendererError.resourceAllocation(
+                "visual capture initialization"
+            )
+        }
+        initialization.label = "Visual capture seeded initialization"
+        encodeInitialization(into: initialization, settings: captureSettings)
+        initialization.commit()
+        initialization.waitUntilCompleted()
+        if let error = initialization.error { throw error }
+        appliedResetToken = captureSettings.resetToken
+        appliedExpansionToken = captureSettings.expansionToken
+
+        while totalSteps < configuration.steps {
+            guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+                throw EvolutionRendererError.resourceAllocation(
+                    "visual capture simulation submission"
+                )
+            }
+            let stepCount = min(
+                UInt64(Self.maximumInteractiveStepsPerSubmission),
+                configuration.steps - totalSteps
+            )
+            commandBuffer.label = "Visual capture biology"
+            for _ in 0..<stepCount {
+                encodeSimulationStep(into: commandBuffer, settings: captureSettings)
+                totalSteps &+= 1
+                if totalSteps.isMultiple(of: Self.interactiveQuantumStride) {
+                    encodeQuantumStep(into: commandBuffer, settings: captureSettings)
+                }
+            }
+            commandBuffer.commit()
+            commandBuffer.waitUntilCompleted()
+            if let error = commandBuffer.error { throw error }
+        }
+
+        guard let observedAgents = device.makeBuffer(
+                length: agentState.length,
+                options: .storageModeShared
+              ),
+              let observedOccupancy = device.makeBuffer(
+                length: agentOccupancy.length,
+                options: .storageModeShared
+              ) else {
+            throw EvolutionRendererError.resourceAllocation(
+                "visual capture organism focus readback"
+            )
+        }
+        observedAgents.label = "Visual capture organism focus state"
+        observedOccupancy.label = "Visual capture organism focus occupancy"
+        commandQueue.register([observedAgents, observedOccupancy])
+        guard let focusCommandBuffer = commandQueue.makeCommandBuffer(),
+              let focusBlit = focusCommandBuffer.makeBlitCommandEncoder() else {
+            throw EvolutionRendererError.resourceAllocation(
+                "visual capture organism focus submission"
+            )
+        }
+        focusBlit.copy(
+            from: agentState,
+            sourceOffset: 0,
+            to: observedAgents,
+            destinationOffset: 0,
+            size: agentState.length
+        )
+        focusBlit.copy(
+            from: agentOccupancy,
+            sourceOffset: 0,
+            to: observedOccupancy,
+            destinationOffset: 0,
+            size: agentOccupancy.length
+        )
+        focusBlit.endEncoding()
+        focusCommandBuffer.commit()
+        focusCommandBuffer.waitUntilCompleted()
+        if let error = focusCommandBuffer.error { throw error }
+
+        let occupancy = observedOccupancy.contents().bindMemory(
+            to: UInt32.self,
+            capacity: Self.maxAgentCount
+        )
+        let agents = observedAgents.contents().bindMemory(
+            to: AgentState.self,
+            capacity: Self.maxAgentCount
+        )
+        if let focusIndex = (0..<Self.maxAgentCount).filter({ index in
+            occupancy[index] == 1 &&
+                agents[index].position.x.isFinite &&
+                agents[index].position.y.isFinite
+        }).max(by: { left, right in
+            let leftScore = agents[left].biomass * 2 + agents[left].energy
+            let rightScore = agents[right].biomass * 2 + agents[right].energy
+            return leftScore < rightScore
+        }) {
+            captureSettings.cameraCenter = agents[focusIndex].position
+            captureSettings.trackedAgentID = UInt32(focusIndex)
+        }
+
+        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: configuration.width,
+            height: configuration.height,
+            mipmapped: false
+        )
+        textureDescriptor.storageMode = .private
+        textureDescriptor.usage = [.renderTarget]
+        let bytesPerRow = Self.alignUp(configuration.width * 4, alignment: 256)
+        guard let destination = device.makeTexture(descriptor: textureDescriptor),
+              let readback = device.makeBuffer(
+                length: bytesPerRow * configuration.height,
+                options: .storageModeShared
+              ) else {
+            throw EvolutionRendererError.resourceAllocation(
+                "headless visual capture targets"
+            )
+        }
+        destination.label = "Headless final display target"
+        readback.label = "Headless final display readback"
+        commandQueue.register([destination, readback])
+
+        guard let renderCommandBuffer = commandQueue.makeCommandBuffer() else {
+            throw EvolutionRendererError.resourceAllocation(
+                "headless visual capture render submission"
+            )
+        }
+        renderCommandBuffer.label = "Headless visual capture"
+        frameSerial = 1
+        encodeRender(
+            view: nil,
+            destinationTexture: destination,
+            into: renderCommandBuffer,
+            settings: captureSettings
+        )
+        guard let blit = renderCommandBuffer.makeBlitCommandEncoder() else {
+            throw EvolutionRendererError.resourceAllocation(
+                "headless visual capture readback encoder"
+            )
+        }
+        blit.label = "Read back headless display image"
+        blit.copy(
+            from: destination,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(
+                width: configuration.width,
+                height: configuration.height,
+                depth: 1
+            ),
+            to: readback,
+            destinationOffset: 0,
+            destinationBytesPerRow: bytesPerRow,
+            destinationBytesPerImage: 0
+        )
+        blit.endEncoding()
+        renderCommandBuffer.commit()
+        renderCommandBuffer.waitUntilCompleted()
+        if let error = renderCommandBuffer.error { throw error }
+
+        try writeAutomatedCapture(AutomatedFrameCapture(
+            buffer: readback,
+            width: configuration.width,
+            height: configuration.height,
+            bytesPerRow: bytesPerRow,
+            outputURL: configuration.outputURL
+        ))
+    }
 }
 
 private struct HeadlessReadbackBuffers {
@@ -2214,6 +2409,47 @@ private struct PendingMetricObservation: Sendable {
     let resetToken: UInt64
 }
 
+private struct AutomatedFrameCapture: @unchecked Sendable {
+    let buffer: MTLBuffer
+    let width: Int
+    let height: Int
+    let bytesPerRow: Int
+    let outputURL: URL
+}
+
+private func writeAutomatedCapture(_ capture: AutomatedFrameCapture) throws {
+    let byteCount = capture.bytesPerRow * capture.height
+    let data = Data(bytes: capture.buffer.contents(), count: byteCount)
+    guard let provider = CGDataProvider(data: data as CFData),
+          let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let image = CGImage(
+            width: capture.width,
+            height: capture.height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: capture.bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGBitmapInfo(
+                rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue
+            ).union(.byteOrder32Little),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+          ) else {
+        throw EvolutionRendererError.executionFailure(
+            "could not construct the captured display image"
+        )
+    }
+    let representation = NSBitmapImageRep(cgImage: image)
+    guard let png = representation.representation(using: .png, properties: [:]) else {
+        throw EvolutionRendererError.executionFailure(
+            "could not encode the captured display image as PNG"
+        )
+    }
+    try png.write(to: capture.outputURL, options: .atomic)
+}
+
 private struct BrushEvent: Sendable {
     var position: SIMD2<Float>
 }
@@ -3600,7 +3836,12 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             pendingCheckpoint = PendingRecoveryCheckpoint(slot: 0, metadata: metadata)
         }
 
-        encodeRender(view: view, into: commandBuffer, settings: frameSettings)
+        encodeRender(
+            view: view,
+            destinationTexture: nil,
+            into: commandBuffer,
+            settings: frameSettings
+        )
         if let pendingMetricObservation {
             attachMetricObservation(pendingMetricObservation, to: commandBuffer)
         }
@@ -5773,12 +6014,28 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         return true
     }
 
-    private func encodeRender(view: MTKView, into commandBuffer: Metal4CommandBufferContext, settings: RendererSettings) {
-        guard let drawable = view.currentDrawable,
-              commandBuffer.claimPresentation(drawable) else { return }
-        var presentationEncoded = false
+    private func encodeRender(
+        view: MTKView?,
+        destinationTexture: MTLTexture?,
+        into commandBuffer: Metal4CommandBufferContext,
+        settings: RendererSettings
+    ) {
+        let presentsDrawable: Bool
+        let drawableTexture: MTLTexture
+        if let destinationTexture {
+            presentsDrawable = false
+            drawableTexture = destinationTexture
+            commandBuffer.retainResources([destinationTexture])
+        } else {
+            guard let view,
+                  let drawable = view.currentDrawable,
+                  commandBuffer.claimPresentation(drawable) else { return }
+            presentsDrawable = true
+            drawableTexture = drawable.texture
+        }
+        var renderingEncoded = false
         defer {
-            if !presentationEncoded {
+            if presentsDrawable && !renderingEncoded {
                 commandBuffer.cancelPresentation()
             }
         }
@@ -5788,7 +6045,6 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         let cellMeshDrawArguments = renderResources.cellMeshDrawArguments
         let visibleJunctionIndices = renderResources.visibleJunctionIndices
         let junctionDrawArguments = renderResources.junctionDrawArguments
-        let drawableTexture = drawable.texture
         let observationZoom = settings.cameraZoom / max(settings.worldScale, 1)
         let logZoom = log2(max(observationZoom, 1))
         let detailBlend = min(max((logZoom - 3.0) / 7.0, 0), 1)
@@ -6010,8 +6266,10 @@ final class EvolutionRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         )
         compositeEncoder.writeTimestamp(ending: "display composite")
         compositeEncoder.endEncoding()
-        presentationEncoded = true
-        encodePeriodicAgentObservation(into: commandBuffer, settings: settings)
+        renderingEncoded = true
+        if presentsDrawable {
+            encodePeriodicAgentObservation(into: commandBuffer, settings: settings)
+        }
     }
 
     private func bindWorldSurfaceResources(
