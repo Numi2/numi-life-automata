@@ -1274,6 +1274,8 @@ fragment float4 worldSurfaceFragment(
         max(uniforms.cameraZoom, 0.000000001);
     float2 uv = clamp(rawUV, 0.0, 1.0);
     float2 texel = 1.0 / float2(uniforms.width, uniforms.height);
+    float observationZoom = uniforms.cameraZoom /
+        max(uniforms.worldScale, 1.0);
 
     float4 cell = state.sample(fieldSampler, uv, 0);
     float4 chemistry = ecology.sample(fieldSampler, uv, 0);
@@ -1320,15 +1322,20 @@ fragment float4 worldSurfaceFragment(
     float2 substrateDrive = substrateForcing(uv, geology, uniforms.step);
     float localEnvironmentalFrequency = environmentalFrequency(uv, geology);
     float geologicalMechanicalDrive = environmentalMechanicalAmplitude(geology);
-    float grain = visualNoise(uv * float2(uniforms.width, uniforms.height) * 0.84 + float2(11.0, 3.0));
+    float grainDetail = smoothstep(0.75, 3.5, observationZoom);
+    float grain = mix(0.5, visualNoise(
+        uv * float2(uniforms.width, uniforms.height) * 0.84 +
+            float2(11.0, 3.0)
+    ), grainDetail);
     float nutrient = nutrientBed * mix(0.12, 1.0, smoothstep(0.58, 0.88, grain)) *
         mix(0.32, 1.0, substrateDrive.x) * smoothstep(0.004, 0.18, feedstockA);
     float mineral = mineralBed * mix(0.10, 1.0, smoothstep(0.64, 0.91, 1.0 - grain)) *
         mix(0.32, 1.0, substrateDrive.y) * smoothstep(0.004, 0.18, feedstockB);
-    float resourceMicrostructure = visualNoise(
+    float resourceDetail = smoothstep(2.0, 6.0, observationZoom);
+    float resourceMicrostructure = mix(0.5, visualNoise(
         uv * float2(uniforms.width, uniforms.height) * 2.35 +
             float2(41.0, 73.0)
-    );
+    ), resourceDetail);
     nutrient *= mix(
         0.46, 1.0, smoothstep(0.38, 0.82, resourceMicrostructure)
     );
@@ -1441,8 +1448,7 @@ fragment float4 worldSurfaceFragment(
             (1.0 - rock) * 0.14;
     }
 
-    float overviewCalm = 1.0 - smoothstep(3.0, 18.0,
-        uniforms.cameraZoom / max(uniforms.worldScale, 1.0));
+    float overviewCalm = 1.0 - smoothstep(3.0, 18.0, observationZoom);
     float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
     float overviewCompression = 1.0 / (1.0 + luminance * 3.2);
     float compressedLuminance = luminance * overviewCompression;
