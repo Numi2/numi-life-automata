@@ -192,21 +192,6 @@ inline float segmentDistance(float2 point, float2 start, float2 end) {
     return length(point - (start + segment * position));
 }
 
-inline float taperedSegmentMask(
-    float2 point,
-    float2 start,
-    float2 end,
-    float startWidth,
-    float endWidth,
-    float antialiasWidth
-) {
-    float2 segment = end - start;
-    float position = saturate(dot(point - start, segment) / max(dot(segment, segment), 0.000001));
-    float distance = length(point - (start + segment * position));
-    float width = mix(startWidth, endWidth, position);
-    return 1.0 - smoothstep(width - antialiasWidth, width + antialiasWidth, distance);
-}
-
 inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStrength) {
     float2 quantumCell = fract(uv * float(quantumGridSize));
     bool positiveComponent = quantumCell.x < 0.5;
@@ -243,63 +228,64 @@ inline float3 spinorCellVisualization(float2 uv, float4 wave, float currentStren
     float3 componentColor = mix(componentBase, phaseColor, 0.32);
     float radius = length(componentPosition);
     float antialiasWidth = max(fwidth(radius) * 1.25, 0.0015);
-    float componentMask = 1.0 - smoothstep(0.46 - antialiasWidth, 0.46 + antialiasWidth, radius);
-    float componentEdge = 1.0 - smoothstep(antialiasWidth * 0.8, antialiasWidth * 2.6,
-        abs(radius - 0.46));
+    float componentMask = 1.0 - smoothstep(
+        0.445 - antialiasWidth, 0.46 + antialiasWidth, radius
+    );
+    float normalizedRadius = saturate(radius / 0.46);
+    float radialEnvelope = exp2(-5.2 * normalizedRadius * normalizedRadius) *
+        componentMask;
+    float amplitudeCore = exp2(-18.0 * normalizedRadius * normalizedRadius) *
+        componentMask;
+    float componentEdge = (1.0 - smoothstep(
+        antialiasWidth * 0.65, antialiasWidth * 2.0, abs(radius - 0.445)
+    )) * componentMask;
 
     float phasorDistance = abs(componentPosition.x * phasor.y - componentPosition.y * phasor.x);
     float forwardProjection = dot(componentPosition, phasor);
-    float phasorLine = (1.0 - smoothstep(0.008, 0.008 + antialiasWidth * 2.2, phasorDistance)) *
-        smoothstep(-0.03, 0.03, forwardProjection) *
-        (1.0 - smoothstep(0.31, 0.36, forwardProjection));
-    float2 arrowTip = phasor * 0.34;
-    float2 arrowNormal = float2(-phasor.y, phasor.x);
-    float arrowHead = max(
-        taperedSegmentMask(componentPosition, arrowTip, arrowTip - phasor * 0.085 + arrowNormal * 0.060,
-            0.014, 0.004, antialiasWidth),
-        taperedSegmentMask(componentPosition, arrowTip, arrowTip - phasor * 0.085 - arrowNormal * 0.060,
-            0.014, 0.004, antialiasWidth)
-    );
+    float phasorTrace = (1.0 - smoothstep(
+        0.0035, 0.0035 + antialiasWidth * 1.6, phasorDistance
+    )) * smoothstep(0.015, 0.050, forwardProjection) *
+        (1.0 - smoothstep(0.29, 0.35, forwardProjection));
+    float2 radialDirection = componentPosition / max(radius, 0.0001);
+    float phaseFacing = saturate(0.5 + 0.5 * dot(radialDirection, phasor));
+    float phaseArc = componentEdge * smoothstep(0.42, 0.92, phaseFacing);
 
-    float probabilityRadius = 0.10 + componentDensity * 0.24;
-    float probabilityRing = 1.0 - smoothstep(antialiasWidth * 1.2, antialiasWidth * 3.2,
-        abs(radius - probabilityRadius));
+    float probabilityRadius = 0.075 + componentDensity * 0.285;
+    float probabilityRing = (1.0 - smoothstep(
+        antialiasWidth * 0.75, antialiasWidth * 2.2,
+        abs(radius - probabilityRadius)
+    )) * componentMask;
     float latticeDistance = min(min(quantumCell.x, 1.0 - quantumCell.x),
         min(quantumCell.y, 1.0 - quantumCell.y));
     float latticeAA = max(fwidth(latticeDistance) * 1.5, 0.001);
-    float latticeEdge = 1.0 - smoothstep(latticeAA, latticeAA * 3.0, latticeDistance);
-    float componentDivider = 1.0 - smoothstep(latticeAA, latticeAA * 2.8, abs(quantumCell.x - 0.5));
-    float coherenceBridge = (1.0 - smoothstep(0.010, 0.010 + latticeAA * 3.0,
+    float latticeEdge = 1.0 - smoothstep(
+        latticeAA * 0.45, latticeAA * 1.6, latticeDistance
+    );
+    float componentDivider = 1.0 - smoothstep(
+        latticeAA * 0.40, latticeAA * 1.5, abs(quantumCell.x - 0.5)
+    );
+    float coherenceBridge = (1.0 - smoothstep(0.004, 0.004 + latticeAA * 1.8,
         abs(quantumCell.y - 0.5))) *
-        smoothstep(0.19, 0.27, quantumCell.x) *
-        (1.0 - smoothstep(0.73, 0.81, quantumCell.x));
+        smoothstep(0.23, 0.31, quantumCell.x) *
+        (1.0 - smoothstep(0.69, 0.77, quantumCell.x));
 
-    float2 surfaceCoordinate = componentPosition / 0.46;
-    float surfaceZ = sqrt(saturate(1.0 - dot(surfaceCoordinate, surfaceCoordinate)));
-    float3 surfaceNormal = normalize(float3(surfaceCoordinate.x, -surfaceCoordinate.y, surfaceZ));
-    const float3 quantumLight = float3(-0.421, 0.557, 0.716);
-    float wrappedDiffuse = saturate((dot(surfaceNormal, quantumLight) + 0.34) / 1.34);
-    float fresnel = pow(saturate(1.0 - surfaceZ), 3.2);
-    float3 halfVector = normalize(quantumLight + float3(0.0, 0.0, 1.0));
-    float probabilitySpecular = pow(saturate(dot(surfaceNormal, halfVector)), 34.0) *
-        componentDensity;
-    float radialShading = 0.12 + wrappedDiffuse * 0.72 + surfaceZ * 0.08;
-    float3 color = float3(0.0015, 0.003, 0.009);
-    color += componentColor * componentMask * componentDensity * radialShading;
-    color += mix(componentBase, phaseColor, 0.26) * componentMask * fresnel *
-        (0.08 + componentDensity * 0.28);
-    color += float3(0.82, 0.94, 1.0) * componentMask * probabilitySpecular * 0.58;
-    color += componentBase * componentEdge * (0.20 + componentDensity * 0.36 +
-        currentStrength * 0.12);
-    color += mix(componentBase, phaseColor, 0.42) * probabilityRing *
-        componentMask * 0.58;
-    color += mix(float3(0.72, 0.90, 1.0), phaseColor, 0.16) *
-        max(phasorLine, arrowHead) * componentMask *
-        (0.46 + componentDensity * 0.64);
+    float3 color = float3(0.0007, 0.0015, 0.0040);
+    color += componentColor * radialEnvelope * componentDensity *
+        (0.075 + amplitudeCore * 0.21);
+    color += mix(componentBase, phaseColor, 0.48) * amplitudeCore *
+        (0.055 + componentDensity * 0.16);
+    color += mix(componentBase, phaseColor, 0.36) * componentEdge *
+        (0.060 + componentDensity * 0.13 + currentStrength * 0.055);
+    color += mix(componentBase, phaseColor, 0.58) * phaseArc *
+        (0.14 + componentDensity * 0.18);
+    color += mix(componentBase, phaseColor, 0.52) * probabilityRing *
+        (0.12 + componentDensity * 0.20);
+    color += mix(float3(0.56, 0.82, 1.0), phaseColor, 0.28) *
+        phasorTrace * componentMask * (0.18 + componentDensity * 0.24);
     color += mix(float3(0.12, 0.52, 0.96), float3(0.96, 0.28, 0.48), phaseAlignment) *
-        coherenceBridge * localCoherence * (0.42 + currentStrength * 0.46);
-    color += float3(0.08, 0.18, 0.27) * latticeEdge * 0.42;
-    color += float3(0.18, 0.38, 0.50) * componentDivider * 0.26;
+        coherenceBridge * localCoherence * (0.065 + currentStrength * 0.090);
+    color += float3(0.07, 0.17, 0.25) * latticeEdge * 0.080;
+    color += float3(0.12, 0.28, 0.38) * componentDivider * 0.055;
     return color;
 }
 
