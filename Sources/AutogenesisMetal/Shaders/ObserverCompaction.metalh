@@ -224,7 +224,9 @@ kernel void compactVisibleJunctions(
         !all(isfinite(junctionStates[junctionIndex].remodeling))) { return; }
 
     float observationZoom = uniforms.cameraZoom / max(uniforms.worldScale, 1.0);
-    if (observationZoom <= 0.35 || observationZoom >= 64.0 ||
+    // Keep physical junctions compacted through the fragment's 112x-180x fade;
+    // culling them at 64x made a maintained connection disappear in one frame.
+    if (observationZoom <= 0.35 || observationZoom >= 180.0 ||
         (uniforms.trackedAgentID != 0xffffffffu &&
             uniforms.trackedAgentID != owner && observationZoom >= 34.0)) { return; }
     float2 centerA = cellWorldPosition(agents[owner], cells[cellA].position, uniforms);
