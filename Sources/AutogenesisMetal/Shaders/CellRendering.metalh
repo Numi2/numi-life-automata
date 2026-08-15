@@ -1218,6 +1218,19 @@ fragment float4 worldSurfaceFragment(
         mix(0.32, 1.0, substrateDrive.x) * smoothstep(0.004, 0.18, feedstockA);
     float mineral = mineralBed * mix(0.10, 1.0, smoothstep(0.64, 0.91, 1.0 - grain)) *
         mix(0.32, 1.0, substrateDrive.y) * smoothstep(0.004, 0.18, feedstockB);
+    float resourceMicrostructure = visualNoise(
+        uv * float2(uniforms.width, uniforms.height) * 2.35 +
+            float2(41.0, 73.0)
+    );
+    nutrient *= mix(
+        0.46, 1.0, smoothstep(0.38, 0.82, resourceMicrostructure)
+    );
+    mineral *= mix(
+        0.44, 1.0, smoothstep(0.36, 0.80, 1.0 - resourceMicrostructure)
+    );
+    float resourceEdge = saturate(
+        (fwidth(nutrient) + fwidth(mineral)) * 7.5
+    );
     float hazardPulse = 0.68 + 0.32 * sin(float(uniforms.step) * 0.016 +
         (uv.x * 13.0 - uv.y * 9.0) * M_PI_F);
     float fissure = 1.0 - smoothstep(0.025, 0.12,
@@ -1293,8 +1306,12 @@ fragment float4 worldSurfaceFragment(
         float rockStrata = 0.72 + 0.28 * sin((geology.w * 11.0 + fineTerrain * 2.0) * M_PI_F);
         color += float3(0.014, 0.019, 0.023) * rock * rockLight * rockStrata;
         color += float3(0.10, 0.14, 0.15) * rockRim * (0.08 + rockLight * 0.12);
-        color += float3(0.02, 0.82, 0.48) * nutrient * (1.0 - rock) * 0.12;
-        color += float3(0.96, 0.52, 0.025) * mineral * (1.0 - rock) * 0.11;
+        color += float3(0.02, 0.82, 0.48) * nutrient * (1.0 - rock) * 0.078;
+        color += float3(0.96, 0.52, 0.025) * mineral * (1.0 - rock) * 0.072;
+        color += mix(
+            float3(0.08, 0.72, 0.52), float3(1.0, 0.56, 0.08),
+            mineral / max(nutrient + mineral, 0.0001)
+        ) * resourceEdge * (1.0 - rock) * 0.055;
         color += mix(float3(0.02, 0.42, 0.92), float3(0.86, 0.06, 0.66),
             saturate(0.5 + atan2(localMechanical.w, localMechanical.z) / (2.0 * M_PI_F))) *
             vibration * (1.0 - rock) * 0.050;
