@@ -1080,9 +1080,9 @@ inline float3 waveSurfaceColor(
     );
     float3 color = float3(0.0015, 0.0030, 0.0065);
     color += mix(phaseColor, spinColor, 0.34) * density *
-        (0.42 + coherence * 0.58);
+        (0.075 + coherence * 0.16);
     color += float3(0.72, 0.94, 1.0) * density *
-        (densityEdge * 0.28 + phaseShear * coherence * 0.12);
+        (densityEdge * 0.42 + phaseShear * coherence * 0.20);
 
     // This is the exact prepared coupling consumed by the spinor update. The display
     // samples it directly instead of reconstructing biological terms per pixel.
@@ -1097,9 +1097,9 @@ inline float3 waveSurfaceColor(
     );
     color *= 1.0 - potentialRadiance * 0.08;
     color += couplingColor * (
-        potentialRadiance * (0.12 + coherence * 0.08) + couplingEdge * 0.24
+        potentialRadiance * (0.045 + coherence * 0.055) + couplingEdge * 0.30
     );
-    return max(color * 1.10, 0.0);
+    return max(color * 0.92, 0.0);
 }
 
 inline float3 spinorSurfaceColor(
@@ -1133,7 +1133,7 @@ fragment float4 scientificContinuumFragment(
     float scientificVisibility = smoothstep(log2(44.0), log2(96.0), logZoom);
     if (scientificVisibility <= 0.001) { discard_fragment(); }
     float waveDetail = smoothstep(log2(88.0), log2(260.0), logZoom);
-    float spinorDetail = smoothstep(log2(150.0), log2(400.0), logZoom);
+    float spinorDetail = smoothstep(log2(260.0), log2(520.0), logZoom);
 
     float3 wave = waveSurfaceColor(input, quantum, coupling, uniforms);
     // At molecular scale the quantum field first appears as quiet context. Its
