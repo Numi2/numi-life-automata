@@ -427,10 +427,18 @@ fragment float4 cellFragment(
     float tractionMagnitude = saturate(length(input.tissueForce.xy) * 11000.0);
     float2 tractionDirection = length(input.tissueForce.xy) > 0.000001
         ? normalize(input.tissueForce.xy) : boundaryNormal;
+    float tractionLongitudinal = dot(p, tractionDirection);
+    float tractionLateral = abs(dot(
+        p, float2(-tractionDirection.y, tractionDirection.x)
+    ));
+    float tractionProgress = saturate((tractionLongitudinal - 0.08) / 0.74);
+    float tractionWidth = mix(0.034, 0.014, tractionProgress);
+    float tractionEndpointFade = smoothstep(
+        0.075, 0.15, tractionLongitudinal
+    ) * (1.0 - smoothstep(0.74, 0.83, tractionLongitudinal));
     float tractionTrack = (1.0 - smoothstep(
-        0.025, 0.075,
-        segmentDistance(p, tractionDirection * 0.08, tractionDirection * 0.82)
-    )) * cytoplasm * tractionMagnitude;
+        tractionWidth, tractionWidth + aa * 0.85, tractionLateral
+    )) * tractionEndpointFade * cytoplasm * tractionMagnitude;
 
     float3 color = mix(lineage, roleColor, 0.46) * cytoplasm * (0.24 + atp * 0.48);
     color += mix(lineage, voltageColor, 0.58) * visibleMembrane *
@@ -441,7 +449,7 @@ fragment float4 cellFragment(
     color += float3(0.18, 0.86, 1.0) * causalInteriorBoundary * 0.72;
     color += float3(0.02, 0.88, 1.0) * signalFront * calciumSignal * 0.92;
     color += float3(0.98, 0.08, 0.66) * causalInterior * erkSignal * 0.34;
-    color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.82;
+    color += float3(0.02, 1.0, 0.58) * tractionTrack * 0.26;
     color += float3(0.08, 1.0, 0.62) * repairFront * 0.92;
     color += float3(0.04, 0.58, 1.0) * repairBoundary * 0.86;
     color += float3(1.0, 0.055, 0.018) * woundArc * 0.72;
