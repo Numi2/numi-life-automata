@@ -1203,6 +1203,11 @@ inline float3 waveSurfaceColor(
     float phaseShear = saturate(
         length(dfdx(phaseDirection)) + length(dfdy(phaseDirection))
     );
+    // Phase direction is not an observable where the prepared probability is
+    // effectively empty. Gate its screen-space shear by resolved density so a
+    // low-amplitude carrier cannot turn into a repeating diagonal texture
+    // during the molecular-to-field transition.
+    float phaseConfidence = smoothstep(0.12, 0.46, density);
     float3 spinColor = mix(
         float3(1.0, 0.22, 0.025), float3(0.02, 0.82, 1.0),
         polarization * 0.5 + 0.5
@@ -1211,7 +1216,7 @@ inline float3 waveSurfaceColor(
     color += mix(phaseColor, spinColor, 0.34) * density *
         (0.075 + coherence * 0.16);
     color += float3(0.72, 0.94, 1.0) * density *
-        (densityEdge * 0.42 + phaseShear * coherence * 0.20);
+        (densityEdge * 0.42 + phaseShear * coherence * phaseConfidence * 0.20);
 
     // This is the exact prepared coupling consumed by the spinor update. The display
     // samples it directly instead of reconstructing biological terms per pixel.
